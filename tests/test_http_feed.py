@@ -61,6 +61,7 @@ class HttpFeedTest(unittest.TestCase):
         self.strategy.HTTP_PORT = 0
         self.context = FakeContext()
         self.query_calls = []
+        self.sector_list_calls = []
 
         def fake_get_trade_detail_data(account_id, account_type, detail_type):
             self.query_calls.append(
@@ -74,6 +75,12 @@ class HttpFeedTest(unittest.TestCase):
             return [FakeAccount()]
 
         self.strategy.get_trade_detail_data = fake_get_trade_detail_data
+
+        def fake_get_sector_list(node):
+            self.sector_list_calls.append((threading.get_ident(), node))
+            return [["沪深300", "上证50"], ["行业", "概念"]]
+
+        self.strategy.get_sector_list = fake_get_sector_list
         self.strategy.init(self.context)
         self.state = self.strategy._FEED_STATE
 
@@ -177,6 +184,75 @@ class HttpFeedTest(unittest.TestCase):
             reset_context.sector_calls,
         )
         self.assertEqual([], self.context.sector_calls)
+
+    def test_get_sector_list_defaults_to_top_level_and_runs_in_schedule(self):
+        client_thread, response = self.start_request("/get_sector_list")
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_sector_list",
+                "params": {},
+            },
+            queued_job.request,
+        )
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(FakeContext())
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [["沪深300", "上证50"], ["行业", "概念"]],
+            response["body"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "")],
+            self.sector_list_calls,
+        )
+
+    def test_get_sector_list_passes_requested_node(self):
+        client_thread, response = self.start_request(
+            "/get_sector_list?" + urlencode({"node": "我的"})
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [(threading.get_ident(), "我的")],
+            self.sector_list_calls,
+        )
+
+    def test_get_sector_list_rejects_non_string_node(self):
+        client_thread, response = self.start_request(
+            "/get_sector_list",
+            {"node": 123},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(400, response["status"])
+        self.assertEqual("INVALID_PARAMS", response["body"]["error"]["code"])
+        self.assertEqual([], self.sector_list_calls)
+
+    def test_get_sector_list_rejects_invalid_qmt_result_shape(self):
+        self.strategy.get_sector_list = lambda node: ["沪深300"]
+        client_thread, response = self.start_request("/get_sector_list")
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
 
     def test_sector_realtime_param_is_converted_to_millisecond_timestamp(self):
         client_thread, response = self.start_request(

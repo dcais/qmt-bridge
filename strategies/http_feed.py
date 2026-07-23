@@ -289,6 +289,45 @@ def handle_get_stock_list_in_sector(ContextInfo, params):
     return stocks
 
 
+def handle_get_sector_list(ContextInfo, params):
+    allowed_params = {"node"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported get_sector_list params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    node = params.get("node", "")
+    if not isinstance(node, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "node must be a string",
+        )
+
+    info_list = get_sector_list(node)
+    if (
+        not isinstance(info_list, list)
+        or len(info_list) != 2
+        or not all(isinstance(items, list) for items in info_list)
+        or not all(
+            isinstance(name, str)
+            for items in info_list
+            for name in items
+        )
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_sector_list did not return [sector_names, child_nodes]",
+        )
+    return info_list
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -299,6 +338,8 @@ def dispatch_request(ContextInfo, request):
         return handle_account(ContextInfo, params)
     if method == "get_stock_list_in_sector":
         return handle_get_stock_list_in_sector(ContextInfo, params)
+    if method == "get_sector_list":
+        return handle_get_sector_list(ContextInfo, params)
 
     raise FeedError(
         404,

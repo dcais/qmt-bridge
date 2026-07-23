@@ -28,7 +28,7 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
-`get_stock_list_in_sector` 分支。
+`get_stock_list_in_sector`、`get_sector_list` 分支。
 
 ## Account demo
 
@@ -111,6 +111,40 @@ Content-Type: application/json
 `sectorname` 必须是客户端左侧板块列表中的板块名，包括自定义板块。
 `realtime` 省略时调用单参数形式。
 
+## 板块目录
+
+查询顶层板块目录：
+
+```powershell
+curl.exe "http://127.0.0.1:1688/get_sector_list"
+```
+
+等价于在 QMT 策略线程中调用：
+
+```python
+get_sector_list("")
+```
+
+查询指定目录节点：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "node=我的" `
+  "http://127.0.0.1:1688/get_sector_list"
+```
+
+返回数组的第一项是当前节点下的板块名，第二项是子目录节点名：
+
+```json
+[
+  ["我的自选", "龙头", "卖出篮子"],
+  ["新建分类1"]
+]
+```
+
+`node` 必须是字符串；省略时默认为空字符串，即顶层目录。接口直接返回
+QMT `get_sector_list(node)` 的二维数组结果。
+
 ## QMT 线程边界
 
 1. HTTP 请求在线程化 HTTP 服务中接收。
@@ -120,8 +154,9 @@ Content-Type: application/json
 5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
-QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前 `account`
-分支仍会同步执行一次 `get_trade_detail_data`；这个 API 调用必须保持极短。
+QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
+同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
+`get_stock_list_in_sector` 和 `get_sector_list`；这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -152,6 +187,8 @@ def dispatch_request(ContextInfo, request):
         return handle_account(ContextInfo, params)
     if method == "get_stock_list_in_sector":
         return handle_get_stock_list_in_sector(ContextInfo, params)
+    if method == "get_sector_list":
+        return handle_get_sector_list(ContextInfo, params)
 
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```
