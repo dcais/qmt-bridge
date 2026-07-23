@@ -20,6 +20,21 @@ REQUEST_TIMEOUT_SECONDS = 10
 MAX_JOBS_PER_TICK = 10
 SCHEDULE_BUDGET_MILLISECONDS = 50
 SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
+MAX_TRADING_DATES_COUNT = 10000
+TRADING_DATE_PERIODS = {
+    "1d",
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "1w",
+    "1mon",
+    "1q",
+    "1hy",
+    "1y",
+}
 
 _FEED_STATE = None
 _FEED_TIMER_ID = None
@@ -328,6 +343,114 @@ def handle_get_sector_list(ContextInfo, params):
     return info_list
 
 
+def handle_get_trading_dates(ContextInfo, params):
+    allowed_params = {
+        "stockcode",
+        "start_date",
+        "end_date",
+        "count",
+        "period",
+    }
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported get_trading_dates params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stockcode = params.get("stockcode", "")
+    if not isinstance(stockcode, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must be a string",
+        )
+    stockcode = stockcode.strip()
+
+    dates = {}
+    for name in ("start_date", "end_date"):
+        value = params.get(name, "")
+        if not isinstance(value, str):
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "{0} must be a string".format(name),
+            )
+        value = value.strip()
+        if value and (
+            len(value) not in (8, 14)
+            or not all("0" <= char <= "9" for char in value)
+        ):
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "{0} must use YYYYMMDD or YYYYMMDDHHMMSS".format(name),
+            )
+        dates[name] = value
+
+    count = params.get("count")
+    if isinstance(count, bool):
+        count = None
+    elif isinstance(count, int):
+        pass
+    elif isinstance(count, str):
+        count_text = count.strip()
+        if (
+            not count_text
+            or len(count_text) > len(str(MAX_TRADING_DATES_COUNT))
+            or not all("0" <= char <= "9" for char in count_text)
+        ):
+            count = None
+        else:
+            count = int(count_text)
+    else:
+        count = None
+    if count is None or not 1 <= count <= MAX_TRADING_DATES_COUNT:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "count must be an integer between 1 and {0}".format(
+                MAX_TRADING_DATES_COUNT
+            ),
+        )
+
+    period = params.get("period", "1d")
+    if not isinstance(period, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "period must be a string",
+        )
+    period = period.strip()
+    if period not in TRADING_DATE_PERIODS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported trading date period: {0}".format(period),
+        )
+
+    trading_dates = ContextInfo.get_trading_dates(
+        stockcode,
+        dates["start_date"],
+        dates["end_date"],
+        count,
+        period,
+    )
+    if (
+        not isinstance(trading_dates, list)
+        or not all(isinstance(value, str) for value in trading_dates)
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_trading_dates did not return a string list",
+        )
+    return trading_dates
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -340,6 +463,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_stock_list_in_sector(ContextInfo, params)
     if method == "get_sector_list":
         return handle_get_sector_list(ContextInfo, params)
+    if method == "get_trading_dates":
+        return handle_get_trading_dates(ContextInfo, params)
 
     raise FeedError(
         404,

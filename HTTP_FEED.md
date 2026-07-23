@@ -28,7 +28,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
-`get_stock_list_in_sector`、`get_sector_list` 分支。
+`get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
+分支。
 
 ## Account demo
 
@@ -145,6 +146,52 @@ curl.exe --get `
 `node` 必须是字符串；省略时默认为空字符串，即顶层目录。接口直接返回
 QMT `get_sector_list(node)` 的二维数组结果。
 
+## 交易日
+
+查询指定股票最近 30 个日线交易日：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=600000.SH" `
+  --data-urlencode "count=30" `
+  --data-urlencode "period=1d" `
+  "http://127.0.0.1:1688/get_trading_dates"
+```
+
+指定日期范围：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=600000.SH" `
+  --data-urlencode "start_date=20260701" `
+  --data-urlencode "end_date=20260731" `
+  --data-urlencode "count=30" `
+  --data-urlencode "period=1d" `
+  "http://127.0.0.1:1688/get_trading_dates"
+```
+
+返回值为字符串数组：
+
+```json
+[
+  "20260701",
+  "20260702",
+  "20260703"
+]
+```
+
+参数与 QMT `ContextInfo.get_trading_dates` 保持一致：
+
+- `count`：必填，整数，范围为 1 到 10000。
+- `stockcode`：可选，默认空字符串，表示当前图代码。
+- `start_date`、`end_date`：可选，格式为 `YYYYMMDD` 或
+  `YYYYMMDDHHMMSS`。
+- `period`：可选，默认 `1d`；支持 `1d`、`1m`、`3m`、`5m`、
+  `15m`、`30m`、`1h`、`1w`、`1mon`、`1q`、`1hy`、`1y`。
+
+日线返回 `YYYYMMDD`；其他周期返回 `YYYYMMDDHHMMSS`。FEED 对
+`count` 设置上限，避免单个 HTTP 请求在 QMT 策略线程中产生无界工作量。
+
 ## QMT 线程边界
 
 1. HTTP 请求在线程化 HTTP 服务中接收。
@@ -156,7 +203,8 @@ QMT `get_sector_list(node)` 的二维数组结果。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
-`get_stock_list_in_sector` 和 `get_sector_list`；这些调用必须保持极短。
+`get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
+这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -189,6 +237,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_stock_list_in_sector(ContextInfo, params)
     if method == "get_sector_list":
         return handle_get_sector_list(ContextInfo, params)
+    if method == "get_trading_dates":
+        return handle_get_trading_dates(ContextInfo, params)
 
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```

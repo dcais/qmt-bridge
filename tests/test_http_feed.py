@@ -38,6 +38,7 @@ class FakeContext:
         self.timer_id = "timer-1"
         self.cancelled_timer_id = None
         self.sector_calls = []
+        self.trading_dates_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -53,6 +54,10 @@ class FakeContext:
     def get_stock_list_in_sector(self, *args):
         self.sector_calls.append((threading.get_ident(),) + args)
         return ["600000.SH", "000001.SZ"]
+
+    def get_trading_dates(self, *args):
+        self.trading_dates_calls.append((threading.get_ident(),) + args)
+        return ["20260701", "20260702", "20260703"]
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -243,6 +248,145 @@ class HttpFeedTest(unittest.TestCase):
     def test_get_sector_list_rejects_invalid_qmt_result_shape(self):
         self.strategy.get_sector_list = lambda node: ["沪深300"]
         client_thread, response = self.start_request("/get_sector_list")
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_trading_dates_uses_current_schedule_context(self):
+        query = urlencode(
+            {
+                "stockcode": "600000.SH",
+                "start_date": "20260701",
+                "end_date": "20260731",
+                "count": "10",
+                "period": "1d",
+            }
+        )
+        client_thread, response = self.start_request(
+            "/get_trading_dates?" + query
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_trading_dates",
+                "params": {
+                    "stockcode": "600000.SH",
+                    "start_date": "20260701",
+                    "end_date": "20260731",
+                    "count": "10",
+                    "period": "1d",
+                },
+            },
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            ["20260701", "20260702", "20260703"],
+            response["body"],
+        )
+        self.assertEqual(
+            [
+                (
+                    schedule_thread_id,
+                    "600000.SH",
+                    "20260701",
+                    "20260731",
+                    10,
+                    "1d",
+                )
+            ],
+            reset_context.trading_dates_calls,
+        )
+        self.assertEqual([], self.context.trading_dates_calls)
+
+    def test_get_trading_dates_applies_official_defaults(self):
+        client_thread, response = self.start_request(
+            "/get_trading_dates",
+            {"count": 3},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [(threading.get_ident(), "", "", "", 3, "1d")],
+            self.context.trading_dates_calls,
+        )
+
+    def test_get_trading_dates_requires_positive_integer_count(self):
+        for count in (
+            None,
+            0,
+            -1,
+            10001,
+            True,
+            1.5,
+            "1.5",
+            "²",
+            "9" * 5000,
+        ):
+            body = {} if count is None else {"count": count}
+            client_thread, response = self.start_request(
+                "/get_trading_dates",
+                body,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.trading_dates_calls)
+
+    def test_get_trading_dates_rejects_invalid_date_or_period(self):
+        invalid_params = (
+            {"count": 3, "start_date": "2026-07-01"},
+            {"count": 3, "end_date": "202607"},
+            {"count": 3, "period": "2m"},
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_trading_dates",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.trading_dates_calls)
+
+    def test_get_trading_dates_rejects_invalid_qmt_result(self):
+        self.context.get_trading_dates = lambda *args: [20260701]
+        client_thread, response = self.start_request(
+            "/get_trading_dates",
+            {"count": 1},
+        )
         self.wait_for_queued_job()
 
         self.context.callback(self.context)
