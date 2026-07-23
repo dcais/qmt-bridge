@@ -2,6 +2,7 @@
 
 import datetime as dt
 import json
+import math
 import queue
 import threading
 import time
@@ -22,6 +23,12 @@ SCHEDULE_BUDGET_MILLISECONDS = 50
 SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
 MAX_TRADING_DATES_COUNT = 10000
 MAX_STOCKCODE_LENGTH = 64
+MAX_FINANCIAL_FIELDS = 16
+MAX_FINANCIAL_STOCKS = 20
+MAX_FINANCIAL_CELLS = 20000
+MAX_FINANCIAL_NAME_LENGTH = 128
+MAX_FINANCIAL_BARPOS = 10000000
+FINANCIAL_REPORT_TYPES = {"announce_time", "report_time"}
 TRADING_DATE_PERIODS = {
     "1d",
     "1m",
@@ -213,6 +220,206 @@ def account_to_dict(account):
                 "failed to read account field {0}: {1}".format(name, exc)
             )
     return data
+
+
+def normalize_stockcode(value):
+    if not isinstance(value, str):
+        return None
+    stockcode = value.strip()
+    if (
+        not stockcode
+        or len(stockcode) > MAX_STOCKCODE_LENGTH
+        or stockcode.count(".") != 1
+        or any(not part for part in stockcode.split("."))
+        or any(
+            char.isspace() or not char.isprintable()
+            for char in stockcode
+        )
+    ):
+        return None
+    return stockcode
+
+
+def normalize_financial_name(value, name):
+    if not isinstance(value, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a string".format(name),
+        )
+    value = value.strip()
+    if (
+        not value
+        or len(value) > MAX_FINANCIAL_NAME_LENGTH
+        or any(
+            char.isspace() or not char.isprintable()
+            for char in value
+        )
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} contains invalid characters".format(name),
+        )
+    return value
+
+
+def normalize_financial_list(value, name, max_size, stockcodes=False):
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = None
+    if not values or len(values) > max_size:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must contain between 1 and {1} strings".format(
+                name,
+                max_size,
+            ),
+        )
+
+    normalized = []
+    for item in values:
+        if stockcodes:
+            item = normalize_stockcode(item)
+            if item is None:
+                raise FeedError(
+                    400,
+                    "INVALID_PARAMS",
+                    "{0} must contain stock.market values".format(name),
+                )
+        else:
+            item = normalize_financial_name(item, name)
+        normalized.append(item)
+    return normalized
+
+
+def normalize_financial_date(value, name):
+    if (
+        not isinstance(value, str)
+        or len(value) != 8
+        or not all("0" <= char <= "9" for char in value)
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must use YYYYMMDD".format(name),
+        )
+    try:
+        parsed = dt.datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a valid date".format(name),
+        )
+    return value, parsed
+
+
+def normalize_financial_report_type(value, default):
+    report_type = default if value is None else value
+    if not isinstance(report_type, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "report_type must be a string",
+        )
+    report_type = report_type.strip()
+    if report_type not in FINANCIAL_REPORT_TYPES:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "report_type must be announce_time or report_time",
+        )
+    return report_type
+
+
+def normalize_financial_barpos(value):
+    if isinstance(value, bool):
+        barpos = None
+    elif isinstance(value, int):
+        barpos = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if (
+            not text
+            or len(text) > len(str(MAX_FINANCIAL_BARPOS))
+            or not all("0" <= char <= "9" for char in text)
+        ):
+            barpos = None
+        else:
+            barpos = int(text)
+    else:
+        barpos = None
+    if barpos is None or not 0 <= barpos <= MAX_FINANCIAL_BARPOS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "barpos must be an integer between 0 and {0}".format(
+                MAX_FINANCIAL_BARPOS
+            ),
+        )
+    return barpos
+
+
+def financial_json_value(value):
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [financial_json_value(item) for item in value]
+
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return financial_json_value(item_method())
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def financial_axis_to_json(axis):
+    return [financial_json_value(value) for value in list(axis)]
+
+
+def financial_table_to_json(result):
+    ndim = getattr(result, "ndim", None)
+    try:
+        data = financial_json_value(result.values.tolist())
+        if ndim == 1:
+            return {
+                "type": "series",
+                "index": financial_axis_to_json(result.index),
+                "data": data,
+            }
+        if ndim == 2:
+            return {
+                "type": "dataframe",
+                "index": financial_axis_to_json(result.index),
+                "columns": financial_axis_to_json(result.columns),
+                "data": data,
+            }
+        if ndim == 3:
+            return {
+                "type": "panel",
+                "items": financial_axis_to_json(result.items),
+                "major_axis": financial_axis_to_json(result.major_axis),
+                "minor_axis": financial_axis_to_json(result.minor_axis),
+                "data": data,
+            }
+    except (AttributeError, TypeError, ValueError):
+        pass
+    raise FeedError(
+        500,
+        "INVALID_QMT_RESULT",
+        "get_financial_data returned an unsupported table result",
+    )
 
 
 def handle_account(ContextInfo, params):
@@ -464,24 +671,8 @@ def handle_get_instrument_detail(ContextInfo, params):
             ),
         )
 
-    stockcode = params.get("stockcode")
-    if not isinstance(stockcode, str):
-        raise FeedError(
-            400,
-            "INVALID_PARAMS",
-            "stockcode must use stock.market format",
-        )
-    stockcode = stockcode.strip()
-    if (
-        not stockcode
-        or len(stockcode) > MAX_STOCKCODE_LENGTH
-        or stockcode.count(".") != 1
-        or any(not part for part in stockcode.split("."))
-        or any(
-            char.isspace() or not char.isprintable()
-            for char in stockcode
-        )
-    ):
+    stockcode = normalize_stockcode(params.get("stockcode"))
+    if stockcode is None:
         raise FeedError(
             400,
             "INVALID_PARAMS",
@@ -523,6 +714,160 @@ def handle_get_instrument_detail(ContextInfo, params):
     return detail
 
 
+def handle_get_financial_data_range(ContextInfo, params):
+    allowed_params = {
+        "mode",
+        "fieldList",
+        "stockList",
+        "startDate",
+        "endDate",
+        "report_type",
+    }
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported financial range params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    fields = normalize_financial_list(
+        params.get("fieldList"),
+        "fieldList",
+        MAX_FINANCIAL_FIELDS,
+    )
+    stocks = normalize_financial_list(
+        params.get("stockList"),
+        "stockList",
+        MAX_FINANCIAL_STOCKS,
+        stockcodes=True,
+    )
+    start_date, start_value = normalize_financial_date(
+        params.get("startDate"),
+        "startDate",
+    )
+    end_date, end_value = normalize_financial_date(
+        params.get("endDate"),
+        "endDate",
+    )
+    if start_value > end_value:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "startDate must not be after endDate",
+        )
+
+    calendar_days = (end_value - start_value).days + 1
+    estimated_cells = calendar_days * len(fields) * len(stocks)
+    if estimated_cells > MAX_FINANCIAL_CELLS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "financial range exceeds {0} estimated cells".format(
+                MAX_FINANCIAL_CELLS
+            ),
+        )
+
+    report_type = normalize_financial_report_type(
+        params.get("report_type"),
+        "announce_time",
+    )
+    result = ContextInfo.get_financial_data(
+        fields,
+        stocks,
+        start_date,
+        end_date,
+        report_type,
+    )
+    return financial_table_to_json(result)
+
+
+def handle_get_financial_data_bar(ContextInfo, params):
+    allowed_params = {
+        "mode",
+        "tabname",
+        "colname",
+        "market",
+        "code",
+        "barpos",
+        "report_type",
+    }
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported financial bar params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    tabname = normalize_financial_name(params.get("tabname"), "tabname")
+    colname = normalize_financial_name(params.get("colname"), "colname")
+    market = normalize_financial_name(params.get("market"), "market")
+    code = normalize_financial_name(params.get("code"), "code")
+    barpos = normalize_financial_barpos(params.get("barpos"))
+
+    if "report_type" in params:
+        report_type = normalize_financial_report_type(
+            params.get("report_type"),
+            "report_time",
+        )
+        result = ContextInfo.get_financial_data(
+            tabname,
+            colname,
+            market,
+            code,
+            barpos,
+            report_type=report_type,
+        )
+    else:
+        result = ContextInfo.get_financial_data(
+            tabname,
+            colname,
+            market,
+            code,
+            barpos,
+        )
+
+    result = financial_json_value(result)
+    if (
+        result is not None
+        and (
+            isinstance(result, bool)
+            or not isinstance(result, (int, float))
+        )
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_financial_data bar mode did not return a number",
+        )
+    return result
+
+
+def handle_get_financial_data(ContextInfo, params):
+    mode = params.get("mode", "range")
+    if not isinstance(mode, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "financial mode must be range or bar",
+        )
+    mode = mode.strip().lower()
+    if mode == "range":
+        return handle_get_financial_data_range(ContextInfo, params)
+    if mode == "bar":
+        return handle_get_financial_data_bar(ContextInfo, params)
+    raise FeedError(
+        400,
+        "INVALID_PARAMS",
+        "financial mode must be range or bar",
+    )
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -539,6 +884,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_financial_data":
+        return handle_get_financial_data(ContextInfo, params)
 
     raise FeedError(
         404,

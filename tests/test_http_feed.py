@@ -31,6 +31,41 @@ class BrokenAccount:
         raise RuntimeError("broken field")
 
 
+class FakeValues:
+    def __init__(self, values):
+        self.values = values
+
+    def tolist(self):
+        return self.values
+
+
+class FakeFinancialFrame:
+    ndim = 2
+
+    def __init__(self):
+        self.index = ["20260701", "20260702"]
+        self.columns = ["fix_assets"]
+        self.values = FakeValues([[100.5], [float("nan")]])
+
+
+class FakeFinancialSeries:
+    ndim = 1
+
+    def __init__(self):
+        self.index = ["fix_assets", "total_assets"]
+        self.values = FakeValues([100.5, float("inf")])
+
+
+class FakeFinancialPanel:
+    ndim = 3
+
+    def __init__(self):
+        self.items = ["600000.SH", "000001.SZ"]
+        self.major_axis = ["20260701"]
+        self.minor_axis = ["fix_assets"]
+        self.values = FakeValues([[[100.5]], [[200.5]]])
+
+
 class FakeContext:
     def __init__(self):
         self.account_id = None
@@ -40,6 +75,8 @@ class FakeContext:
         self.sector_calls = []
         self.trading_dates_calls = []
         self.instrument_detail_calls = []
+        self.financial_data_calls = []
+        self.financial_data_keyword_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -67,6 +104,13 @@ class FakeContext:
             "InstrumentID": "600000",
             "InstrumentName": "浦发银行",
         }
+
+    def get_financial_data(self, *args, **kwargs):
+        self.financial_data_calls.append((threading.get_ident(),) + args)
+        self.financial_data_keyword_calls.append(kwargs)
+        if isinstance(args[0], list):
+            return FakeFinancialFrame()
+        return 42758000000.0
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -518,6 +562,281 @@ class HttpFeedTest(unittest.TestCase):
         client_thread, response = self.start_request(
             "/get_instrument_detail",
             {"stockcode": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_financial_data_range_uses_current_schedule_context(self):
+        body = {
+            "mode": "range",
+            "fieldList": ["ASHAREBALANCESHEET.fix_assets"],
+            "stockList": ["600000.SH"],
+            "startDate": "20260701",
+            "endDate": "20260702",
+            "report_type": "announce_time",
+        }
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            body,
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {"method": "get_financial_data", "params": body},
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "type": "dataframe",
+                "index": ["20260701", "20260702"],
+                "columns": ["fix_assets"],
+                "data": [[100.5], [None]],
+            },
+            response["body"],
+        )
+        self.assertEqual(
+            [
+                (
+                    schedule_thread_id,
+                    ["ASHAREBALANCESHEET.fix_assets"],
+                    ["600000.SH"],
+                    "20260701",
+                    "20260702",
+                    "announce_time",
+                )
+            ],
+            reset_context.financial_data_calls,
+        )
+        self.assertEqual([], self.context.financial_data_calls)
+
+    def test_get_financial_data_bar_mode_returns_scalar(self):
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            {
+                "mode": "bar",
+                "tabname": "ASHAREBALANCESHEET",
+                "colname": "fix_assets",
+                "market": "SH",
+                "code": "600000",
+                "barpos": "12",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(42758000000.0, response["body"])
+        self.assertEqual(
+            [
+                (
+                    threading.get_ident(),
+                    "ASHAREBALANCESHEET",
+                    "fix_assets",
+                    "SH",
+                    "600000",
+                    12,
+                )
+            ],
+            self.context.financial_data_calls,
+        )
+        self.assertEqual([{}], self.context.financial_data_keyword_calls)
+
+    def test_get_financial_data_bar_report_type_uses_keyword(self):
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            {
+                "mode": "bar",
+                "tabname": "ASHAREBALANCESHEET",
+                "colname": "fix_assets",
+                "market": "SH",
+                "code": "600000",
+                "barpos": 12,
+                "report_type": "announce_time",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [
+                (
+                    threading.get_ident(),
+                    "ASHAREBALANCESHEET",
+                    "fix_assets",
+                    "SH",
+                    "600000",
+                    12,
+                )
+            ],
+            self.context.financial_data_calls,
+        )
+        self.assertEqual(
+            [{"report_type": "announce_time"}],
+            self.context.financial_data_keyword_calls,
+        )
+
+    def test_get_financial_data_serializes_panel_axes(self):
+        self.context.get_financial_data = lambda *args: FakeFinancialPanel()
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            {
+                "mode": "range",
+                "fieldList": ["ASHAREBALANCESHEET.fix_assets"],
+                "stockList": ["600000.SH", "000001.SZ"],
+                "startDate": "20260701",
+                "endDate": "20260701",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "type": "panel",
+                "items": ["600000.SH", "000001.SZ"],
+                "major_axis": ["20260701"],
+                "minor_axis": ["fix_assets"],
+                "data": [[[100.5]], [[200.5]]],
+            },
+            response["body"],
+        )
+
+    def test_get_financial_data_serializes_series(self):
+        self.context.get_financial_data = lambda *args: FakeFinancialSeries()
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            {
+                "mode": "range",
+                "fieldList": [
+                    "ASHAREBALANCESHEET.fix_assets",
+                    "ASHAREBALANCESHEET.total_assets",
+                ],
+                "stockList": ["600000.SH"],
+                "startDate": "20260701",
+                "endDate": "20260701",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "type": "series",
+                "index": ["fix_assets", "total_assets"],
+                "data": [100.5, None],
+            },
+            response["body"],
+        )
+
+    def test_get_financial_data_rejects_invalid_range_params(self):
+        valid = {
+            "mode": "range",
+            "fieldList": ["ASHAREBALANCESHEET.fix_assets"],
+            "stockList": ["600000.SH"],
+            "startDate": "20260701",
+            "endDate": "20260702",
+        }
+        invalid_params = (
+            dict(valid, fieldList=[]),
+            dict(valid, stockList=["600000"]),
+            dict(valid, startDate="2026-07-01"),
+            dict(valid, endDate="20260630"),
+            dict(valid, report_type="future_time"),
+            dict(
+                valid,
+                fieldList=["T.f{0}".format(index) for index in range(16)],
+                stockList=["600000.SH"] * 20,
+                endDate="20260901",
+            ),
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_financial_data",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.financial_data_calls)
+
+    def test_get_financial_data_rejects_invalid_bar_params(self):
+        valid = {
+            "mode": "bar",
+            "tabname": "ASHAREBALANCESHEET",
+            "colname": "fix_assets",
+            "market": "SH",
+            "code": "600000",
+            "barpos": 12,
+        }
+        invalid_params = (
+            dict(valid, barpos=-1),
+            dict(valid, barpos=True),
+            dict(valid, barpos="9" * 100),
+            dict(valid, tabname=""),
+            dict(valid, report_type="future_time"),
+            dict(valid, mode="unknown"),
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_financial_data",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.financial_data_calls)
+
+    def test_get_financial_data_rejects_invalid_qmt_result(self):
+        self.context.get_financial_data = lambda *args: {}
+        client_thread, response = self.start_request(
+            "/get_financial_data",
+            {
+                "mode": "range",
+                "fieldList": ["ASHAREBALANCESHEET.fix_assets"],
+                "stockList": ["600000.SH"],
+                "startDate": "20260701",
+                "endDate": "20260702",
+            },
         )
         self.wait_for_queued_job()
 

@@ -29,7 +29,7 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
-和 `get_instrument_detail` 分支。
+、`get_instrument_detail` 和 `get_financial_data` 分支。
 
 ## Account demo
 
@@ -230,6 +230,59 @@ curl.exe --get `
 只有 `ContextInfo.get_instrumentdetail`，且不支持 `iscomplete`；应升级
 QMT 客户端后再使用本接口。
 
+## 财务数据
+
+接口支持 QMT `ContextInfo.get_financial_data` 的区间查询和单根 K 线查询。
+区间查询是默认模式，建议使用 POST JSON：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"mode":"range","fieldList":["ASHAREBALANCESHEET.fix_assets"],"stockList":["600000.SH"],"startDate":"20260701","endDate":"20260731","report_type":"announce_time"}' `
+  "http://127.0.0.1:1688/get_financial_data"
+```
+
+参数：
+
+- `fieldList`：必填，财务字段数组，最多 16 项。
+- `stockList`：必填，`stock.market` 格式的股票数组，最多 20 项。
+- `startDate`、`endDate`：必填，格式为 `YYYYMMDD`。
+- `report_type`：可选，默认 `announce_time`；也可传 `report_time`。
+
+区间、字段数和股票数估算出的数据单元不能超过 20000，避免单次同步查询
+在 QMT 策略线程中产生无界工作量。QMT 可能返回 Series、DataFrame 或
+旧版 pandas Panel，FEED 会将其规范化为 JSON。例如 DataFrame：
+
+```json
+{
+  "type": "dataframe",
+  "index": ["20260701", "20260702"],
+  "columns": ["fix_assets"],
+  "data": [[100.5], [null]]
+}
+```
+
+Panel 返回 `items`、`major_axis`、`minor_axis` 和三维 `data`；Series
+返回 `index` 和一维 `data`。`NaN`、正负无穷会转换为 JSON `null`。
+
+查询某根 K 线位置对应的单个财务值：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"mode":"bar","tabname":"ASHAREBALANCESHEET","colname":"fix_assets","market":"SH","code":"600000","barpos":12}' `
+  "http://127.0.0.1:1688/get_financial_data"
+```
+
+`barpos` 必须是 0 到 10000000 的整数，成功时直接返回数值或 `null`。
+该模式也接受 `report_type`。FEED 始终按 QMT 官方示例将 `barpos` 作为
+第 5 个位置参数；显式提供 `report_type` 时通过同名关键字参数传入，
+避免依赖官方原型与示例中不一致的位置参数顺序。
+
+使用前必须先在 QMT 数据管理中下载对应财务数据。回测和历史研究通常应使用
+默认的 `announce_time`，避免读取当时尚未披露的财报；只有明确需要按报告期
+取数时才使用 `report_time`。
+
 ## QMT 线程边界
 
 1. HTTP 请求在线程化 HTTP 服务中接收。
@@ -242,7 +295,8 @@ QMT 客户端后再使用本接口。
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
-`get_instrument_detail` 同样为同步调用。这些调用必须保持极短。
+`get_instrument_detail` 和 `get_financial_data` 同样为同步调用。这些调用
+必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -279,6 +333,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_financial_data":
+        return handle_get_financial_data(ContextInfo, params)
 
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```
