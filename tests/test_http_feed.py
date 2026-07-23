@@ -39,6 +39,7 @@ class FakeContext:
         self.cancelled_timer_id = None
         self.sector_calls = []
         self.trading_dates_calls = []
+        self.instrument_detail_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -58,6 +59,14 @@ class FakeContext:
     def get_trading_dates(self, *args):
         self.trading_dates_calls.append((threading.get_ident(),) + args)
         return ["20260701", "20260702", "20260703"]
+
+    def get_instrument_detail(self, *args):
+        self.instrument_detail_calls.append((threading.get_ident(),) + args)
+        return {
+            "ExchangeID": "SH",
+            "InstrumentID": "600000",
+            "InstrumentName": "浦发银行",
+        }
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -386,6 +395,129 @@ class HttpFeedTest(unittest.TestCase):
         client_thread, response = self.start_request(
             "/get_trading_dates",
             {"count": 1},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_instrument_detail_uses_current_schedule_context(self):
+        query = urlencode(
+            {
+                "stockcode": "600000.SH",
+                "iscomplete": "true",
+            }
+        )
+        client_thread, response = self.start_request(
+            "/get_instrument_detail?" + query
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_instrument_detail",
+                "params": {
+                    "stockcode": "600000.SH",
+                    "iscomplete": "true",
+                },
+            },
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual("SH", response["body"]["ExchangeID"])
+        self.assertEqual("600000", response["body"]["InstrumentID"])
+        self.assertEqual("浦发银行", response["body"]["InstrumentName"])
+        self.assertEqual(
+            [(schedule_thread_id, "600000.SH", True)],
+            reset_context.instrument_detail_calls,
+        )
+        self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_instrument_detail_defaults_iscomplete_to_false(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_detail",
+            {"stockcode": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [(threading.get_ident(), "600000.SH", False)],
+            self.context.instrument_detail_calls,
+        )
+
+    def test_get_instrument_detail_rejects_invalid_stockcode(self):
+        invalid_stockcodes = (
+            None,
+            600000,
+            "",
+            "600000",
+            ".SH",
+            "600000.",
+            "600000. SH",
+            "600 000.SH",
+            "600000.\x00SH",
+            "X" * 65 + ".SH",
+        )
+        for stockcode in invalid_stockcodes:
+            body = {} if stockcode is None else {"stockcode": stockcode}
+            client_thread, response = self.start_request(
+                "/get_instrument_detail",
+                body,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_instrument_detail_rejects_invalid_iscomplete(self):
+        for iscomplete in (1, 0, "1", "yes", "", None):
+            client_thread, response = self.start_request(
+                "/get_instrument_detail",
+                {
+                    "stockcode": "600000.SH",
+                    "iscomplete": iscomplete,
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_instrument_detail_rejects_invalid_qmt_result(self):
+        self.context.get_instrument_detail = lambda *args: []
+        client_thread, response = self.start_request(
+            "/get_instrument_detail",
+            {"stockcode": "600000.SH"},
         )
         self.wait_for_queued_job()
 

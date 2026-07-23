@@ -29,7 +29,7 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
-分支。
+和 `get_instrument_detail` 分支。
 
 ## Account demo
 
@@ -192,6 +192,44 @@ curl.exe --get `
 日线返回 `YYYYMMDD`；其他周期返回 `YYYYMMDDHHMMSS`。FEED 对
 `count` 设置上限，避免单个 HTTP 请求在 QMT 策略线程中产生无界工作量。
 
+## 合约详细信息
+
+获取合约基本信息：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=600000.SH" `
+  "http://127.0.0.1:1688/get_instrument_detail"
+```
+
+获取全部字段：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=600000.SH" `
+  --data-urlencode "iscomplete=true" `
+  "http://127.0.0.1:1688/get_instrument_detail"
+```
+
+返回 QMT `ContextInfo.get_instrument_detail` 的字典：
+
+```json
+{
+  "ExchangeID": "SH",
+  "InstrumentID": "600000",
+  "InstrumentName": "浦发银行"
+}
+```
+
+`stockcode` 必填，必须使用 `stock.market` 格式。`iscomplete` 可选，
+默认 `false`；GET 参数接受 `true`、`false`，POST JSON 接受布尔值。
+返回字段由 QMT 客户端版本和 `iscomplete` 决定，上面的 JSON 仅是示例，
+调用方不应把它当作固定字段集合。
+
+该分支要求客户端支持新版 `ContextInfo.get_instrument_detail`。旧版客户端
+只有 `ContextInfo.get_instrumentdetail`，且不支持 `iscomplete`；应升级
+QMT 客户端后再使用本接口。
+
 ## QMT 线程边界
 
 1. HTTP 请求在线程化 HTTP 服务中接收。
@@ -204,7 +242,7 @@ curl.exe --get `
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
-这些调用必须保持极短。
+`get_instrument_detail` 同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -239,6 +277,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_sector_list(ContextInfo, params)
     if method == "get_trading_dates":
         return handle_get_trading_dates(ContextInfo, params)
+    if method == "get_instrument_detail":
+        return handle_get_instrument_detail(ContextInfo, params)
 
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```

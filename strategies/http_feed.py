@@ -21,6 +21,7 @@ MAX_JOBS_PER_TICK = 10
 SCHEDULE_BUDGET_MILLISECONDS = 50
 SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
 MAX_TRADING_DATES_COUNT = 10000
+MAX_STOCKCODE_LENGTH = 64
 TRADING_DATE_PERIODS = {
     "1d",
     "1m",
@@ -451,6 +452,77 @@ def handle_get_trading_dates(ContextInfo, params):
     return trading_dates
 
 
+def handle_get_instrument_detail(ContextInfo, params):
+    allowed_params = {"stockcode", "iscomplete"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported get_instrument_detail params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stockcode = params.get("stockcode")
+    if not isinstance(stockcode, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+    stockcode = stockcode.strip()
+    if (
+        not stockcode
+        or len(stockcode) > MAX_STOCKCODE_LENGTH
+        or stockcode.count(".") != 1
+        or any(not part for part in stockcode.split("."))
+        or any(
+            char.isspace() or not char.isprintable()
+            for char in stockcode
+        )
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+
+    iscomplete = params.get("iscomplete", False)
+    if isinstance(iscomplete, bool):
+        pass
+    elif isinstance(iscomplete, str):
+        iscomplete_text = iscomplete.strip().lower()
+        if iscomplete_text == "true":
+            iscomplete = True
+        elif iscomplete_text == "false":
+            iscomplete = False
+        else:
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "iscomplete must be true or false",
+            )
+    else:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "iscomplete must be true or false",
+        )
+
+    detail = ContextInfo.get_instrument_detail(stockcode, iscomplete)
+    if (
+        not isinstance(detail, dict)
+        or not all(isinstance(name, str) for name in detail)
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_instrument_detail did not return a string-keyed dict",
+        )
+    return detail
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -465,6 +537,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_sector_list(ContextInfo, params)
     if method == "get_trading_dates":
         return handle_get_trading_dates(ContextInfo, params)
+    if method == "get_instrument_detail":
+        return handle_get_instrument_detail(ContextInfo, params)
 
     raise FeedError(
         404,
