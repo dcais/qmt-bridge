@@ -7,6 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlencode
 
 
 STRATEGY_PATH = Path(__file__).resolve().parents[1] / "strategies" / "http_feed.py"
@@ -36,6 +37,7 @@ class FakeContext:
         self.callback = None
         self.timer_id = "timer-1"
         self.cancelled_timer_id = None
+        self.sector_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -47,6 +49,10 @@ class FakeContext:
 
     def cancel_schedule_run(self, timer_id):
         self.cancelled_timer_id = timer_id
+
+    def get_stock_list_in_sector(self, *args):
+        self.sector_calls.append((threading.get_ident(),) + args)
+        return ["600000.SH", "000001.SZ"]
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -143,6 +149,101 @@ class HttpFeedTest(unittest.TestCase):
         self.assertEqual("66027616", copied_context.account_id)
         self.assertFalse(hasattr(copied_context, "http_feed_state"))
         self.assertFalse(hasattr(copied_context, "http_feed_timer_id"))
+
+    def test_get_stock_list_in_sector_uses_current_schedule_context(self):
+        query = urlencode({"sectorname": "沪深300"})
+        client_thread, response = self.start_request(
+            "/get_stock_list_in_sector?" + query
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_stock_list_in_sector",
+                "params": {"sectorname": "沪深300"},
+            },
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(["600000.SH", "000001.SZ"], response["body"])
+        self.assertEqual(
+            [(schedule_thread_id, "沪深300")],
+            reset_context.sector_calls,
+        )
+        self.assertEqual([], self.context.sector_calls)
+
+    def test_sector_realtime_param_is_converted_to_millisecond_timestamp(self):
+        client_thread, response = self.start_request(
+            "/get_stock_list_in_sector",
+            {
+                "sectorname": "沪深300",
+                "realtime": "1720000000000",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [(threading.get_ident(), "沪深300", 1720000000000)],
+            self.context.sector_calls,
+        )
+
+    def test_sectorname_is_required(self):
+        client_thread, response = self.start_request(
+            "/get_stock_list_in_sector",
+            {},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(400, response["status"])
+        self.assertEqual("INVALID_PARAMS", response["body"]["error"]["code"])
+        self.assertEqual([], self.context.sector_calls)
+
+    def test_fractional_sector_realtime_is_rejected(self):
+        client_thread, response = self.start_request(
+            "/get_stock_list_in_sector",
+            {
+                "sectorname": "沪深300",
+                "realtime": 1720000000000.75,
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(400, response["status"])
+        self.assertEqual("INVALID_PARAMS", response["body"]["error"]["code"])
+        self.assertEqual([], self.context.sector_calls)
+
+    def test_non_ascii_digit_sector_realtime_is_rejected(self):
+        client_thread, response = self.start_request(
+            "/get_stock_list_in_sector",
+            {
+                "sectorname": "沪深300",
+                "realtime": "²",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(400, response["status"])
+        self.assertEqual("INVALID_PARAMS", response["body"]["error"]["code"])
+        self.assertEqual([], self.context.sector_calls)
 
     def test_post_json_body_becomes_params(self):
         client_thread, response = self.start_request(

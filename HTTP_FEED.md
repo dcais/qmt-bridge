@@ -27,8 +27,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 - HTTP 服务只支持 GET 和 POST；其他 HTTP verb 不进入任务队列。
 
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
-再交给 `dispatch_request` 按 `method` 分支处理。当前只实现了 `account`
-分支。
+再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
+`get_stock_list_in_sector` 分支。
 
 ## Account demo
 
@@ -64,6 +64,52 @@ Content-Type: application/json
   "accountType": "STOCK"
 }
 ```
+
+## 板块成分股
+
+method 名称与 QMT API 保持一致：
+
+```text
+GET /get_stock_list_in_sector?sectorname=沪深300
+```
+
+内部调用：
+
+```python
+ContextInfo.get_stock_list_in_sector("沪深300")
+```
+
+返回值是成分股代码数组，代码格式为 `stockcode.market`：
+
+```json
+[
+  "600000.SH",
+  "000001.SZ"
+]
+```
+
+PowerShell 中建议让 curl 对中文板块名执行 URL 编码：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "sectorname=沪深300" `
+  "http://127.0.0.1:1688/get_stock_list_in_sector"
+```
+
+也支持可选的实时数据毫秒时间戳：
+
+```http
+POST /get_stock_list_in_sector
+Content-Type: application/json
+
+{
+  "sectorname": "沪深300",
+  "realtime": 1720000000000
+}
+```
+
+`sectorname` 必须是客户端左侧板块列表中的板块名，包括自定义板块。
+`realtime` 省略时调用单参数形式。
 
 ## QMT 线程边界
 
@@ -104,8 +150,8 @@ def dispatch_request(ContextInfo, request):
 
     if method == "account":
         return handle_account(ContextInfo, params)
-    if method == "positions":
-        return handle_positions(ContextInfo, params)
+    if method == "get_stock_list_in_sector":
+        return handle_get_stock_list_in_sector(ContextInfo, params)
 
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```

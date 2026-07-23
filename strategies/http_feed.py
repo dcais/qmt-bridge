@@ -226,6 +226,69 @@ def handle_account(ContextInfo, params):
     return account_to_dict(accounts[0])
 
 
+def handle_get_stock_list_in_sector(ContextInfo, params):
+    allowed_params = {"sectorname", "realtime"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported sector params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    sectorname = params.get("sectorname")
+    if not isinstance(sectorname, str) or not sectorname.strip():
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "sectorname must be a non-empty string",
+        )
+
+    sectorname = sectorname.strip()
+    if "realtime" not in params:
+        stocks = ContextInfo.get_stock_list_in_sector(sectorname)
+    else:
+        realtime = params["realtime"]
+        if isinstance(realtime, bool):
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "realtime must be a millisecond timestamp",
+            )
+        if isinstance(realtime, int):
+            pass
+        elif (
+            isinstance(realtime, str)
+            and realtime.strip()
+            and all("0" <= char <= "9" for char in realtime.strip())
+        ):
+            realtime = realtime.strip()
+            realtime = int(realtime)
+        else:
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "realtime must be a millisecond timestamp",
+            )
+        if realtime < 0:
+            raise FeedError(
+                400,
+                "INVALID_PARAMS",
+                "realtime must be a millisecond timestamp",
+            )
+        stocks = ContextInfo.get_stock_list_in_sector(sectorname, realtime)
+
+    if not isinstance(stocks, list):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_stock_list_in_sector did not return a list",
+        )
+    return stocks
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -234,6 +297,8 @@ def dispatch_request(ContextInfo, request):
 
     if method == "account":
         return handle_account(ContextInfo, params)
+    if method == "get_stock_list_in_sector":
+        return handle_get_stock_list_in_sector(ContextInfo, params)
 
     raise FeedError(
         404,
