@@ -2,3 +2,4 @@
 .omx/
 __pycache__/
 *.py[cod]
+.idea/
