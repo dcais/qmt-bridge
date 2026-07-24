@@ -1131,7 +1131,7 @@ def handle_get_market_data_ex(ContextInfo, params):
     fill_data = normalize_boolean(
         params.get("fill_data"),
         "fill_data",
-        True,
+        False,
     )
     subscribe = normalize_boolean(
         params.get("subscribe"),

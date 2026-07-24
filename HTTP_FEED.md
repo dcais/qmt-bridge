@@ -215,7 +215,7 @@ curl.exe --get `
 ```powershell
 curl.exe -X POST `
   -H "Content-Type: application/json" `
-  -d '{"fields":["close","volume"],"stock_code":["600000.SH","000001.SZ"],"period":"1m","start_time":"20260701093000","end_time":"20260701150000","count":100,"dividend_type":"none","fill_data":true,"subscribe":false}' `
+  -d '{"fields":["close","volume"],"stock_code":["600000.SH","000001.SZ"],"period":"1m","start_time":"20260701093000","end_time":"20260701150000","count":100,"dividend_type":"none","fill_data":false,"subscribe":false}' `
   "http://127.0.0.1:1688/get_market_data_ex"
 ```
 
@@ -258,7 +258,8 @@ curl.exe -X POST `
   `-1` 全量模式，避免 HTTP 请求把全部历史加载到策略线程。
 - `dividend_type`：可选，支持 `follow`、`none`、`front`、`back`、
   `front_ratio`、`back_ratio`。
-- `fill_data`：可选，默认 `true`。
+- `fill_data`：可选，默认 `false`，避免把停牌或缺失历史数据自动填充成
+  看似真实的行情；确实需要 QMT 填充时可显式传 `true`。
 - `subscribe`：可选，但只能为 `false`。`get_market_data_ex` 的自动订阅
   没有可供 HTTP 层管理的订阅 ID，只能在策略停止时统一释放，因此 FEED
   拒绝 `true`，避免重复请求耗尽订阅额度。

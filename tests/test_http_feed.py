@@ -987,12 +987,32 @@ class HttpFeedTest(unittest.TestCase):
                         "end_time": "",
                         "count": 1,
                         "dividend_type": "follow",
-                        "fill_data": True,
+                        "fill_data": False,
                         "subscribe": False,
                     },
                 )
             ],
             self.context.market_data_ex_calls,
+        )
+
+    def test_get_market_data_ex_allows_explicit_fill_data_true(self):
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["close"],
+                "stock_code": "600000.SH",
+                "period": "1d",
+                "fill_data": True,
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertTrue(
+            self.context.market_data_ex_calls[-1][2]["fill_data"]
         )
 
     def test_get_market_data_ex_expands_tick_and_level2_default_fields(self):
