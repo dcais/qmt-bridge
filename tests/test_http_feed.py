@@ -103,6 +103,7 @@ class FakeContext:
         self.sector_calls = []
         self.trading_dates_calls = []
         self.instrument_detail_calls = []
+        self.divid_factor_calls = []
         self.financial_data_calls = []
         self.financial_data_keyword_calls = []
         self.market_data_ex_calls = []
@@ -140,6 +141,12 @@ class FakeContext:
         if isinstance(args[0], list):
             return FakeFinancialFrame()
         return 42758000000.0
+
+    def get_divid_factors(self, *args):
+        self.divid_factor_calls.append((threading.get_ident(),) + args)
+        return {
+            1689868800000: [0.32, 0.0, 0.0, 0.0, 0.0, 0, 1.04507]
+        }
 
     def get_market_data_ex(self, *args, **kwargs):
         self.market_data_ex_calls.append(
@@ -527,6 +534,143 @@ class HttpFeedTest(unittest.TestCase):
             reset_context.instrument_detail_calls,
         )
         self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_divid_factors_uses_current_schedule_context(self):
+        client_thread, response = self.start_request(
+            "/get_divid_factors",
+            {"stockcode": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "1689868800000": [
+                    0.32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                    1.04507,
+                ]
+            },
+            response["body"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "600000.SH")],
+            reset_context.divid_factor_calls,
+        )
+        self.assertEqual([], self.context.divid_factor_calls)
+
+    def test_get_divid_factors_rejects_invalid_params(self):
+        invalid_params = (
+            {},
+            {"stockcode": "600000"},
+            {"stockcode": 600000},
+            {"stockcode": "600000.SH", "date": "20230721"},
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_divid_factors",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.divid_factor_calls)
+
+    def test_get_divid_factors_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            [],
+            {"1689868800000": [0.0] * 7},
+            {1689868800000: [0.0] * 6},
+            {1689868800000: [0.0] * 6 + [float("nan")]},
+            {1689868800000: [0.0] * 6 + [True]},
+        )
+        for result in invalid_results:
+            self.context.get_divid_factors = (
+                lambda stockcode, value=result: value
+            )
+            client_thread, response = self.start_request(
+                "/get_divid_factors",
+                {"stockcode": "600000.SH"},
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
+
+    def test_get_divid_factors_rejects_too_many_records(self):
+        self.context.get_divid_factors = lambda stockcode: {
+            timestamp: [0.0] * 7
+            for timestamp in range(
+                self.strategy.MAX_DIVID_FACTOR_RECORDS + 1
+            )
+        }
+        client_thread, response = self.start_request(
+            "/get_divid_factors",
+            {"stockcode": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_divid_factors_processes_at_most_one_job_per_tick(self):
+        first_thread, first_response = self.start_request(
+            "/get_divid_factors",
+            {"stockcode": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+        second_thread, second_response = self.start_request(
+            "/get_divid_factors",
+            {"stockcode": "000001.SZ"},
+        )
+        deadline = time.time() + 2
+        while self.state.request_queue.qsize() < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(2, self.state.request_queue.qsize())
+
+        self.context.callback(self.context)
+        first_thread.join(timeout=2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertTrue(second_thread.is_alive())
+        self.assertEqual(1, self.state.request_queue.qsize())
+        self.assertEqual(1, len(self.context.divid_factor_calls))
+
+        self.context.callback(self.context)
+        second_thread.join(timeout=2)
+
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(200, first_response["status"])
+        self.assertEqual(200, second_response["status"])
+        self.assertEqual(2, len(self.context.divid_factor_calls))
 
     def test_get_instrument_detail_defaults_iscomplete_to_false(self):
         client_thread, response = self.start_request(

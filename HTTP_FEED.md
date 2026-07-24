@@ -29,8 +29,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
-、`get_instrument_detail`、`get_market_data_ex` 和
-`get_financial_data` 分支。
+、`get_instrument_detail`、`get_divid_factors`、`get_market_data_ex`
+和 `get_financial_data` 分支。
 
 ## Account demo
 
@@ -308,6 +308,34 @@ curl.exe --get `
 只有 `ContextInfo.get_instrumentdetail`，且不支持 `iscomplete`；应升级
 QMT 客户端后再使用本接口。
 
+## 除权除息与复权因子
+
+查询浦发银行的全部除权除息日及复权因子：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=600000.SH" `
+  "http://127.0.0.1:1688/get_divid_factors"
+```
+
+`stockcode` 必填，必须使用 `stock.market` 格式。接口在当前 schedule 回调
+传入的 `ContextInfo` 上调用 `ContextInfo.get_divid_factors`，不缓存
+`ContextInfo`。
+
+返回对象的 key 是除权除息日的 Unix 毫秒时间戳。JSON 对象只能使用字符串
+作为 key，因此 QMT 返回的整数时间戳会转换为十进制字符串。每条长度为 7
+的数组依次表示：每股红利、每股送股、每股转增、配股、配股价、是否股改、
+复权系数。例如：
+
+```json
+{
+  "1689868800000": [0.32, 0.0, 0.0, 0.0, 0.0, 0, 1.04507]
+}
+```
+
+无记录时返回空对象 `{}`。FEED 最多接受 1000 条记录，并校验时间戳、
+数组长度和数值类型，避免异常 QMT 返回值进入 HTTP JSON 响应。
+
 ## 财务数据
 
 接口支持 QMT `ContextInfo.get_financial_data` 的区间查询和单根 K 线查询。
@@ -367,15 +395,15 @@ curl.exe -X POST `
 2. HTTP 请求线程使用 `put_nowait()` 放入任务。
 3. HTTP 请求线程等待任务 `Event`，不阻塞 QMT 策略线程。
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
-5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；行情查询每轮
-   最多执行 1 个。
+5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；行情或除权因子
+   查询每轮最多执行 1 个。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
-`get_instrument_detail`、`get_market_data_ex` 和 `get_financial_data`
-同样为同步调用。这些调用必须保持极短。
+`get_instrument_detail`、`get_divid_factors`、`get_market_data_ex`
+和 `get_financial_data` 同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -412,6 +440,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_divid_factors":
+        return handle_get_divid_factors(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":

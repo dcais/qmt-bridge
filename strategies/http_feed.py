@@ -23,6 +23,7 @@ SCHEDULE_BUDGET_MILLISECONDS = 50
 SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
 MAX_TRADING_DATES_COUNT = 10000
 MAX_STOCKCODE_LENGTH = 64
+MAX_DIVID_FACTOR_RECORDS = 1000
 MAX_FINANCIAL_FIELDS = 16
 MAX_FINANCIAL_STOCKS = 20
 MAX_FINANCIAL_CELLS = 20000
@@ -146,6 +147,10 @@ MARKET_DATA_DIVIDEND_TYPES = {
     "back",
     "front_ratio",
     "back_ratio",
+}
+ONE_JOB_PER_TICK_METHODS = {
+    "get_divid_factors",
+    "get_market_data_ex",
 }
 TRADING_DATE_PERIODS = {
     "1d",
@@ -868,6 +873,78 @@ def handle_get_instrument_detail(ContextInfo, params):
     return detail
 
 
+def handle_get_divid_factors(ContextInfo, params):
+    allowed_params = {"stockcode"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported dividend factor params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stockcode = normalize_stockcode(params.get("stockcode"))
+    if stockcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+
+    result = ContextInfo.get_divid_factors(stockcode)
+    if not isinstance(result, dict):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_divid_factors did not return a dict",
+        )
+    if len(result) > MAX_DIVID_FACTOR_RECORDS:
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_divid_factors returned too many records",
+        )
+
+    normalized = {}
+    for raw_timestamp, raw_factors in result.items():
+        timestamp = qmt_json_value(raw_timestamp)
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or timestamp < 0
+        ):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_divid_factors returned an invalid timestamp",
+            )
+        if (
+            not isinstance(raw_factors, (list, tuple))
+            or len(raw_factors) != 7
+        ):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_divid_factors returned an invalid factor record",
+            )
+
+        factors = [qmt_json_value(value) for value in raw_factors]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            for value in factors
+        ):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_divid_factors returned a non-numeric factor",
+            )
+        normalized[str(timestamp)] = factors
+    return normalized
+
+
 def resolve_market_data_profile_period(ContextInfo, period):
     normalized_period = period.lower()
     if normalized_period != "follow":
@@ -1370,6 +1447,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_divid_factors":
+        return handle_get_divid_factors(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":
@@ -1425,7 +1504,7 @@ def process_http_requests(ContextInfo):
             processed += 1
             job.done.set()
             state.request_queue.task_done()
-        if job.request.get("method") == "get_market_data_ex":
+        if job.request.get("method") in ONE_JOB_PER_TICK_METHODS:
             break
 
 
