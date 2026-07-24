@@ -39,6 +39,33 @@ class FakeValues:
         return self.values
 
 
+class FakeArray:
+    def __init__(self, values):
+        self.values = values
+
+    def tolist(self):
+        return self.values
+
+
+class ExplodingValues:
+    def tolist(self):
+        raise AssertionError("values must not be materialized")
+
+
+class FakeMarketFrame:
+    ndim = 2
+
+    def __init__(self):
+        self.index = ["20260701093000", "20260701093100"]
+        self.columns = ["close", "askPrice"]
+        self.values = FakeValues(
+            [
+                [10.1, FakeArray([10.2, 10.3])],
+                [float("nan"), FakeArray([10.3, 10.4])],
+            ]
+        )
+
+
 class FakeFinancialFrame:
     ndim = 2
 
@@ -77,6 +104,7 @@ class FakeContext:
         self.instrument_detail_calls = []
         self.financial_data_calls = []
         self.financial_data_keyword_calls = []
+        self.market_data_ex_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -111,6 +139,16 @@ class FakeContext:
         if isinstance(args[0], list):
             return FakeFinancialFrame()
         return 42758000000.0
+
+    def get_market_data_ex(self, *args, **kwargs):
+        self.market_data_ex_calls.append(
+            (threading.get_ident(), args, kwargs)
+        )
+        frame = FakeMarketFrame()
+        if kwargs.get("count") == 1:
+            frame.index = frame.index[:1]
+            frame.values = FakeValues(frame.values.tolist()[:1])
+        return {"600000.SH": frame}
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -848,6 +886,356 @@ class HttpFeedTest(unittest.TestCase):
             "INVALID_QMT_RESULT",
             response["body"]["error"]["code"],
         )
+
+    def test_get_market_data_ex_uses_current_schedule_context(self):
+        body = {
+            "fields": ["close", "askPrice"],
+            "stock_code": ["600000.SH"],
+            "period": "1m",
+            "start_time": "20260701093000",
+            "end_time": "20260701150000",
+            "count": 2,
+            "dividend_type": "none",
+            "fill_data": False,
+            "subscribe": False,
+        }
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            body,
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {"method": "get_market_data_ex", "params": body},
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "600000.SH": {
+                    "index": ["20260701093000", "20260701093100"],
+                    "columns": ["close", "askPrice"],
+                    "data": [
+                        [10.1, [10.2, 10.3]],
+                        [None, [10.3, 10.4]],
+                    ],
+                }
+            },
+            response["body"],
+        )
+        self.assertEqual(
+            [
+                (
+                    schedule_thread_id,
+                    (["close", "askPrice"], ["600000.SH"]),
+                    {
+                        "period": "1m",
+                        "start_time": "20260701093000",
+                        "end_time": "20260701150000",
+                        "count": 2,
+                        "dividend_type": "none",
+                        "fill_data": False,
+                        "subscribe": False,
+                    },
+                )
+            ],
+            reset_context.market_data_ex_calls,
+        )
+        self.assertEqual([], self.context.market_data_ex_calls)
+
+    def test_get_market_data_ex_applies_bounded_feed_defaults(self):
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["close"],
+                "stock_code": "600000.SH",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            [
+                (
+                    threading.get_ident(),
+                    (["close"], ["600000.SH"]),
+                    {
+                        "period": "follow",
+                        "start_time": "",
+                        "end_time": "",
+                        "count": 1,
+                        "dividend_type": "follow",
+                        "fill_data": True,
+                        "subscribe": False,
+                    },
+                )
+            ],
+            self.context.market_data_ex_calls,
+        )
+
+    def test_get_market_data_ex_parses_get_booleans_and_lists(self):
+        query = urlencode(
+            [
+                ("fields", "close"),
+                ("fields", "open"),
+                ("stock_code", "600000.SH"),
+                ("count", "2"),
+                ("fill_data", "false"),
+                ("subscribe", "false"),
+                ("start_time", "20260701093000"),
+                ("end_time", "20260701"),
+            ]
+        )
+        client_thread, response = self.start_request(
+            "/get_market_data_ex?" + query
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        call = self.context.market_data_ex_calls[0]
+        self.assertEqual((["close", "open"], ["600000.SH"]), call[1])
+        self.assertEqual(2, call[2]["count"])
+        self.assertFalse(call[2]["fill_data"])
+        self.assertFalse(call[2]["subscribe"])
+
+    def test_get_market_data_ex_rejects_unbounded_or_invalid_params(self):
+        valid = {
+            "fields": ["close"],
+            "stock_code": ["600000.SH"],
+            "period": "1d",
+            "count": 10,
+        }
+        invalid_params = (
+            {},
+            {"stock_code": ["600000.SH"]},
+            {"fields": [], "stock_code": ["600000.SH"]},
+            dict(valid, stock_code=["600000"]),
+            dict(valid, fields=["f{0}".format(index) for index in range(33)]),
+            dict(valid, count=-1),
+            dict(valid, count=True),
+            dict(valid, count=1001),
+            dict(valid, period=""),
+            dict(valid, start_time="2026-07-01"),
+            dict(valid, start_time="20260702", end_time="20260701"),
+            dict(valid, dividend_type="future"),
+            dict(valid, fill_data="yes"),
+            dict(valid, subscribe=1),
+            dict(valid, subscribe=True),
+            dict(valid, unknown="value"),
+            {
+                "fields": ["f{0}".format(index) for index in range(32)],
+                "stock_code": ["600000.SH"] * 20,
+                "count": 1000,
+            },
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_market_data_ex",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.market_data_ex_calls)
+
+    def test_get_market_data_ex_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            [],
+            {"600000.SH": {}},
+        )
+        for result in invalid_results:
+            self.context.get_market_data_ex = lambda *args, **kwargs: result
+            client_thread, response = self.start_request(
+                "/get_market_data_ex",
+                {
+                    "fields": ["close"],
+                    "stock_code": ["600000.SH"],
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
+
+    def test_get_market_data_ex_rejects_oversized_nested_result(self):
+        frame = FakeMarketFrame()
+        frame.index = ["20260701093000"]
+        frame.columns = ["askPrice"]
+        frame.values = FakeValues(
+            [[FakeArray([1] * 50001)]]
+        )
+        self.context.get_market_data_ex = (
+            lambda *args, **kwargs: {"600000.SH": frame}
+        )
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["askPrice"],
+                "stock_code": ["600000.SH"],
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_market_data_ex_accepts_exact_request_cell_limit(self):
+        fields = ["field{0}".format(index) for index in range(20)]
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": fields,
+                "stock_code": ["600000.SH"],
+                "count": 1000,
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(fields, self.context.market_data_ex_calls[0][1][0])
+
+    def test_get_market_data_ex_checks_shape_before_materializing_values(self):
+        oversized_frames = []
+        too_many_rows = FakeMarketFrame()
+        too_many_rows.index = list(range(1001))
+        too_many_rows.columns = ["close"]
+        too_many_rows.values = ExplodingValues()
+        oversized_frames.append(too_many_rows)
+
+        too_many_columns = FakeMarketFrame()
+        too_many_columns.index = ["20260701"]
+        too_many_columns.columns = list(range(129))
+        too_many_columns.values = ExplodingValues()
+        oversized_frames.append(too_many_columns)
+
+        for frame in oversized_frames:
+            self.context.get_market_data_ex = (
+                lambda *args, **kwargs: {"600000.SH": frame}
+            )
+            client_thread, response = self.start_request(
+                "/get_market_data_ex",
+                {
+                    "fields": ["close"],
+                    "stock_code": ["600000.SH"],
+                    "count": 1000,
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
+
+    def test_get_market_data_ex_rejects_aggregate_response_over_cell_limit(self):
+        rows = list(range(1000))
+        columns = ["field{0}".format(index) for index in range(11)]
+        data = [[0] * 11 for _ in rows]
+        first_frame = FakeMarketFrame()
+        first_frame.index = rows
+        first_frame.columns = columns
+        first_frame.values = FakeValues(data)
+        second_frame = FakeMarketFrame()
+        second_frame.index = rows
+        second_frame.columns = columns
+        second_frame.values = ExplodingValues()
+        self.context.get_market_data_ex = lambda *args, **kwargs: {
+            "600000.SH": first_frame,
+            "000001.SZ": second_frame,
+        }
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["close"],
+                "stock_code": ["600000.SH", "000001.SZ"],
+                "count": 1000,
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(500, response["status"])
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["error"]["code"],
+        )
+
+    def test_get_market_data_ex_processes_at_most_one_job_per_tick(self):
+        first_thread, first_response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["close"],
+                "stock_code": ["600000.SH"],
+            },
+        )
+        self.wait_for_queued_job()
+        second_thread, second_response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["close"],
+                "stock_code": ["000001.SZ"],
+            },
+        )
+        deadline = time.time() + 2
+        while self.state.request_queue.qsize() < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(2, self.state.request_queue.qsize())
+
+        self.context.callback(self.context)
+        first_thread.join(timeout=2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertTrue(second_thread.is_alive())
+        self.assertEqual(1, self.state.request_queue.qsize())
+        self.assertEqual(1, len(self.context.market_data_ex_calls))
+
+        self.context.callback(self.context)
+        second_thread.join(timeout=2)
+
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(200, first_response["status"])
+        self.assertEqual(200, second_response["status"])
+        self.assertEqual(2, len(self.context.market_data_ex_calls))
 
     def test_sector_realtime_param_is_converted_to_millisecond_timestamp(self):
         client_thread, response = self.start_request(

@@ -29,6 +29,20 @@ MAX_FINANCIAL_CELLS = 20000
 MAX_FINANCIAL_NAME_LENGTH = 128
 MAX_FINANCIAL_BARPOS = 10000000
 FINANCIAL_REPORT_TYPES = {"announce_time", "report_time"}
+MAX_MARKET_DATA_FIELDS = 32
+MAX_MARKET_DATA_STOCKS = 20
+MAX_MARKET_DATA_COUNT = 1000
+MAX_MARKET_DATA_CELLS = 20000
+MAX_MARKET_DATA_COLUMNS = 128
+MAX_MARKET_DATA_JSON_VALUES = 50000
+MARKET_DATA_DIVIDEND_TYPES = {
+    "follow",
+    "none",
+    "front",
+    "back",
+    "front_ratio",
+    "back_ratio",
+}
 TRADING_DATE_PERIODS = {
     "1d",
     "1m",
@@ -240,6 +254,24 @@ def normalize_stockcode(value):
     return stockcode
 
 
+def normalize_boolean(value, name, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text == "true":
+            return True
+        if text == "false":
+            return False
+    raise FeedError(
+        400,
+        "INVALID_PARAMS",
+        "{0} must be true or false".format(name),
+    )
+
+
 def normalize_financial_name(value, name):
     if not isinstance(value, str):
         raise FeedError(
@@ -365,7 +397,11 @@ def normalize_financial_barpos(value):
     return barpos
 
 
-def financial_json_value(value):
+def qmt_json_value(value, budget=None):
+    if budget is not None:
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise ValueError("QMT JSON value limit exceeded")
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
@@ -373,25 +409,39 @@ def financial_json_value(value):
     if isinstance(value, (dt.datetime, dt.date)):
         return value.isoformat()
     if isinstance(value, (list, tuple)):
-        return [financial_json_value(item) for item in value]
+        return [qmt_json_value(item, budget) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): qmt_json_value(item, budget)
+            for key, item in value.items()
+        }
+
+    tolist_method = getattr(value, "tolist", None)
+    if callable(tolist_method):
+        try:
+            return qmt_json_value(tolist_method(), budget)
+        except (TypeError, ValueError):
+            if budget is not None and budget[0] < 0:
+                raise
 
     item_method = getattr(value, "item", None)
     if callable(item_method):
         try:
-            return financial_json_value(item_method())
+            return qmt_json_value(item_method(), budget)
         except (TypeError, ValueError):
-            pass
+            if budget is not None and budget[0] < 0:
+                raise
     return str(value)
 
 
-def financial_axis_to_json(axis):
-    return [financial_json_value(value) for value in list(axis)]
+def financial_axis_to_json(axis, budget=None):
+    return [qmt_json_value(value, budget) for value in list(axis)]
 
 
 def financial_table_to_json(result):
     ndim = getattr(result, "ndim", None)
     try:
-        data = financial_json_value(result.values.tolist())
+        data = qmt_json_value(result.values.tolist())
         if ndim == 1:
             return {
                 "type": "series",
@@ -714,6 +764,296 @@ def handle_get_instrument_detail(ContextInfo, params):
     return detail
 
 
+def normalize_market_data_fields(value):
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = None
+    if (
+        not values
+        or len(values) > MAX_MARKET_DATA_FIELDS
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "fields must contain between 1 and {0} strings".format(
+                MAX_MARKET_DATA_FIELDS
+            ),
+        )
+    return [
+        normalize_financial_name(item, "fields")
+        for item in values
+    ]
+
+
+def normalize_market_data_count(value):
+    if isinstance(value, bool):
+        count = None
+    elif isinstance(value, int):
+        count = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if (
+            not text
+            or len(text) > len(str(MAX_MARKET_DATA_COUNT))
+            or not all("0" <= char <= "9" for char in text)
+        ):
+            count = None
+        else:
+            count = int(text)
+    else:
+        count = None
+    if count is None or not 1 <= count <= MAX_MARKET_DATA_COUNT:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "count must be an integer between 1 and {0}".format(
+                MAX_MARKET_DATA_COUNT
+            ),
+        )
+    return count
+
+
+def normalize_market_data_time(value, name):
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a string".format(name),
+        )
+    value = value.strip()
+    if not value:
+        return "", None
+    if (
+        len(value) not in (8, 14)
+        or not all("0" <= char <= "9" for char in value)
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must use YYYYMMDD or YYYYMMDDHHMMSS".format(name),
+        )
+    is_date_only = len(value) == 8
+    date_format = "%Y%m%d" if is_date_only else "%Y%m%d%H%M%S"
+    try:
+        parsed = dt.datetime.strptime(value, date_format)
+    except ValueError:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a valid date or datetime".format(name),
+        )
+    if is_date_only and name == "end_time":
+        parsed += dt.timedelta(days=1) - dt.timedelta(seconds=1)
+    return value, parsed
+
+
+def market_data_frame_to_json(
+    frame,
+    requested_count,
+    remaining_cells,
+    budget,
+):
+    if getattr(frame, "ndim", None) != 2:
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex values must be DataFrames",
+        )
+    try:
+        row_count = len(frame.index)
+        column_count = len(frame.columns)
+    except (AttributeError, TypeError, ValueError):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex returned an invalid DataFrame",
+        )
+    cell_count = row_count * max(1, column_count)
+    if (
+        row_count > requested_count
+        or column_count > MAX_MARKET_DATA_COLUMNS
+        or cell_count > MAX_MARKET_DATA_CELLS
+        or cell_count > remaining_cells
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex DataFrame exceeds response limits",
+        )
+    try:
+        index = financial_axis_to_json(frame.index, budget)
+        columns = financial_axis_to_json(frame.columns, budget)
+        data = qmt_json_value(frame.values.tolist(), budget)
+    except (AttributeError, TypeError, ValueError):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex returned an invalid DataFrame",
+        )
+    if (
+        not isinstance(data, list)
+        or len(data) != len(index)
+        or any(
+            not isinstance(row, list) or len(row) != len(columns)
+            for row in data
+        )
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex DataFrame exceeds response limits",
+        )
+    return (
+        {
+            "index": index,
+            "columns": columns,
+            "data": data,
+        },
+        cell_count,
+    )
+
+
+def handle_get_market_data_ex(ContextInfo, params):
+    allowed_params = {
+        "fields",
+        "stock_code",
+        "period",
+        "start_time",
+        "end_time",
+        "count",
+        "dividend_type",
+        "fill_data",
+        "subscribe",
+    }
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported market data params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    fields = normalize_market_data_fields(params.get("fields"))
+    stocks = normalize_financial_list(
+        params.get("stock_code"),
+        "stock_code",
+        MAX_MARKET_DATA_STOCKS,
+        stockcodes=True,
+    )
+    period = normalize_financial_name(
+        params.get("period", "follow"),
+        "period",
+    )
+    start_time, start_value = normalize_market_data_time(
+        params.get("start_time"),
+        "start_time",
+    )
+    end_time, end_value = normalize_market_data_time(
+        params.get("end_time"),
+        "end_time",
+    )
+    if (
+        start_value is not None
+        and end_value is not None
+        and start_value > end_value
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "start_time must not be after end_time",
+        )
+
+    count = normalize_market_data_count(params.get("count", 1))
+    dividend_type = params.get("dividend_type", "follow")
+    if (
+        not isinstance(dividend_type, str)
+        or dividend_type.strip() not in MARKET_DATA_DIVIDEND_TYPES
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "dividend_type is not supported",
+        )
+    dividend_type = dividend_type.strip()
+    fill_data = normalize_boolean(
+        params.get("fill_data"),
+        "fill_data",
+        True,
+    )
+    subscribe = normalize_boolean(
+        params.get("subscribe"),
+        "subscribe",
+        False,
+    )
+    if subscribe:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "subscribe=true is not supported by the HTTP feed",
+        )
+
+    estimated_cells = count * len(stocks) * len(fields)
+    if estimated_cells > MAX_MARKET_DATA_CELLS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "market data request exceeds {0} estimated cells".format(
+                MAX_MARKET_DATA_CELLS
+            ),
+        )
+
+    result = ContextInfo.get_market_data_ex(
+        fields,
+        stocks,
+        period=period,
+        start_time=start_time,
+        end_time=end_time,
+        count=count,
+        dividend_type=dividend_type,
+        fill_data=fill_data,
+        subscribe=subscribe,
+    )
+    if not isinstance(result, dict):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex did not return a dict",
+        )
+    if len(result) > MAX_MARKET_DATA_STOCKS:
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_market_data_ex returned too many stock results",
+        )
+
+    normalized = {}
+    result_cells = 0
+    json_budget = [MAX_MARKET_DATA_JSON_VALUES]
+    for stockcode, frame in result.items():
+        if not isinstance(stockcode, str):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_market_data_ex returned a non-string stock code",
+            )
+        table, table_cells = market_data_frame_to_json(
+            frame,
+            count,
+            MAX_MARKET_DATA_CELLS - result_cells,
+            json_budget,
+        )
+        result_cells += table_cells
+        normalized[stockcode] = table
+    return normalized
+
+
 def handle_get_financial_data_range(ContextInfo, params):
     allowed_params = {
         "mode",
@@ -832,7 +1172,7 @@ def handle_get_financial_data_bar(ContextInfo, params):
             barpos,
         )
 
-    result = financial_json_value(result)
+    result = qmt_json_value(result)
     if (
         result is not None
         and (
@@ -884,6 +1224,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_market_data_ex":
+        return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":
         return handle_get_financial_data(ContextInfo, params)
 
@@ -937,6 +1279,8 @@ def process_http_requests(ContextInfo):
             processed += 1
             job.done.set()
             state.request_queue.task_done()
+        if job.request.get("method") == "get_market_data_ex":
+            break
 
 
 def serve_http(state):

@@ -29,7 +29,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
-、`get_instrument_detail` 和 `get_financial_data` 分支。
+、`get_instrument_detail`、`get_market_data_ex` 和
+`get_financial_data` 分支。
 
 ## Account demo
 
@@ -192,6 +193,70 @@ curl.exe --get `
 日线返回 `YYYYMMDD`；其他周期返回 `YYYYMMDDHHMMSS`。FEED 对
 `count` 设置上限，避免单个 HTTP 请求在 QMT 策略线程中产生无界工作量。
 
+## 行情数据
+
+查询浦发银行最近 10 根日线：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "fields=open" `
+  --data-urlencode "fields=high" `
+  --data-urlencode "fields=low" `
+  --data-urlencode "fields=close" `
+  --data-urlencode "stock_code=600000.SH" `
+  --data-urlencode "period=1d" `
+  --data-urlencode "count=10" `
+  --data-urlencode "subscribe=false" `
+  "http://127.0.0.1:1688/get_market_data_ex"
+```
+
+也可以使用 POST JSON 查询多个合约：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"fields":["close","volume"],"stock_code":["600000.SH","000001.SZ"],"period":"1m","start_time":"20260701093000","end_time":"20260701150000","count":100,"dividend_type":"none","fill_data":true,"subscribe":false}' `
+  "http://127.0.0.1:1688/get_market_data_ex"
+```
+
+返回值按股票代码分组，每个 QMT DataFrame 规范化为 JSON：
+
+```json
+{
+  "600000.SH": {
+    "index": ["20260701093000", "20260701093100"],
+    "columns": ["close", "volume"],
+    "data": [
+      [10.10, 1200],
+      [10.12, 1800]
+    ]
+  }
+}
+```
+
+参数与 QMT `ContextInfo.get_market_data_ex` 对应：
+
+- `fields`：必填，字符串数组，至少 1 项、最多 32 项。FEED 不接受空数组
+  的“全部字段”模式，避免 QMT 返回规模无法在调用前准确估算。
+- `stock_code`：必填，`stock.market` 字符串或数组，最多 20 项。
+- `period`：可选，默认 `follow`；由当前 QMT 客户端校验具体周期。
+- `start_time`、`end_time`：可选，格式为 `YYYYMMDD` 或
+  `YYYYMMDDHHMMSS`。
+- `count`：可选，FEED 默认 1，范围为 1 到 1000。FEED 不接受 QMT 的
+  `-1` 全量模式，避免 HTTP 请求把全部历史加载到策略线程。
+- `dividend_type`：可选，支持 `follow`、`none`、`front`、`back`、
+  `front_ratio`、`back_ratio`。
+- `fill_data`：可选，默认 `true`。
+- `subscribe`：可选，但只能为 `false`。`get_market_data_ex` 的自动订阅
+  没有可供 HTTP 层管理的订阅 ID，只能在策略停止时统一释放，因此 FEED
+  拒绝 `true`，避免重复请求耗尽订阅额度。
+
+请求按股票数、字段数和 `count` 估算出的数据单元不能超过 20000。
+返回结果同样最多 20000 个表格单元；Level-2 档位等嵌套数据转换后最多
+50000 个 JSON 值。返回值中的 numpy 数组会转换为 JSON 数组，`NaN`、
+正负无穷会转换为 `null`。历史数据应先在 QMT 数据管理中下载；
+`subscribe=false` 不会补取尚未下载的数据。
+
 ## 合约详细信息
 
 获取合约基本信息：
@@ -289,14 +354,15 @@ curl.exe -X POST `
 2. HTTP 请求线程使用 `put_nowait()` 放入任务。
 3. HTTP 请求线程等待任务 `Event`，不阻塞 QMT 策略线程。
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
-5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务。
+5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；行情查询每轮
+   最多执行 1 个。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
-`get_instrument_detail` 和 `get_financial_data` 同样为同步调用。这些调用
-必须保持极短。
+`get_instrument_detail`、`get_market_data_ex` 和 `get_financial_data`
+同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -333,6 +399,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_trading_dates(ContextInfo, params)
     if method == "get_instrument_detail":
         return handle_get_instrument_detail(ContextInfo, params)
+    if method == "get_market_data_ex":
+        return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":
         return handle_get_financial_data(ContextInfo, params)
 
