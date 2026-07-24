@@ -945,6 +945,59 @@ def handle_get_divid_factors(ContextInfo, params):
     return normalized
 
 
+def handle_get_weight_in_index(ContextInfo, params):
+    allowed_params = {"indexcode", "stockcode"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported index weight params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    indexcode = normalize_stockcode(params.get("indexcode"))
+    if indexcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "indexcode must use stock.market format",
+        )
+    stockcode = normalize_stockcode(params.get("stockcode"))
+    if stockcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+
+    weight = qmt_json_value(
+        ContextInfo.get_weight_in_index(indexcode, stockcode)
+    )
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_weight_in_index did not return a number",
+        )
+    try:
+        weight = float(weight)
+    except OverflowError:
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_weight_in_index returned a non-finite number",
+        )
+    if not math.isfinite(weight):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_weight_in_index returned a non-finite number",
+        )
+    return weight
+
+
 def resolve_market_data_profile_period(ContextInfo, period):
     normalized_period = period.lower()
     if normalized_period != "follow":
@@ -1449,6 +1502,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_instrument_detail(ContextInfo, params)
     if method == "get_divid_factors":
         return handle_get_divid_factors(ContextInfo, params)
+    if method == "get_weight_in_index":
+        return handle_get_weight_in_index(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":

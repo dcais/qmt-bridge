@@ -29,8 +29,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
-、`get_instrument_detail`、`get_divid_factors`、`get_market_data_ex`
-和 `get_financial_data` 分支。
+、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
+、`get_market_data_ex` 和 `get_financial_data` 分支。
 
 ## Account demo
 
@@ -336,6 +336,31 @@ curl.exe --get `
 无记录时返回空对象 `{}`。FEED 最多接受 1000 条记录，并校验时间戳、
 数组长度和数值类型，避免异常 QMT 返回值进入 HTTP JSON 响应。
 
+## 指数成分权重
+
+查询万科 A 在沪深 300 指数中的绝对权重：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "indexcode=000300.SH" `
+  --data-urlencode "stockcode=000002.SZ" `
+  "http://127.0.0.1:1688/get_weight_in_index"
+```
+
+`indexcode` 和 `stockcode` 都是必填参数，必须使用 `stock.market` 格式。
+接口调用当前 schedule 回调传入的
+`ContextInfo.get_weight_in_index(indexcode, stockcode)`，不缓存
+`ContextInfo`。
+
+成功时直接返回一个有限浮点数，单位为 `%`。例如：
+
+```json
+0.438
+```
+
+表示该股票的绝对权重为 `0.438%`。QMT 接口没有日期参数，FEED 也不接受
+额外的日期字段。
+
 ## 财务数据
 
 接口支持 QMT `ContextInfo.get_financial_data` 的区间查询和单根 K 线查询。
@@ -402,8 +427,9 @@ curl.exe -X POST `
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
-`get_instrument_detail`、`get_divid_factors`、`get_market_data_ex`
-和 `get_financial_data` 同样为同步调用。这些调用必须保持极短。
+`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
+、`get_market_data_ex` 和 `get_financial_data` 同样为同步调用。这些调用
+必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -442,6 +468,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_instrument_detail(ContextInfo, params)
     if method == "get_divid_factors":
         return handle_get_divid_factors(ContextInfo, params)
+    if method == "get_weight_in_index":
+        return handle_get_weight_in_index(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":

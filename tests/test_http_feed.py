@@ -104,6 +104,7 @@ class FakeContext:
         self.trading_dates_calls = []
         self.instrument_detail_calls = []
         self.divid_factor_calls = []
+        self.index_weight_calls = []
         self.financial_data_calls = []
         self.financial_data_keyword_calls = []
         self.market_data_ex_calls = []
@@ -147,6 +148,10 @@ class FakeContext:
         return {
             1689868800000: [0.32, 0.0, 0.0, 0.0, 0.0, 0, 1.04507]
         }
+
+    def get_weight_in_index(self, *args):
+        self.index_weight_calls.append((threading.get_ident(),) + args)
+        return 0.438
 
     def get_market_data_ex(self, *args, **kwargs):
         self.market_data_ex_calls.append(
@@ -567,6 +572,90 @@ class HttpFeedTest(unittest.TestCase):
             reset_context.divid_factor_calls,
         )
         self.assertEqual([], self.context.divid_factor_calls)
+
+    def test_get_weight_in_index_uses_current_schedule_context(self):
+        client_thread, response = self.start_request(
+            "/get_weight_in_index",
+            {
+                "indexcode": "000300.SH",
+                "stockcode": "000002.SZ",
+            },
+        )
+        self.wait_for_queued_job()
+
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(0.438, response["body"])
+        self.assertEqual(
+            [(schedule_thread_id, "000300.SH", "000002.SZ")],
+            reset_context.index_weight_calls,
+        )
+        self.assertEqual([], self.context.index_weight_calls)
+
+    def test_get_weight_in_index_rejects_invalid_params(self):
+        invalid_params = (
+            {},
+            {"indexcode": "000300.SH"},
+            {"stockcode": "000002.SZ"},
+            {"indexcode": "000300", "stockcode": "000002.SZ"},
+            {"indexcode": "000300.SH", "stockcode": "000002"},
+            {
+                "indexcode": "000300.SH",
+                "stockcode": "000002.SZ",
+                "date": "20260724",
+            },
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_weight_in_index",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.index_weight_calls)
+
+    def test_get_weight_in_index_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            None,
+            True,
+            "0.438",
+            float("nan"),
+            float("inf"),
+            10 ** 10000,
+        )
+        for result in invalid_results:
+            self.context.get_weight_in_index = (
+                lambda indexcode, stockcode, value=result: value
+            )
+            client_thread, response = self.start_request(
+                "/get_weight_in_index",
+                {
+                    "indexcode": "000300.SH",
+                    "stockcode": "000002.SZ",
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
 
     def test_get_divid_factors_rejects_invalid_params(self):
         invalid_params = (
