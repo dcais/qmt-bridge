@@ -35,6 +35,110 @@ MAX_MARKET_DATA_COUNT = 1000
 MAX_MARKET_DATA_CELLS = 20000
 MAX_MARKET_DATA_COLUMNS = 128
 MAX_MARKET_DATA_JSON_VALUES = 50000
+MARKET_DATA_BAR_FIELDS = (
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "settle",
+    "openInterest",
+    "preClose",
+    "suspendFlag",
+)
+MARKET_DATA_TICK_FIELDS = (
+    "time",
+    "lastPrice",
+    "lastClose",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "settle",
+    "openInterest",
+    "stockStatus",
+)
+MARKET_DATA_BAR_PERIODS = {
+    "1m",
+    "3m",
+    "5m",
+    "10m",
+    "15m",
+    "30m",
+    "60m",
+    "1h",
+    "2h",
+    "3h",
+    "4h",
+    "1d",
+    "2d",
+    "3d",
+    "5d",
+    "1w",
+    "1mon",
+    "1q",
+    "1hy",
+    "1y",
+}
+MARKET_DATA_LEVEL2_FIELDS = {
+    "l2quote": (
+        "time",
+        "lastPrice",
+        "volume",
+        "amount",
+        "askPrice",
+        "askVol",
+        "bidPrice",
+        "bidVol",
+    ),
+    "l2quoteaux": (
+        "time",
+        "avgBidPrice",
+        "totalBidQuantity",
+        "avgOffPrice",
+        "totalOffQuantity",
+    ),
+    "l2order": (
+        "time",
+        "price",
+        "volume",
+        "entrustNo",
+        "entrustType",
+        "entrustDirection",
+    ),
+    "l2transaction": (
+        "time",
+        "price",
+        "volume",
+        "amount",
+        "tradeIndex",
+        "buyNo",
+        "sellNo",
+        "tradeType",
+        "tradeFlag",
+    ),
+    "l2transactioncount": (
+        "time",
+        "bidNumber",
+        "offNumber",
+        "ddx",
+        "ddy",
+        "ddz",
+        "netOrder",
+        "netWithdraw",
+    ),
+    "l2orderqueue": (
+        "time",
+        "bidLevelPrice",
+        "bidLevelVolume",
+        "offerLevelPrice",
+        "offerLevelVolume",
+    ),
+}
 MARKET_DATA_DIVIDEND_TYPES = {
     "follow",
     "none",
@@ -764,7 +868,45 @@ def handle_get_instrument_detail(ContextInfo, params):
     return detail
 
 
-def normalize_market_data_fields(value):
+def resolve_market_data_profile_period(ContextInfo, period):
+    normalized_period = period.lower()
+    if normalized_period != "follow":
+        return normalized_period
+
+    context_period = getattr(ContextInfo, "period", None)
+    if not isinstance(context_period, str) or not context_period.strip():
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "empty fields with period=follow require ContextInfo.period",
+        )
+    return context_period.strip().lower()
+
+
+def default_market_data_fields(period):
+    normalized_period = period.lower()
+    if normalized_period == "tick":
+        return list(MARKET_DATA_TICK_FIELDS)
+    if normalized_period in MARKET_DATA_BAR_PERIODS:
+        return list(MARKET_DATA_BAR_FIELDS)
+    if normalized_period in MARKET_DATA_LEVEL2_FIELDS:
+        return list(MARKET_DATA_LEVEL2_FIELDS[normalized_period])
+    raise FeedError(
+        400,
+        "INVALID_PARAMS",
+        "empty fields have no FEED profile for period: {0}".format(
+            period
+        ),
+    )
+
+
+def normalize_market_data_fields(value, ContextInfo, period):
+    if value is None or value == []:
+        profile_period = resolve_market_data_profile_period(
+            ContextInfo,
+            period,
+        )
+        return default_market_data_fields(profile_period)
     if isinstance(value, str):
         values = [value]
     elif isinstance(value, list):
@@ -940,16 +1082,20 @@ def handle_get_market_data_ex(ContextInfo, params):
             ),
         )
 
-    fields = normalize_market_data_fields(params.get("fields"))
+    period = normalize_financial_name(
+        params.get("period", "follow"),
+        "period",
+    )
+    fields = normalize_market_data_fields(
+        params.get("fields"),
+        ContextInfo,
+        period,
+    )
     stocks = normalize_financial_list(
         params.get("stock_code"),
         "stock_code",
         MAX_MARKET_DATA_STOCKS,
         stockcodes=True,
-    )
-    period = normalize_financial_name(
-        params.get("period", "follow"),
-        "period",
     )
     start_time, start_value = normalize_market_data_time(
         params.get("start_time"),

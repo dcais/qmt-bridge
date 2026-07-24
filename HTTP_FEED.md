@@ -236,8 +236,20 @@ curl.exe -X POST `
 
 参数与 QMT `ContextInfo.get_market_data_ex` 对应：
 
-- `fields`：必填，字符串数组，至少 1 项、最多 32 项。FEED 不接受空数组
-  的“全部字段”模式，避免 QMT 返回规模无法在调用前准确估算。
+- `fields`：可选，字符串数组，最多 32 项。省略或传空数组时，FEED 不会
+  把空数组直接交给 QMT，而是展开为固定字段集：
+  - 普通 K 线：`time`、`open`、`high`、`low`、`close`、`volume`、
+    `amount`、`settle`、`openInterest`、`preClose`、`suspendFlag`。
+  - `tick`：`time`、`lastPrice`、`lastClose`、`open`、`high`、`low`、
+    `close`、`volume`、`amount`、`settle`、`openInterest`、
+    `stockStatus`。
+  - Level-2 周期：按 `l2quote`、`l2quoteaux`、`l2order`、
+    `l2transaction`、`l2transactioncount`、`l2orderqueue` 分别展开
+    为一组常用且有界的字段。
+  - `period=follow` 时使用本次 schedule 回调传入的
+    `ContextInfo.period` 选择字段集，不缓存 `ContextInfo`。当前周期
+    无法识别时返回 `400 INVALID_PARAMS`；显式传入非空 `fields` 不受
+    此限制。
 - `stock_code`：必填，`stock.market` 字符串或数组，最多 20 项。
 - `period`：可选，默认 `follow`；由当前 QMT 客户端校验具体周期。
 - `start_time`、`end_time`：可选，格式为 `YYYYMMDD` 或

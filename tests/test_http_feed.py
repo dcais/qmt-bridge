@@ -96,6 +96,7 @@ class FakeFinancialPanel:
 class FakeContext:
     def __init__(self):
         self.account_id = None
+        self.period = "1d"
         self.callback = None
         self.timer_id = "timer-1"
         self.cancelled_timer_id = None
@@ -952,10 +953,7 @@ class HttpFeedTest(unittest.TestCase):
     def test_get_market_data_ex_applies_bounded_feed_defaults(self):
         client_thread, response = self.start_request(
             "/get_market_data_ex",
-            {
-                "fields": ["close"],
-                "stock_code": "600000.SH",
-            },
+            {"stock_code": "600000.SH"},
         )
         self.wait_for_queued_job()
 
@@ -967,7 +965,22 @@ class HttpFeedTest(unittest.TestCase):
             [
                 (
                     threading.get_ident(),
-                    (["close"], ["600000.SH"]),
+                    (
+                        [
+                            "time",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                            "amount",
+                            "settle",
+                            "openInterest",
+                            "preClose",
+                            "suspendFlag",
+                        ],
+                        ["600000.SH"],
+                    ),
                     {
                         "period": "follow",
                         "start_time": "",
@@ -981,6 +994,169 @@ class HttpFeedTest(unittest.TestCase):
             ],
             self.context.market_data_ex_calls,
         )
+
+    def test_get_market_data_ex_expands_tick_and_level2_default_fields(self):
+        cases = (
+            (
+                "tick",
+                [
+                    "time",
+                    "lastPrice",
+                    "lastClose",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                    "settle",
+                    "openInterest",
+                    "stockStatus",
+                ],
+            ),
+            (
+                "l2transaction",
+                [
+                    "time",
+                    "price",
+                    "volume",
+                    "amount",
+                    "tradeIndex",
+                    "buyNo",
+                    "sellNo",
+                    "tradeType",
+                    "tradeFlag",
+                ],
+            ),
+        )
+        for period, expected_fields in cases:
+            client_thread, response = self.start_request(
+                "/get_market_data_ex",
+                {
+                    "fields": [],
+                    "stock_code": "600000.SH",
+                    "period": period,
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(200, response["status"])
+            self.assertEqual(
+                expected_fields,
+                self.context.market_data_ex_calls[-1][1][0],
+            )
+
+    def test_default_market_data_fields_supports_synthesized_bars(self):
+        expected_fields = list(self.strategy.MARKET_DATA_BAR_FIELDS)
+        for period in (
+            "3m",
+            "10m",
+            "60m",
+            "2h",
+            "3h",
+            "4h",
+            "2d",
+            "3d",
+            "5d",
+        ):
+            self.assertEqual(
+                expected_fields,
+                self.strategy.default_market_data_fields(period),
+            )
+
+    def test_get_market_data_ex_resolves_follow_profile_from_context(self):
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {"fields": [], "stock_code": "600000.SH"},
+        )
+        self.wait_for_queued_job()
+
+        reset_context = FakeContext()
+        reset_context.period = "tick"
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            list(self.strategy.MARKET_DATA_TICK_FIELDS),
+            reset_context.market_data_ex_calls[-1][1][0],
+        )
+        self.assertEqual(
+            "follow",
+            reset_context.market_data_ex_calls[-1][2]["period"],
+        )
+        self.assertEqual([], self.context.market_data_ex_calls)
+
+    def test_get_market_data_ex_rejects_unknown_empty_field_profile(self):
+        for request_params in (
+            {
+                "fields": [],
+                "stock_code": "600000.SH",
+                "period": "special-data",
+            },
+            {"fields": [], "stock_code": "600000.SH"},
+        ):
+            if "period" not in request_params:
+                self.context.period = None
+            client_thread, response = self.start_request(
+                "/get_market_data_ex",
+                request_params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+
+    def test_get_market_data_ex_accepts_explicit_special_period_fields(self):
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": ["question"],
+                "stock_code": "600000.SH",
+                "period": "interactiveqa",
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            ["question"],
+            self.context.market_data_ex_calls[-1][1][0],
+        )
+
+    def test_get_market_data_ex_sizes_expanded_fields_before_qmt_call(self):
+        client_thread, response = self.start_request(
+            "/get_market_data_ex",
+            {
+                "fields": [],
+                "stock_code": ["600000.SH", "000001.SZ"],
+                "period": "1d",
+                "count": 1000,
+            },
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertEqual(400, response["status"])
+        self.assertEqual(
+            "INVALID_PARAMS",
+            response["body"]["error"]["code"],
+        )
+        self.assertEqual([], self.context.market_data_ex_calls)
 
     def test_get_market_data_ex_parses_get_booleans_and_lists(self):
         query = urlencode(
@@ -1019,8 +1195,6 @@ class HttpFeedTest(unittest.TestCase):
         }
         invalid_params = (
             {},
-            {"stock_code": ["600000.SH"]},
-            {"fields": [], "stock_code": ["600000.SH"]},
             dict(valid, stock_code=["600000"]),
             dict(valid, fields=["f{0}".format(index) for index in range(33)]),
             dict(valid, count=-1),
