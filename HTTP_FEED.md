@@ -30,7 +30,7 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
 、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
-、`get_market_data_ex` 和 `get_financial_data` 分支。
+、`get_full_tick`、`get_market_data_ex` 和 `get_financial_data` 分支。
 
 ## Account demo
 
@@ -270,6 +270,52 @@ curl.exe -X POST `
 正负无穷会转换为 `null`。历史数据应先在 QMT 数据管理中下载；
 `subscribe=false` 不会补取尚未下载的数据。
 
+## 最新全推 Tick
+
+查询浦发银行的最新全推快照：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stock_code=600000.SH" `
+  "http://127.0.0.1:1688/get_full_tick"
+```
+
+也可以使用 POST JSON 一次查询多个合约：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"stock_code":["600000.SH","000001.SZ"]}' `
+  "http://127.0.0.1:1688/get_full_tick"
+```
+
+`stock_code` 必填，接受一个 `stock.market` 字符串或字符串数组。虽然 QMT
+全推数据本身没有品种数量限制，FEED 为保护策略线程把单次请求限制为最多
+20 个合约。接口在本次 schedule 回调传入的 `ContextInfo` 上调用
+`ContextInfo.get_full_tick(stock_code)`，不缓存 `ContextInfo`。
+
+返回对象以合约代码为 key，每个值是该合约的最新 Tick 字典。例如：
+
+```json
+{
+  "600000.SH": {
+    "time": 1782871200000,
+    "lastPrice": 10.1,
+    "lastClose": 10.0,
+    "amount": 312345678.0,
+    "volume": 123456,
+    "askPrice": [10.11, 10.12, 10.13, 10.14, 10.15],
+    "bidPrice": [10.10, 10.09, 10.08, 10.07, 10.06]
+  }
+}
+```
+
+具体字段随 QMT 客户端和行情权限变化，调用方不应假设所有字段都存在。
+numpy 数组会转换为 JSON 数组，`NaN`、正负无穷会转换为 `null`；单次
+响应最多转换 50000 个 JSON 值。该接口只读取客户端缓存的最新全推快照，
+不能查询历史 Tick，也不需要建立订阅。若没有五档盘口，请检查客户端的
+全推行情级别。
+
 ## 合约详细信息
 
 获取合约基本信息：
@@ -420,16 +466,16 @@ curl.exe -X POST `
 2. HTTP 请求线程使用 `put_nowait()` 放入任务。
 3. HTTP 请求线程等待任务 `Event`，不阻塞 QMT 策略线程。
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
-5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；行情或除权因子
-   查询每轮最多执行 1 个。
+5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；全推 Tick、
+   K 线行情或除权因子查询每轮最多执行 1 个。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
 `get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
-、`get_market_data_ex` 和 `get_financial_data` 同样为同步调用。这些调用
-必须保持极短。
+、`get_full_tick`、`get_market_data_ex` 和 `get_financial_data`
+同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -470,6 +516,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_divid_factors(ContextInfo, params)
     if method == "get_weight_in_index":
         return handle_get_weight_in_index(ContextInfo, params)
+    if method == "get_full_tick":
+        return handle_get_full_tick(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":

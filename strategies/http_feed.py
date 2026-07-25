@@ -36,6 +36,8 @@ MAX_MARKET_DATA_COUNT = 1000
 MAX_MARKET_DATA_CELLS = 20000
 MAX_MARKET_DATA_COLUMNS = 128
 MAX_MARKET_DATA_JSON_VALUES = 50000
+MAX_FULL_TICK_STOCKS = 20
+MAX_FULL_TICK_JSON_VALUES = 50000
 MARKET_DATA_BAR_FIELDS = (
     "time",
     "open",
@@ -150,6 +152,7 @@ MARKET_DATA_DIVIDEND_TYPES = {
 }
 ONE_JOB_PER_TICK_METHODS = {
     "get_divid_factors",
+    "get_full_tick",
     "get_market_data_ex",
 }
 TRADING_DATE_PERIODS = {
@@ -998,6 +1001,71 @@ def handle_get_weight_in_index(ContextInfo, params):
     return weight
 
 
+def handle_get_full_tick(ContextInfo, params):
+    allowed_params = {"stock_code"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported full tick params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stocks = normalize_financial_list(
+        params.get("stock_code"),
+        "stock_code",
+        MAX_FULL_TICK_STOCKS,
+        stockcodes=True,
+    )
+    result = ContextInfo.get_full_tick(stocks)
+    if not isinstance(result, dict):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_full_tick did not return a dict",
+        )
+    if len(result) > len(stocks):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_full_tick returned too many stock results",
+        )
+
+    requested_stocks = set(stocks)
+    normalized = {}
+    json_budget = [MAX_FULL_TICK_JSON_VALUES]
+    for stockcode, tick in result.items():
+        if (
+            not isinstance(stockcode, str)
+            or stockcode not in requested_stocks
+        ):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_full_tick returned an unexpected stock code",
+            )
+        if (
+            not isinstance(tick, dict)
+            or not all(isinstance(field, str) for field in tick)
+        ):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_full_tick returned an invalid tick dict",
+            )
+        try:
+            normalized[stockcode] = qmt_json_value(tick, json_budget)
+        except (TypeError, ValueError):
+            raise FeedError(
+                500,
+                "INVALID_QMT_RESULT",
+                "get_full_tick result exceeds JSON limits",
+            )
+    return normalized
+
+
 def resolve_market_data_profile_period(ContextInfo, period):
     normalized_period = period.lower()
     if normalized_period != "follow":
@@ -1504,6 +1572,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_divid_factors(ContextInfo, params)
     if method == "get_weight_in_index":
         return handle_get_weight_in_index(ContextInfo, params)
+    if method == "get_full_tick":
+        return handle_get_full_tick(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":
