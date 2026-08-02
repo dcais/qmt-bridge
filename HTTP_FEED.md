@@ -30,7 +30,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
 、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
-、`get_full_tick`、`get_market_data_ex` 和 `get_financial_data` 分支。
+、`get_full_tick`、`get_his_index_data`、`get_longhubang`
+、`get_market_data_ex` 和 `get_financial_data` 分支。
 
 ## Account demo
 
@@ -407,6 +408,68 @@ curl.exe --get `
 表示该股票的绝对权重为 `0.438%`。QMT 接口没有日期参数，FEED 也不接受
 额外的日期字段。
 
+## 历史指数数据
+
+查询沪深 300 的历史指数权重数据：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stockcode=000300.SH" `
+  "http://127.0.0.1:1688/get_his_index_data"
+```
+
+`stockcode` 必填，必须使用 `stock.market` 格式。接口在当前 schedule 回调传入的
+`ContextInfo` 上调用 `ContextInfo.get_his_index_data(stockcode)`，不缓存
+`ContextInfo`。当前安装的 QMT Python 包装器将该调用转发到历史指数权重查询，
+但当前在线文档没有给出稳定的返回字段定义，因此 FEED 不假定固定业务字段，
+只将字典、数组或二维表格结果规范化为有界 JSON。非有限浮点数转换为 `null`。
+
+该查询每个 schedule tick 最多执行一个，返回结果最多包含 50000 个 JSON 值。
+实际数据范围和可用性取决于本机 QMT 版本及已下载的数据。
+
+## 龙虎榜
+
+查询万科 A 在指定日期范围内的龙虎榜数据：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "stock_list=000002.SZ" `
+  --data-urlencode "startTime=20260701" `
+  --data-urlencode "endTime=20260731" `
+  "http://127.0.0.1:1688/get_longhubang"
+```
+
+多个股票建议使用 POST JSON，也可在 GET 中重复 `stock_list` 参数：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"stock_list":["000002.SZ","600000.SH"],"startTime":"20260701","endTime":"20260731"}' `
+  "http://127.0.0.1:1688/get_longhubang"
+```
+
+参数与 [QMT `ContextInfo.get_longhubang` 官方文档](https://dict.thinktrader.net/innerApi/data_function.html#contextinfo-get-longhubang-获取龙虎榜数据)
+一致：
+
+- `stock_list`：1 到 20 个 `stock.market` 格式的股票代码。
+- `startTime`、`endTime`：必填，格式为 `YYYYMMDD`，开始日期不能晚于结束日期。
+- 单次查询跨度最多 3660 天。
+- 股票数量乘以自然日数量不能超过 3660；例如单股可查约十年，20 股最多查约半年。
+
+成功结果统一为二维表格 JSON：
+
+```json
+{
+  "index": [0],
+  "columns": ["stockCode", "date", "close", "buyTraderBooth", "sellTraderBooth"],
+  "data": [["000002.SZ", "2026-07-01T00:00:00", 12.5, {"index": [], "columns": [], "data": []}, {"index": [], "columns": [], "data": []}]]
+}
+```
+
+`buyTraderBooth` 和 `sellTraderBooth` 原本也是 DataFrame，FEED 会递归转换成同样的
+`index`、`columns`、`data` 结构。顶层最多返回 1000 行、32 列和 20000 个单元格，
+整个结果最多包含 50000 个 JSON 值；该查询每个 schedule tick 最多执行一个。
+
 ## 财务数据
 
 接口支持 QMT `ContextInfo.get_financial_data` 的区间查询和单根 K 线查询。
@@ -467,14 +530,15 @@ curl.exe -X POST `
 3. HTTP 请求线程等待任务 `Event`，不阻塞 QMT 策略线程。
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
 5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；全推 Tick、
-   K 线行情或除权因子查询每轮最多执行 1 个。
+   K 线行情、除权因子、历史指数数据或龙虎榜查询每轮最多执行 1 个。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
 `get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
-、`get_full_tick`、`get_market_data_ex` 和 `get_financial_data`
+、`get_full_tick`、`get_his_index_data`、`get_longhubang`
+、`get_market_data_ex` 和 `get_financial_data`
 同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
@@ -518,6 +582,10 @@ def dispatch_request(ContextInfo, request):
         return handle_get_weight_in_index(ContextInfo, params)
     if method == "get_full_tick":
         return handle_get_full_tick(ContextInfo, params)
+    if method == "get_his_index_data":
+        return handle_get_his_index_data(ContextInfo, params)
+    if method == "get_longhubang":
+        return handle_get_longhubang(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":

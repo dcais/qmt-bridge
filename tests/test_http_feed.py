@@ -1,4 +1,5 @@
 import copy
+import datetime as dt
 import importlib.util
 import json
 import threading
@@ -66,6 +67,24 @@ class FakeMarketFrame:
         )
 
 
+class FakeTable:
+    ndim = 2
+
+    def __init__(self, index, columns, data):
+        self.index = index
+        self.columns = columns
+        self.values = FakeValues(data)
+
+
+class OversizedTable:
+    ndim = 2
+
+    def __init__(self, row_count):
+        self.index = list(range(row_count))
+        self.columns = ["value"]
+        self.values = ExplodingValues()
+
+
 class FakeFinancialFrame:
     ndim = 2
 
@@ -109,6 +128,8 @@ class FakeContext:
         self.financial_data_keyword_calls = []
         self.market_data_ex_calls = []
         self.full_tick_calls = []
+        self.his_index_data_calls = []
+        self.longhubang_calls = []
 
     def set_account(self, account_id):
         self.account_id = account_id
@@ -178,6 +199,46 @@ class FakeContext:
             }
             for stockcode in args[0]
         }
+
+    def get_his_index_data(self, *args):
+        self.his_index_data_calls.append((threading.get_ident(),) + args)
+        return {
+            "20260701": {"600000.SH": 0.0438},
+            "20260702": {"600000.SH": float("nan")},
+        }
+
+    def get_longhubang(self, *args):
+        self.longhubang_calls.append((threading.get_ident(),) + args)
+        booth_columns = ["traderName", "buyAmount", "sellAmount", "rank"]
+        buy_booth = FakeTable(
+            [0],
+            booth_columns,
+            [["example buy booth", 1000000.0, 0.0, 1]],
+        )
+        sell_booth = FakeTable(
+            [0],
+            booth_columns,
+            [["example sell booth", 0.0, float("nan"), 1]],
+        )
+        return FakeTable(
+            [0],
+            [
+                "stockCode",
+                "date",
+                "close",
+                "buyTraderBooth",
+                "sellTraderBooth",
+            ],
+            [
+                [
+                    "000002.SZ",
+                    dt.datetime(2026, 7, 1),
+                    12.5,
+                    buy_booth,
+                    sell_booth,
+                ]
+            ],
+        )
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -1825,6 +1886,276 @@ class HttpFeedTest(unittest.TestCase):
         self.assertEqual(200, first_response["status"])
         self.assertEqual(200, second_response["status"])
         self.assertEqual(2, len(self.context.full_tick_calls))
+
+    def test_get_his_index_data_uses_current_schedule_context(self):
+        client_thread, response = self.start_request(
+            "/get_his_index_data?" + urlencode({"stockcode": "000300.SH"})
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_his_index_data",
+                "params": {"stockcode": "000300.SH"},
+            },
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "20260701": {"600000.SH": 0.0438},
+                "20260702": {"600000.SH": None},
+            },
+            response["body"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "000300.SH")],
+            reset_context.his_index_data_calls,
+        )
+        self.assertEqual([], self.context.his_index_data_calls)
+
+    def test_get_his_index_data_rejects_invalid_params(self):
+        invalid_params = (
+            {},
+            {"stockcode": "000300"},
+            {"stockcode": []},
+            {"stockcode": "000300.SH", "unknown": "value"},
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_his_index_data",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.his_index_data_calls)
+
+    def test_get_his_index_data_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            "unexpected scalar",
+            [0] * 50001,
+        )
+        for result in invalid_results:
+            self.context.get_his_index_data = lambda *args: result
+            client_thread, response = self.start_request(
+                "/get_his_index_data",
+                {"stockcode": "000300.SH"},
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
+
+    def test_get_longhubang_serializes_nested_booth_tables(self):
+        body = {
+            "stock_list": ["000002.SZ"],
+            "startTime": "20260701",
+            "endTime": "20260731",
+        }
+        client_thread, response = self.start_request(
+            "/get_longhubang",
+            body,
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {"method": "get_longhubang", "params": body},
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        result = response["body"]
+        self.assertEqual(
+            [
+                "stockCode",
+                "date",
+                "close",
+                "buyTraderBooth",
+                "sellTraderBooth",
+            ],
+            result["columns"],
+        )
+        self.assertEqual("2026-07-01T00:00:00", result["data"][0][1])
+        self.assertEqual(
+            ["traderName", "buyAmount", "sellAmount", "rank"],
+            result["data"][0][3]["columns"],
+        )
+        self.assertEqual(
+            [["example buy booth", 1000000.0, 0.0, 1]],
+            result["data"][0][3]["data"],
+        )
+        self.assertIsNone(result["data"][0][4]["data"][0][2])
+        self.assertEqual(
+            [
+                (
+                    schedule_thread_id,
+                    ["000002.SZ"],
+                    "20260701",
+                    "20260731",
+                )
+            ],
+            reset_context.longhubang_calls,
+        )
+        self.assertEqual([], self.context.longhubang_calls)
+
+    def test_get_longhubang_rejects_invalid_params(self):
+        invalid_params = (
+            {},
+            {
+                "stock_list": [],
+                "startTime": "20260701",
+                "endTime": "20260731",
+            },
+            {
+                "stock_list": ["000002"],
+                "startTime": "20260701",
+                "endTime": "20260731",
+            },
+            {
+                "stock_list": ["000002.SZ"],
+                "startTime": "20260732",
+                "endTime": "20260731",
+            },
+            {
+                "stock_list": ["000002.SZ"],
+                "startTime": "20260801",
+                "endTime": "20260731",
+            },
+            {
+                "stock_list": ["000002.SZ"],
+                "startTime": "20100101",
+                "endTime": "20210101",
+            },
+            {
+                "stock_list": ["000002.SZ"] * 20,
+                "startTime": "20260101",
+                "endTime": "20261231",
+            },
+            {
+                "stock_list": ["000002.SZ"],
+                "startTime": "20260701",
+                "endTime": "20260731",
+                "unknown": "value",
+            },
+        )
+        for params in invalid_params:
+            client_thread, response = self.start_request(
+                "/get_longhubang",
+                params,
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(400, response["status"])
+            self.assertEqual(
+                "INVALID_PARAMS",
+                response["body"]["error"]["code"],
+            )
+        self.assertEqual([], self.context.longhubang_calls)
+
+    def test_get_longhubang_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            [],
+            OversizedTable(1001),
+            FakeTable(
+                [0],
+                ["buyTraderBooth"],
+                [[FakeArray([0] * 50001)]],
+            ),
+        )
+        for result in invalid_results:
+            self.context.get_longhubang = lambda *args: result
+            client_thread, response = self.start_request(
+                "/get_longhubang",
+                {
+                    "stock_list": ["000002.SZ"],
+                    "startTime": "20260701",
+                    "endTime": "20260731",
+                },
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(self.context)
+            client_thread.join(timeout=2)
+
+            self.assertEqual(500, response["status"])
+            self.assertEqual(
+                "INVALID_QMT_RESULT",
+                response["body"]["error"]["code"],
+            )
+
+    def test_new_history_methods_process_at_most_one_job_per_tick(self):
+        cases = (
+            (
+                "/get_his_index_data",
+                {"stockcode": "000300.SH"},
+                "his_index_data_calls",
+            ),
+            (
+                "/get_longhubang",
+                {
+                    "stock_list": ["000002.SZ"],
+                    "startTime": "20260701",
+                    "endTime": "20260731",
+                },
+                "longhubang_calls",
+            ),
+        )
+        for path, body, calls_name in cases:
+            with self.subTest(path=path):
+                first_thread, first_response = self.start_request(path, body)
+                self.wait_for_queued_job()
+                second_thread, second_response = self.start_request(path, body)
+                deadline = time.time() + 2
+                while (
+                    self.state.request_queue.qsize() < 2
+                    and time.time() < deadline
+                ):
+                    time.sleep(0.01)
+                self.assertEqual(2, self.state.request_queue.qsize())
+
+                self.context.callback(self.context)
+                first_thread.join(timeout=2)
+
+                self.assertFalse(first_thread.is_alive())
+                self.assertTrue(second_thread.is_alive())
+                self.assertEqual(1, self.state.request_queue.qsize())
+                self.assertEqual(1, len(getattr(self.context, calls_name)))
+
+                self.context.callback(self.context)
+                second_thread.join(timeout=2)
+
+                self.assertFalse(second_thread.is_alive())
+                self.assertEqual(200, first_response["status"])
+                self.assertEqual(200, second_response["status"])
+                self.assertEqual(2, len(getattr(self.context, calls_name)))
 
     def test_sector_realtime_param_is_converted_to_millisecond_timestamp(self):
         client_thread, response = self.start_request(

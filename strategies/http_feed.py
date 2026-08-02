@@ -38,6 +38,17 @@ MAX_MARKET_DATA_COLUMNS = 128
 MAX_MARKET_DATA_JSON_VALUES = 50000
 MAX_FULL_TICK_STOCKS = 20
 MAX_FULL_TICK_JSON_VALUES = 50000
+MAX_HIS_INDEX_JSON_VALUES = 50000
+MAX_LONGHUBANG_STOCKS = 20
+MAX_LONGHUBANG_DATE_DAYS = 3660
+MAX_LONGHUBANG_STOCK_DAYS = 3660
+MAX_LONGHUBANG_ROWS = 1000
+MAX_LONGHUBANG_COLUMNS = 32
+MAX_LONGHUBANG_CELLS = 20000
+MAX_LONGHUBANG_JSON_VALUES = 50000
+MAX_QMT_TABLE_ROWS = 1000
+MAX_QMT_TABLE_COLUMNS = 64
+MAX_QMT_TABLE_CELLS = 20000
 MARKET_DATA_BAR_FIELDS = (
     "time",
     "open",
@@ -153,6 +164,8 @@ MARKET_DATA_DIVIDEND_TYPES = {
 ONE_JOB_PER_TICK_METHODS = {
     "get_divid_factors",
     "get_full_tick",
+    "get_his_index_data",
+    "get_longhubang",
     "get_market_data_ex",
 }
 TRADING_DATE_PERIODS = {
@@ -509,6 +522,48 @@ def normalize_financial_barpos(value):
     return barpos
 
 
+def qmt_table_to_json(
+    value,
+    budget=None,
+    max_rows=MAX_QMT_TABLE_ROWS,
+    max_columns=MAX_QMT_TABLE_COLUMNS,
+    max_cells=MAX_QMT_TABLE_CELLS,
+):
+    if getattr(value, "ndim", None) != 2:
+        raise ValueError("QMT result is not a two-dimensional table")
+    try:
+        row_count = len(value.index)
+        column_count = len(value.columns)
+    except (AttributeError, TypeError):
+        raise ValueError("QMT table axes are unavailable")
+    if row_count > max_rows:
+        raise ValueError("QMT table row limit exceeded")
+    if column_count > max_columns:
+        raise ValueError("QMT table column limit exceeded")
+    if row_count * column_count > max_cells:
+        raise ValueError("QMT table cell limit exceeded")
+
+    try:
+        raw_data = value.values.tolist()
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("QMT table values are unavailable")
+    if not isinstance(raw_data, list) or len(raw_data) != row_count:
+        raise ValueError("QMT table row count is inconsistent")
+    if any(
+        not isinstance(row, (list, tuple)) or len(row) != column_count
+        for row in raw_data
+    ):
+        raise ValueError("QMT table columns are inconsistent")
+
+    return {
+        "index": [qmt_json_value(item, budget) for item in list(value.index)],
+        "columns": [
+            qmt_json_value(item, budget) for item in list(value.columns)
+        ],
+        "data": qmt_json_value(raw_data, budget),
+    }
+
+
 def qmt_json_value(value, budget=None):
     if budget is not None:
         budget[0] -= 1
@@ -527,6 +582,8 @@ def qmt_json_value(value, budget=None):
             str(key): qmt_json_value(item, budget)
             for key, item in value.items()
         }
+    if getattr(value, "ndim", None) == 2:
+        return qmt_table_to_json(value, budget)
 
     tolist_method = getattr(value, "tolist", None)
     if callable(tolist_method):
@@ -1066,6 +1123,118 @@ def handle_get_full_tick(ContextInfo, params):
     return normalized
 
 
+def handle_get_his_index_data(ContextInfo, params):
+    allowed_params = {"stockcode"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported historical index params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stockcode = normalize_stockcode(params.get("stockcode"))
+    if stockcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+
+    result = ContextInfo.get_his_index_data(stockcode)
+    if not isinstance(result, (dict, list, tuple)) and getattr(
+        result,
+        "ndim",
+        None,
+    ) != 2:
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_his_index_data did not return structured data",
+        )
+    try:
+        return qmt_json_value(result, [MAX_HIS_INDEX_JSON_VALUES])
+    except (AttributeError, TypeError, ValueError):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_his_index_data result exceeds JSON limits",
+        )
+
+
+def handle_get_longhubang(ContextInfo, params):
+    allowed_params = {"stock_list", "startTime", "endTime"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported longhubang params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stock_list = normalize_financial_list(
+        params.get("stock_list"),
+        "stock_list",
+        MAX_LONGHUBANG_STOCKS,
+        stockcodes=True,
+    )
+    start_time, start_date = normalize_financial_date(
+        params.get("startTime"),
+        "startTime",
+    )
+    end_time, end_date = normalize_financial_date(
+        params.get("endTime"),
+        "endTime",
+    )
+    if start_date > end_date:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "startTime must not be later than endTime",
+        )
+    if (end_date - start_date).days > MAX_LONGHUBANG_DATE_DAYS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "longhubang date range must not exceed {0} days".format(
+                MAX_LONGHUBANG_DATE_DAYS
+            ),
+        )
+    date_count = (end_date - start_date).days + 1
+    if len(stock_list) * date_count > MAX_LONGHUBANG_STOCK_DAYS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stock count times date count must not exceed {0}".format(
+                MAX_LONGHUBANG_STOCK_DAYS
+            ),
+        )
+
+    result = ContextInfo.get_longhubang(
+        stock_list,
+        start_time,
+        end_time,
+    )
+    try:
+        return qmt_table_to_json(
+            result,
+            [MAX_LONGHUBANG_JSON_VALUES],
+            MAX_LONGHUBANG_ROWS,
+            MAX_LONGHUBANG_COLUMNS,
+            MAX_LONGHUBANG_CELLS,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_longhubang returned an invalid or oversized table",
+        )
+
+
 def resolve_market_data_profile_period(ContextInfo, period):
     normalized_period = period.lower()
     if normalized_period != "follow":
@@ -1574,6 +1743,10 @@ def dispatch_request(ContextInfo, request):
         return handle_get_weight_in_index(ContextInfo, params)
     if method == "get_full_tick":
         return handle_get_full_tick(ContextInfo, params)
+    if method == "get_his_index_data":
+        return handle_get_his_index_data(ContextInfo, params)
+    if method == "get_longhubang":
+        return handle_get_longhubang(ContextInfo, params)
     if method == "get_market_data_ex":
         return handle_get_market_data_ex(ContextInfo, params)
     if method == "get_financial_data":
