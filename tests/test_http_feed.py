@@ -152,9 +152,11 @@ class FakeContext:
 
     def get_instrument_detail(self, *args):
         self.instrument_detail_calls.append((threading.get_ident(),) + args)
+        stockcode = args[0]
+        code, market = stockcode.split(".", 1)
         return {
-            "ExchangeID": "SH",
-            "InstrumentID": "600000",
+            "ExchangeID": market,
+            "InstrumentID": code,
             "InstrumentName": "浦发银行",
         }
 
@@ -617,6 +619,90 @@ class HttpFeedTest(unittest.TestCase):
         )
         self.assertEqual([], self.context.instrument_detail_calls)
 
+    def test_get_instrument_details_processes_one_stock_per_tick(self):
+        body = {
+            "stock_code": ["600000.SH", "000001.SZ"],
+            "iscomplete": True,
+        }
+        client_thread, response = self.start_request(
+            "/get_instrument_details",
+            body,
+        )
+        self.wait_for_queued_job()
+
+        first_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(first_context)
+
+        self.assertTrue(client_thread.is_alive())
+        self.assertEqual(
+            1,
+            self.strategy._FEED_STATE.request_queue.unfinished_tasks,
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "600000.SH", True)],
+            first_context.instrument_detail_calls,
+        )
+
+        second_context = FakeContext()
+        self.context.callback(second_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual({}, response["body"]["errors"])
+        self.assertEqual(
+            {
+                "600000.SH": {
+                    "ExchangeID": "SH",
+                    "InstrumentID": "600000",
+                    "InstrumentName": "浦发银行",
+                },
+                "000001.SZ": {
+                    "ExchangeID": "SZ",
+                    "InstrumentID": "000001",
+                    "InstrumentName": "浦发银行",
+                },
+            },
+            response["body"]["results"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "000001.SZ", True)],
+            second_context.instrument_detail_calls,
+        )
+        self.assertEqual(
+            0,
+            self.strategy._FEED_STATE.request_queue.unfinished_tasks,
+        )
+        self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_instrument_details_enforces_aggregate_json_limit(self):
+        original_limit = self.strategy.MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES
+        self.strategy.MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES = 4
+        try:
+            client_thread, response = self.start_request(
+                "/get_instrument_details",
+                {"stock_code": ["600000.SH", "000001.SZ"]},
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(FakeContext())
+            self.context.callback(FakeContext())
+            client_thread.join(timeout=2)
+
+            self.assertFalse(client_thread.is_alive())
+            self.assertEqual(200, response["status"])
+            self.assertIn("600000.SH", response["body"]["results"])
+            self.assertNotIn("000001.SZ", response["body"]["results"])
+            self.assertEqual(
+                "RESULT_LIMIT_EXCEEDED",
+                response["body"]["errors"]["000001.SZ"]["code"],
+            )
+        finally:
+            self.strategy.MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES = (
+                original_limit
+            )
+
     def test_get_divid_factors_uses_current_schedule_context(self):
         client_thread, response = self.start_request(
             "/get_divid_factors",
@@ -650,6 +736,76 @@ class HttpFeedTest(unittest.TestCase):
         )
         self.assertEqual([], self.context.divid_factor_calls)
 
+    def test_get_divid_factors_batch_isolates_item_errors_across_ticks(self):
+        body = {"stock_code": ["600000.SH", "000001.SZ"]}
+        client_thread, response = self.start_request(
+            "/get_divid_factors_batch",
+            body,
+        )
+        self.wait_for_queued_job()
+
+        first_context = FakeContext()
+        self.context.callback(first_context)
+
+        self.assertTrue(client_thread.is_alive())
+        self.assertEqual(
+            [(threading.get_ident(), "600000.SH")],
+            first_context.divid_factor_calls,
+        )
+
+        second_context = FakeContext()
+        second_context.get_divid_factors = lambda stockcode: []
+        self.context.callback(second_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {
+                "600000.SH": {
+                    "1689868800000": [
+                        0.32,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0,
+                        1.04507,
+                    ]
+                }
+            },
+            response["body"]["results"],
+        )
+        self.assertEqual(
+            "INVALID_QMT_RESULT",
+            response["body"]["errors"]["000001.SZ"]["code"],
+        )
+
+    def test_get_divid_factors_batch_enforces_aggregate_record_limit(self):
+        original_limit = self.strategy.MAX_BATCH_DIVID_FACTOR_RECORDS
+        self.strategy.MAX_BATCH_DIVID_FACTOR_RECORDS = 1
+        try:
+            client_thread, response = self.start_request(
+                "/get_divid_factors_batch",
+                {"stock_code": ["600000.SH", "000001.SZ"]},
+            )
+            self.wait_for_queued_job()
+
+            self.context.callback(FakeContext())
+            self.context.callback(FakeContext())
+            client_thread.join(timeout=2)
+
+            self.assertFalse(client_thread.is_alive())
+            self.assertEqual(200, response["status"])
+            self.assertIn("600000.SH", response["body"]["results"])
+            self.assertNotIn("000001.SZ", response["body"]["results"])
+            self.assertEqual(
+                "RESULT_LIMIT_EXCEEDED",
+                response["body"]["errors"]["000001.SZ"]["code"],
+            )
+        finally:
+            self.strategy.MAX_BATCH_DIVID_FACTOR_RECORDS = original_limit
+
     def test_get_weight_in_index_uses_current_schedule_context(self):
         client_thread, response = self.start_request(
             "/get_weight_in_index",
@@ -672,6 +828,187 @@ class HttpFeedTest(unittest.TestCase):
             reset_context.index_weight_calls,
         )
         self.assertEqual([], self.context.index_weight_calls)
+
+    def test_get_weights_in_index_processes_one_stock_per_tick(self):
+        body = {
+            "indexcode": "000300.SH",
+            "stock_code": ["000002.SZ", "600000.SH"],
+        }
+        client_thread, response = self.start_request(
+            "/get_weights_in_index",
+            body,
+        )
+        self.wait_for_queued_job()
+
+        first_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(first_context)
+
+        self.assertTrue(client_thread.is_alive())
+        self.assertEqual(
+            [(schedule_thread_id, "000300.SH", "000002.SZ")],
+            first_context.index_weight_calls,
+        )
+
+        second_context = FakeContext()
+        self.context.callback(second_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            {"000002.SZ": 0.438, "600000.SH": 0.438},
+            response["body"]["results"],
+        )
+        self.assertEqual({}, response["body"]["errors"])
+        self.assertEqual(
+            [(schedule_thread_id, "000300.SH", "600000.SH")],
+            second_context.index_weight_calls,
+        )
+
+    def test_batch_endpoints_reject_invalid_params_before_qmt_calls(self):
+        too_many_stocks = [
+            "{0:06d}.SZ".format(index) for index in range(21)
+        ]
+        cases = (
+            ("/get_instrument_details", {}),
+            (
+                "/get_instrument_details",
+                {"stock_code": ["600000.SH", "600000.SH"]},
+            ),
+            (
+                "/get_instrument_details",
+                {"stock_code": too_many_stocks},
+            ),
+            (
+                "/get_instrument_details",
+                {"stock_code": ["600000.SH"], "iscomplete": "yes"},
+            ),
+            ("/get_divid_factors_batch", {"stock_code": []}),
+            (
+                "/get_divid_factors_batch",
+                {"stock_code": ["600000"], "unknown": True},
+            ),
+            (
+                "/get_weights_in_index",
+                {"stock_code": ["000002.SZ"]},
+            ),
+            (
+                "/get_weights_in_index",
+                {
+                    "indexcode": "000300",
+                    "stock_code": ["000002.SZ"],
+                },
+            ),
+        )
+        for path, body in cases:
+            with self.subTest(path=path, body=body):
+                client_thread, response = self.start_request(path, body)
+                self.wait_for_queued_job()
+
+                self.context.callback(self.context)
+                client_thread.join(timeout=2)
+
+                self.assertFalse(client_thread.is_alive())
+                self.assertEqual(400, response["status"])
+                self.assertEqual(
+                    "INVALID_PARAMS",
+                    response["body"]["error"]["code"],
+                )
+        self.assertEqual([], self.context.instrument_detail_calls)
+        self.assertEqual([], self.context.divid_factor_calls)
+        self.assertEqual([], self.context.index_weight_calls)
+
+    def test_stop_wakes_an_active_batch_request(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_details",
+            {"stock_code": ["600000.SH", "000001.SZ"]},
+        )
+        self.wait_for_queued_job()
+
+        self.context.callback(self.context)
+        self.assertTrue(client_thread.is_alive())
+
+        self.strategy.stop(self.context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(503, response["status"])
+        self.assertEqual(
+            "FEED_STOPPING",
+            response["body"]["error"]["code"],
+        )
+        self.assertEqual(0, self.state.request_queue.unfinished_tasks)
+
+    def test_batch_is_not_reactivated_after_stop_begins_during_item(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_details",
+            {"stock_code": ["600000.SH", "000001.SZ"]},
+        )
+        self.wait_for_queued_job()
+
+        stopping_context = FakeContext()
+        original_get_detail = stopping_context.get_instrument_detail
+
+        def get_detail_and_stop(stockcode, iscomplete):
+            result = original_get_detail(stockcode, iscomplete)
+            self.strategy._FEED_STATE.stop_event.set()
+            return result
+
+        stopping_context.get_instrument_detail = get_detail_and_stop
+        self.context.callback(stopping_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(503, response["status"])
+        self.assertEqual(
+            "FEED_STOPPING",
+            response["body"]["error"]["code"],
+        )
+        self.assertIsNone(self.strategy._FEED_STATE.active_job)
+        self.assertEqual(
+            0,
+            self.strategy._FEED_STATE.request_queue.unfinished_tasks,
+        )
+
+    def test_expired_active_batch_is_cleared_before_next_request(self):
+        active_job = self.strategy.RequestJob(
+            {
+                "method": "get_instrument_details",
+                "params": {"stock_code": ["600000.SH", "000001.SZ"]},
+            }
+        )
+        active_job.batch_state = (
+            self.strategy.init_get_instrument_details_batch(
+                active_job.request["params"]
+            )
+        )
+        active_job.batch_state["position"] = 1
+        active_job.deadline = 0
+        self.strategy._FEED_STATE.active_job = active_job
+
+        next_job = self.strategy.RequestJob(
+            {
+                "method": "get_weight_in_index",
+                "params": {
+                    "indexcode": "000300.SH",
+                    "stockcode": "000002.SZ",
+                },
+            }
+        )
+        self.strategy._FEED_STATE.request_queue.put_nowait(next_job)
+
+        self.context.callback(FakeContext())
+
+        self.assertTrue(active_job.done.is_set())
+        self.assertEqual("REQUEST_EXPIRED", active_job.error["code"])
+        self.assertIsNone(self.strategy._FEED_STATE.active_job)
+        self.assertFalse(next_job.done.is_set())
+
+        self.context.callback(FakeContext())
+
+        self.assertTrue(next_job.done.is_set())
+        self.assertEqual(0.438, next_job.result)
 
     def test_get_weight_in_index_rejects_invalid_params(self):
         invalid_params = (

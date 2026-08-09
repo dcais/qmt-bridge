@@ -38,6 +38,11 @@ MAX_MARKET_DATA_COLUMNS = 128
 MAX_MARKET_DATA_JSON_VALUES = 50000
 MAX_FULL_TICK_STOCKS = 20
 MAX_FULL_TICK_JSON_VALUES = 50000
+MAX_BATCH_STOCKS = 20
+MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES = 50000
+MAX_BATCH_DIVID_FACTOR_RECORDS = (
+    MAX_BATCH_STOCKS * MAX_DIVID_FACTOR_RECORDS
+)
 MAX_HIS_INDEX_JSON_VALUES = 50000
 MAX_LONGHUBANG_STOCKS = 20
 MAX_LONGHUBANG_DATE_DAYS = 3660
@@ -168,6 +173,11 @@ ONE_JOB_PER_TICK_METHODS = {
     "get_longhubang",
     "get_market_data_ex",
 }
+BATCH_METHODS = {
+    "get_divid_factors_batch",
+    "get_instrument_details",
+    "get_weights_in_index",
+}
 TRADING_DATE_PERIODS = {
     "1d",
     "1m",
@@ -204,6 +214,8 @@ class RequestJob:
         self.result = None
         self.error = None
         self.error_status = 500
+        self.batch_state = None
+        self.queue_task_pending = False
 
     def set_error(self, status, code, message):
         self.error_status = status
@@ -221,6 +233,8 @@ class FeedState:
         self.server_thread = None
         self.last_dispatch_seconds = 0.0
         self.max_dispatch_seconds = 0.0
+        self.active_job = None
+        self.active_job_lock = threading.Lock()
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -452,6 +466,22 @@ def normalize_financial_list(value, name, max_size, stockcodes=False):
             item = normalize_financial_name(item, name)
         normalized.append(item)
     return normalized
+
+
+def normalize_batch_stock_list(value, name="stock_code"):
+    stocks = normalize_financial_list(
+        value,
+        name,
+        MAX_BATCH_STOCKS,
+        stockcodes=True,
+    )
+    if len(set(stocks)) != len(stocks):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must not contain duplicates".format(name),
+        )
+    return stocks
 
 
 def normalize_financial_date(value, name):
@@ -931,6 +961,169 @@ def handle_get_instrument_detail(ContextInfo, params):
             "get_instrument_detail did not return a string-keyed dict",
         )
     return detail
+
+
+def init_get_instrument_details_batch(params):
+    allowed_params = {"stock_code", "iscomplete"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported instrument detail batch params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+    return {
+        "items": normalize_batch_stock_list(params.get("stock_code")),
+        "position": 0,
+        "results": {},
+        "errors": {},
+        "item_params": {
+            "iscomplete": normalize_boolean(
+                params.get("iscomplete"),
+                "iscomplete",
+                False,
+            ),
+        },
+        "json_budget": [MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES],
+    }
+
+
+def init_get_divid_factors_batch(params):
+    allowed_params = {"stock_code"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported dividend factor batch params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+    return {
+        "items": normalize_batch_stock_list(params.get("stock_code")),
+        "position": 0,
+        "results": {},
+        "errors": {},
+        "item_params": {},
+        "record_count": 0,
+    }
+
+
+def init_get_weights_in_index_batch(params):
+    allowed_params = {"indexcode", "stock_code"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported index weight batch params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+    indexcode = normalize_stockcode(params.get("indexcode"))
+    if indexcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "indexcode must use stock.market format",
+        )
+    return {
+        "items": normalize_batch_stock_list(params.get("stock_code")),
+        "position": 0,
+        "results": {},
+        "errors": {},
+        "item_params": {"indexcode": indexcode},
+    }
+
+
+def process_batch_request(ContextInfo, job):
+    method = job.request.get("method")
+    if job.batch_state is None:
+        if method == "get_instrument_details":
+            job.batch_state = init_get_instrument_details_batch(
+                job.request.get("params")
+            )
+        elif method == "get_divid_factors_batch":
+            job.batch_state = init_get_divid_factors_batch(
+                job.request.get("params")
+            )
+        elif method == "get_weights_in_index":
+            job.batch_state = init_get_weights_in_index_batch(
+                job.request.get("params")
+            )
+        else:
+            raise FeedError(
+                404,
+                "METHOD_NOT_FOUND",
+                "unsupported batch method: {0}".format(method),
+            )
+
+    batch = job.batch_state
+    stockcode = batch["items"][batch["position"]]
+    try:
+        if method == "get_instrument_details":
+            params = {
+                "stockcode": stockcode,
+                "iscomplete": batch["item_params"]["iscomplete"],
+            }
+            result = handle_get_instrument_detail(
+                ContextInfo,
+                params,
+            )
+            try:
+                result = qmt_json_value(result, batch["json_budget"])
+            except ValueError as exc:
+                if "JSON value limit exceeded" in str(exc):
+                    raise FeedError(
+                        500,
+                        "RESULT_LIMIT_EXCEEDED",
+                        "batch instrument details exceed the JSON value limit",
+                    )
+                raise
+            batch["results"][stockcode] = result
+        elif method == "get_divid_factors_batch":
+            result = handle_get_divid_factors(
+                ContextInfo,
+                {"stockcode": stockcode},
+            )
+            next_record_count = batch["record_count"] + len(result)
+            if next_record_count > MAX_BATCH_DIVID_FACTOR_RECORDS:
+                raise FeedError(
+                    500,
+                    "RESULT_LIMIT_EXCEEDED",
+                    "batch dividend factors exceed the record limit",
+                )
+            batch["record_count"] = next_record_count
+            batch["results"][stockcode] = result
+        elif method == "get_weights_in_index":
+            batch["results"][stockcode] = handle_get_weight_in_index(
+                ContextInfo,
+                {
+                    "indexcode": batch["item_params"]["indexcode"],
+                    "stockcode": stockcode,
+                },
+            )
+    except FeedError as exc:
+        batch["errors"][stockcode] = {
+            "code": exc.code,
+            "message": exc.message,
+        }
+    except Exception as exc:
+        batch["errors"][stockcode] = {
+            "code": "QMT_ERROR",
+            "message": str(exc),
+        }
+
+    batch["position"] += 1
+    if batch["position"] < len(batch["items"]):
+        return False
+    job.result = {
+        "results": batch["results"],
+        "errors": batch["errors"],
+    }
+    return True
 
 
 def handle_get_divid_factors(ContextInfo, params):
@@ -1759,6 +1952,13 @@ def dispatch_request(ContextInfo, request):
     )
 
 
+def complete_request_job(state, job):
+    if job.queue_task_pending:
+        job.queue_task_pending = False
+        state.request_queue.task_done()
+    job.done.set()
+
+
 def process_http_requests(ContextInfo):
     state = _FEED_STATE
     if state is None or state.stop_event.is_set():
@@ -1773,12 +1973,18 @@ def process_http_requests(ContextInfo):
         ):
             break
 
-        try:
-            job = state.request_queue.get_nowait()
-        except queue.Empty:
-            break
+        with state.active_job_lock:
+            job = state.active_job
+            state.active_job = None
+        if job is None:
+            try:
+                job = state.request_queue.get_nowait()
+                job.queue_task_pending = True
+            except queue.Empty:
+                break
 
         dispatch_started_at = time.perf_counter()
+        job_complete = True
         try:
             if job.expired or time.time() >= job.deadline:
                 job.set_error(
@@ -1786,6 +1992,8 @@ def process_http_requests(ContextInfo):
                     "REQUEST_EXPIRED",
                     "request expired before QMT processing",
                 )
+            elif job.request.get("method") in BATCH_METHODS:
+                job_complete = process_batch_request(ContextInfo, job)
             else:
                 job.result = dispatch_request(ContextInfo, job.request)
         except FeedError as exc:
@@ -1800,9 +2008,23 @@ def process_http_requests(ContextInfo):
                 dispatch_seconds,
             )
             processed += 1
-            job.done.set()
-            state.request_queue.task_done()
-        if job.request.get("method") in ONE_JOB_PER_TICK_METHODS:
+            if not job_complete:
+                with state.active_job_lock:
+                    if state.stop_event.is_set():
+                        job.set_error(
+                            503,
+                            "FEED_STOPPING",
+                            "HTTP feed is stopping",
+                        )
+                        job_complete = True
+                    else:
+                        state.active_job = job
+            if job_complete:
+                complete_request_job(state, job)
+        if (
+            job.request.get("method") in ONE_JOB_PER_TICK_METHODS
+            or job.request.get("method") in BATCH_METHODS
+        ):
             break
 
 
@@ -1883,6 +2105,17 @@ def stop(ContextInfo):
 
     if state is None:
         return
+
+    with state.active_job_lock:
+        active_job = state.active_job
+        state.active_job = None
+    if active_job is not None:
+        active_job.set_error(
+            503,
+            "FEED_STOPPING",
+            "HTTP feed is stopping",
+        )
+        complete_request_job(state, active_job)
 
     while True:
         try:

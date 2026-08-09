@@ -26,10 +26,12 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 - POST 请求的 `params` 来自 JSON object 请求体。
 - HTTP 服务只支持 GET 和 POST；其他 HTTP verb 不进入任务队列。
 
-任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取，
-再交给 `dispatch_request` 按 `method` 分支处理。当前实现了 `account` 和
+任务进入有界队列后，由 `schedule_run` 调用 `process_http_requests` 拉取。
+单项请求交给 `dispatch_request` 按 `method` 分支处理，批量请求则由
+`process_batch_request` 跨多个 tick 增量推进。当前实现了 `account` 和
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
 、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
+、`get_instrument_details`、`get_divid_factors_batch`、`get_weights_in_index`
 、`get_full_tick`、`get_his_index_data`、`get_longhubang`
 、`get_market_data_ex` 和 `get_financial_data` 分支。
 
@@ -408,6 +410,90 @@ curl.exe --get `
 表示该股票的绝对权重为 `0.438%`。QMT 接口没有日期参数，FEED 也不接受
 额外的日期字段。
 
+## 批量基础数据接口
+
+以下三个接口接受 1 到 20 个不重复的 `stock.market` 代码：
+
+```text
+POST /get_instrument_details
+POST /get_divid_factors_batch
+POST /get_weights_in_index
+```
+
+批量获取合约基本信息：
+
+```powershell
+$body = @{
+  stock_code = @("000063.SZ", "600000.SH")
+  iscomplete = $true
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:1688/get_instrument_details" `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+批量获取复权因子：
+
+```powershell
+$body = @{
+  stock_code = @("000063.SZ", "600000.SH")
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:1688/get_divid_factors_batch" `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+批量获取股票在同一指数中的权重：
+
+```powershell
+$body = @{
+  indexcode = "000300.SH"
+  stock_code = @("000002.SZ", "600000.SH")
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:1688/get_weights_in_index" `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+三个接口统一返回：
+
+```json
+{
+  "results": {
+    "000002.SZ": 0.438
+  },
+  "errors": {
+    "600000.SH": {
+      "code": "INVALID_QMT_RESULT",
+      "message": "get_weight_in_index did not return a number"
+    }
+  }
+}
+```
+
+单只股票失败不会中止其他股票，HTTP 状态仍为 `200`，调用方应同时检查
+`results` 和 `errors`。参数整体非法时返回 `400`。批量状态只保存在模块级
+`RequestJob` 中，不挂到 `ContextInfo`。
+
+`get_divid_factors_batch` 每只股票最多保留 1000 条记录，整个批次最多保留
+20000 条记录；超过批次总上限的股票会进入 `errors`，错误码为
+`RESULT_LIMIT_EXCEEDED`。
+
+`get_instrument_details` 整个批次最多转换 50000 个 JSON 值；超过总上限的
+股票同样进入 `errors`，错误码为 `RESULT_LIMIT_EXCEEDED`。
+
+批次不会在一个 schedule 回调里循环调用 QMT。每个 tick 只处理一只股票，
+未完成任务保留到下一个 tick，并使用该 tick 新传入的 `ContextInfo`。批次执行期间
+若策略停止，等待中的 HTTP 请求立即返回 `503`。活动批次会独占后续 tick，最多
+连续占用 20 个 tick；这保证同一批次按输入顺序完成，但该批次完成前，队列中的
+后续请求不会执行。
+
 ## 历史指数数据
 
 查询沪深 300 的历史指数权重数据：
@@ -531,6 +617,7 @@ curl.exe -X POST `
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
 5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；全推 Tick、
    K 线行情、除权因子、历史指数数据或龙虎榜查询每轮最多执行 1 个。
+   三个批量基础数据接口同样每轮只处理批次中的 1 只股票。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
 QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各业务分支会
@@ -595,6 +682,17 @@ def dispatch_request(ContextInfo, request):
 ```
 
 HTTP 层无需增加新的 Handler。
+
+批量方法不在 `dispatch_request` 中循环执行，而是由 `process_batch_request`
+跨 schedule tick 增量推进：
+
+```python
+BATCH_METHODS = {
+    "get_instrument_details",
+    "get_divid_factors_batch",
+    "get_weights_in_index",
+}
+```
 
 ## 启动
 
