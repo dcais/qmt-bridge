@@ -353,9 +353,12 @@ curl.exe --get `
 返回字段由 QMT 客户端版本和 `iscomplete` 决定，上面的 JSON 仅是示例，
 调用方不应把它当作固定字段集合。
 
-该分支要求客户端支持新版 `ContextInfo.get_instrument_detail`。旧版客户端
-只有 `ContextInfo.get_instrumentdetail`，且不支持 `iscomplete`；应升级
-QMT 客户端后再使用本接口。
+不同 QMT 客户端的 `ContextInfo.get_instrument_detail` 签名不一致。FEED 会先按
+新版形式调用 `get_instrument_detail(stockcode, iscomplete)`；如果客户端明确
+报告位置参数数量不匹配，则自动退回本机兼容形式
+`get_instrument_detail(stockcode)`。单参数客户端会忽略请求中的 `iscomplete`，
+但仍返回该客户端能够提供的名称、上市日期、证券类型等实际字段。函数内部
+真正抛出的 `TypeError` 不会触发兼容回退。
 
 ## 除权除息与复权因子
 
@@ -433,6 +436,9 @@ Invoke-RestMethod -Method Post `
   -ContentType "application/json; charset=utf-8" `
   -Body $body
 ```
+
+批量接口与单项接口使用相同的 QMT 签名兼容规则；在只支持单参数调用的客户端
+上，`iscomplete` 同样属于尽力而为参数，客户端能够返回哪些字段以实际结果为准。
 
 批量获取复权因子：
 

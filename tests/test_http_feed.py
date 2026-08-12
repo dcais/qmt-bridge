@@ -243,6 +243,33 @@ class FakeContext:
         )
 
 
+class SingleArgumentInstrumentContext(FakeContext):
+    def get_instrument_detail(self, stockcode):
+        self.instrument_detail_calls.append(
+            (threading.get_ident(), stockcode)
+        )
+        code, market = stockcode.split(".", 1)
+        return {
+            "ExchangeID": market,
+            "InstrumentID": code,
+            "InstrumentName": "legacy instrument",
+            "OpenDate": "19911101",
+            "InstrumentType": "stock",
+        }
+
+
+class BrokenInstrumentContext(FakeContext):
+    def get_instrument_detail(self, stockcode, iscomplete):
+        self.instrument_detail_calls.append(
+            (threading.get_ident(), stockcode, iscomplete)
+        )
+
+        def decode_instrument_detail(value):
+            return value
+
+        return decode_instrument_detail(stockcode, iscomplete)
+
+
 class HttpFeedTest(unittest.TestCase):
     def setUp(self):
         self.strategy = load_strategy()
@@ -619,6 +646,52 @@ class HttpFeedTest(unittest.TestCase):
         )
         self.assertEqual([], self.context.instrument_detail_calls)
 
+    def test_get_instrument_detail_supports_single_argument_qmt_client(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_detail",
+            {"stockcode": "600000.SH", "iscomplete": True},
+        )
+        self.wait_for_queued_job()
+
+        legacy_context = SingleArgumentInstrumentContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(legacy_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual("legacy instrument", response["body"]["InstrumentName"])
+        self.assertEqual("19911101", response["body"]["OpenDate"])
+        self.assertEqual("stock", response["body"]["InstrumentType"])
+        self.assertEqual(
+            [(schedule_thread_id, "600000.SH")],
+            legacy_context.instrument_detail_calls,
+        )
+
+    def test_get_instrument_detail_does_not_mask_internal_type_error(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_detail",
+            {"stockcode": "600000.SH", "iscomplete": True},
+        )
+        self.wait_for_queued_job()
+
+        broken_context = BrokenInstrumentContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(broken_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(500, response["status"])
+        self.assertEqual("QMT_ERROR", response["body"]["error"]["code"])
+        self.assertIn(
+            "positional argument",
+            response["body"]["error"]["message"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "600000.SH", True)],
+            broken_context.instrument_detail_calls,
+        )
+
     def test_get_instrument_details_processes_one_stock_per_tick(self):
         body = {
             "stock_code": ["600000.SH", "000001.SZ"],
@@ -675,6 +748,34 @@ class HttpFeedTest(unittest.TestCase):
             self.strategy._FEED_STATE.request_queue.unfinished_tasks,
         )
         self.assertEqual([], self.context.instrument_detail_calls)
+
+    def test_get_instrument_details_supports_single_argument_qmt_client(self):
+        client_thread, response = self.start_request(
+            "/get_instrument_details",
+            {
+                "stock_code": ["600000.SH", "000001.SZ"],
+                "iscomplete": True,
+            },
+        )
+        self.wait_for_queued_job()
+
+        first_context = SingleArgumentInstrumentContext()
+        second_context = SingleArgumentInstrumentContext()
+        self.context.callback(first_context)
+        self.context.callback(second_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual({}, response["body"]["errors"])
+        self.assertEqual(
+            "legacy instrument",
+            response["body"]["results"]["600000.SH"]["InstrumentName"],
+        )
+        self.assertEqual(
+            "19911101",
+            response["body"]["results"]["000001.SZ"]["OpenDate"],
+        )
 
     def test_get_instrument_details_enforces_aggregate_json_limit(self):
         original_limit = self.strategy.MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES

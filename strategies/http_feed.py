@@ -908,6 +908,28 @@ def handle_get_trading_dates(ContextInfo, params):
     return trading_dates
 
 
+def is_positional_argument_count_error(exc):
+    message = str(exc)
+    traceback = exc.__traceback__
+    if traceback is None or traceback.tb_next is not None:
+        return False
+    return (
+        "takes" in message
+        and "positional argument" in message
+        and "given" in message
+    )
+
+
+def call_get_instrument_detail(ContextInfo, stockcode, iscomplete):
+    method = ContextInfo.get_instrument_detail
+    try:
+        return method(stockcode, iscomplete)
+    except TypeError as exc:
+        if not is_positional_argument_count_error(exc):
+            raise
+        return method(stockcode)
+
+
 def handle_get_instrument_detail(ContextInfo, params):
     allowed_params = {"stockcode", "iscomplete"}
     unknown_params = set(params) - allowed_params
@@ -950,7 +972,7 @@ def handle_get_instrument_detail(ContextInfo, params):
             "iscomplete must be true or false",
         )
 
-    detail = ContextInfo.get_instrument_detail(stockcode, iscomplete)
+    detail = call_get_instrument_detail(ContextInfo, stockcode, iscomplete)
     if (
         not isinstance(detail, dict)
         or not all(isinstance(name, str) for name in detail)
