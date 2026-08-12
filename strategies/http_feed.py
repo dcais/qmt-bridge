@@ -44,6 +44,7 @@ MAX_BATCH_DIVID_FACTOR_RECORDS = (
     MAX_BATCH_STOCKS * MAX_DIVID_FACTOR_RECORDS
 )
 MAX_HIS_INDEX_JSON_VALUES = 50000
+MAX_HIS_CONTRACTS = 50000
 MAX_LONGHUBANG_STOCKS = 20
 MAX_LONGHUBANG_DATE_DAYS = 3660
 MAX_LONGHUBANG_STOCK_DAYS = 3660
@@ -170,6 +171,7 @@ ONE_JOB_PER_TICK_METHODS = {
     "get_divid_factors",
     "get_full_tick",
     "get_his_index_data",
+    "get_his_contract_list",
     "get_longhubang",
     "get_market_data_ex",
 }
@@ -391,6 +393,22 @@ def normalize_stockcode(value):
     ):
         return None
     return stockcode
+
+
+def normalize_market(value):
+    if not isinstance(value, str):
+        return None
+    market = value.strip().upper()
+    if (
+        not market
+        or len(market) > 16
+        or any(
+            not ("A" <= char <= "Z" or "0" <= char <= "9")
+            for char in market
+        )
+    ):
+        return None
+    return market
 
 
 def normalize_boolean(value, name, default):
@@ -1379,6 +1397,40 @@ def handle_get_his_index_data(ContextInfo, params):
         )
 
 
+def handle_get_his_contract_list(ContextInfo, params):
+    allowed_params = {"market"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported historical contract params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    market = normalize_market(params.get("market"))
+    if market is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "market must contain 1 to 16 ASCII letters or digits",
+        )
+
+    result = ContextInfo.get_his_contract_list(market)
+    if (
+        not isinstance(result, list)
+        or len(result) > MAX_HIS_CONTRACTS
+        or not all(normalize_stockcode(value) is not None for value in result)
+    ):
+        raise FeedError(
+            500,
+            "INVALID_QMT_RESULT",
+            "get_his_contract_list did not return a bounded stock code list",
+        )
+    return result
+
+
 def handle_get_longhubang(ContextInfo, params):
     allowed_params = {"stock_list", "startTime", "endTime"}
     unknown_params = set(params) - allowed_params
@@ -1960,6 +2012,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_full_tick(ContextInfo, params)
     if method == "get_his_index_data":
         return handle_get_his_index_data(ContextInfo, params)
+    if method == "get_his_contract_list":
+        return handle_get_his_contract_list(ContextInfo, params)
     if method == "get_longhubang":
         return handle_get_longhubang(ContextInfo, params)
     if method == "get_market_data_ex":

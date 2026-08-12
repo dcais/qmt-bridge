@@ -129,6 +129,7 @@ class FakeContext:
         self.market_data_ex_calls = []
         self.full_tick_calls = []
         self.his_index_data_calls = []
+        self.his_contract_list_calls = []
         self.longhubang_calls = []
 
     def set_account(self, account_id):
@@ -208,6 +209,12 @@ class FakeContext:
             "20260701": {"600000.SH": 0.0438},
             "20260702": {"600000.SH": float("nan")},
         }
+
+    def get_his_contract_list(self, *args):
+        self.his_contract_list_calls.append(
+            (threading.get_ident(),) + args
+        )
+        return ["10000001.SHO", "10000002.SHO"]
 
     def get_longhubang(self, *args):
         self.longhubang_calls.append((threading.get_ident(),) + args)
@@ -2404,6 +2411,89 @@ class HttpFeedTest(unittest.TestCase):
                 response["body"]["error"]["code"],
             )
 
+    def test_get_his_contract_list_uses_current_schedule_context(self):
+        client_thread, response = self.start_request(
+            "/get_his_contract_list?" + urlencode({"market": "sho"})
+        )
+        queued_job = self.wait_for_queued_job()
+
+        self.assertEqual(
+            {
+                "method": "get_his_contract_list",
+                "params": {"market": "sho"},
+            },
+            queued_job.request,
+        )
+        reset_context = FakeContext()
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(reset_context)
+        client_thread.join(timeout=2)
+
+        self.assertFalse(client_thread.is_alive())
+        self.assertEqual(200, response["status"])
+        self.assertEqual(
+            ["10000001.SHO", "10000002.SHO"],
+            response["body"],
+        )
+        self.assertEqual(
+            [(schedule_thread_id, "SHO")],
+            reset_context.his_contract_list_calls,
+        )
+        self.assertEqual([], self.context.his_contract_list_calls)
+
+    def test_get_his_contract_list_rejects_invalid_params(self):
+        invalid_params = (
+            {},
+            {"market": []},
+            {"market": ""},
+            {"market": "SH.O"},
+            {"market": "上海"},
+            {"market": "SHO", "unknown": "value"},
+        )
+        for params in invalid_params:
+            with self.subTest(params=params):
+                client_thread, response = self.start_request(
+                    "/get_his_contract_list",
+                    params,
+                )
+                self.wait_for_queued_job()
+
+                self.context.callback(self.context)
+                client_thread.join(timeout=2)
+
+                self.assertEqual(400, response["status"])
+                self.assertEqual(
+                    "INVALID_PARAMS",
+                    response["body"]["error"]["code"],
+                )
+        self.assertEqual([], self.context.his_contract_list_calls)
+
+    def test_get_his_contract_list_rejects_invalid_qmt_result(self):
+        invalid_results = (
+            None,
+            "10000001.SHO",
+            ["10000001"],
+            ["10000001.SHO", 1],
+            ["10000001.SHO"] * 50001,
+        )
+        for result in invalid_results:
+            with self.subTest(result_type=type(result).__name__):
+                self.context.get_his_contract_list = lambda *args: result
+                client_thread, response = self.start_request(
+                    "/get_his_contract_list",
+                    {"market": "SHO"},
+                )
+                self.wait_for_queued_job()
+
+                self.context.callback(self.context)
+                client_thread.join(timeout=2)
+
+                self.assertEqual(500, response["status"])
+                self.assertEqual(
+                    "INVALID_QMT_RESULT",
+                    response["body"]["error"]["code"],
+                )
+
     def test_get_longhubang_serializes_nested_booth_tables(self):
         body = {
             "stock_list": ["000002.SZ"],
@@ -2564,6 +2654,11 @@ class HttpFeedTest(unittest.TestCase):
                     "endTime": "20260731",
                 },
                 "longhubang_calls",
+            ),
+            (
+                "/get_his_contract_list",
+                {"market": "SHO"},
+                "his_contract_list_calls",
             ),
         )
         for path, body, calls_name in cases:

@@ -32,7 +32,7 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 `get_stock_list_in_sector`、`get_sector_list`、`get_trading_dates`
 、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
 、`get_instrument_details`、`get_divid_factors_batch`、`get_weights_in_index`
-、`get_full_tick`、`get_his_index_data`、`get_longhubang`
+、`get_full_tick`、`get_his_index_data`、`get_his_contract_list`、`get_longhubang`
 、`get_market_data_ex` 和 `get_financial_data` 分支。
 
 ## Account demo
@@ -500,6 +500,32 @@ Invoke-RestMethod -Method Post `
 连续占用 20 个 tick；这保证同一批次按输入顺序完成，但该批次完成前，队列中的
 后续请求不会执行。
 
+## 已退市合约列表
+
+查询上交所期权市场的已退市合约：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "market=SHO" `
+  "http://127.0.0.1:1688/get_his_contract_list"
+```
+
+`market` 必填，FEED 会转换为大写，仅允许 1 到 16 个 ASCII 字母或数字。
+QMT 官方示例包括 `SH`、`SZ`、`SHO`、`SZO`、`IF`。成功时直接返回合约代码
+JSON 列表，例如：
+
+```json
+["10000001.SHO", "10000002.SHO"]
+```
+
+接口在当前 schedule 回调传入的 `ContextInfo` 上调用
+`ContextInfo.get_his_contract_list(market)`，不缓存 `ContextInfo`；每个 tick
+最多处理一个此类请求，返回列表最多 50000 项。
+
+该 API 读取本地的过期合约列表。首次使用或返回空列表时，应在 QMT
+“行情/数据管理”的智能下载或补充数据中下载“过期合约列表”，重新加载策略后
+再调用。
+
 ## 历史指数数据
 
 查询沪深 300 的历史指数权重数据：
@@ -622,7 +648,7 @@ curl.exe -X POST `
 3. HTTP 请求线程等待任务 `Event`，不阻塞 QMT 策略线程。
 4. `schedule_run` 每 10 毫秒调用一次 `process_http_requests`。
 5. QMT 回调使用 `get_nowait()`，每轮最多接受 10 个任务；全推 Tick、
-   K 线行情、除权因子、历史指数数据或龙虎榜查询每轮最多执行 1 个。
+   K 线行情、除权因子、历史指数数据、已退市合约列表或龙虎榜查询每轮最多执行 1 个。
    三个批量基础数据接口同样每轮只处理批次中的 1 只股票。
 6. `dispatch_request` 执行对应的极短 QMT 操作后设置结果和 `Event`。
 
@@ -630,7 +656,7 @@ QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各�
 同步执行一次对应的 QMT API，包括 `get_trade_detail_data`、
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
 `get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
-、`get_full_tick`、`get_his_index_data`、`get_longhubang`
+、`get_full_tick`、`get_his_index_data`、`get_his_contract_list`、`get_longhubang`
 、`get_market_data_ex` 和 `get_financial_data`
 同样为同步调用。这些调用必须保持极短。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
@@ -677,6 +703,8 @@ def dispatch_request(ContextInfo, request):
         return handle_get_full_tick(ContextInfo, params)
     if method == "get_his_index_data":
         return handle_get_his_index_data(ContextInfo, params)
+    if method == "get_his_contract_list":
+        return handle_get_his_contract_list(ContextInfo, params)
     if method == "get_longhubang":
         return handle_get_longhubang(ContextInfo, params)
     if method == "get_market_data_ex":
