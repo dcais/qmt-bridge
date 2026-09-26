@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """真实 PostgreSQL 隔离 schema 验证；未配置数据库时明确跳过。"""
 import os
+import sys
 import threading
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from order_bridge.common import OrderError, json_text, new_order_document
 from order_bridge.repository import PostgresRepository
@@ -34,6 +37,49 @@ class RepositoryConfigurationTests(unittest.TestCase):
             repo.check_schema()
         self.assertNotIn("secret", str(caught.exception))
         self.assertEqual(caught.exception.status, 503)
+
+    def test_default_driver_uses_psycopg2_with_bounded_timeout(self):
+        cursor = Mock()
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        connect = Mock(return_value=conn)
+        repo = PostgresRepository({"pg_database": "orders", "pg_connect_timeout": 0.25}, "account")
+        with patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connect)}):
+            self.assertIs(repo.repo_connect(), conn)
+        self.assertEqual(connect.call_args[1]["dbname"], "orders")
+        self.assertEqual(connect.call_args[1]["connect_timeout"], 2)
+        self.assertNotIn("timeout", connect.call_args[1])
+        cursor.execute.assert_called_once()
+        conn.commit.assert_called_once()
+        cursor.close.assert_called_once()
+
+    def test_connection_timeout_rounds_up_and_rejects_unbounded_values(self):
+        conn = Mock()
+        connect = Mock(return_value=conn)
+        for configured, expected in ((2.01, 3), (3, 3)):
+            repo = PostgresRepository({"pg_connect_timeout": configured}, "account", connect_factory=connect)
+            repo.repo_connect()
+            self.assertEqual(connect.call_args[1]["connect_timeout"], expected)
+        for configured in (0, -1, "nan", "inf"):
+            repo = PostgresRepository({"pg_connect_timeout": configured}, "account", connect_factory=connect)
+            with self.assertRaises(OrderError) as caught:
+                repo.repo_connect()
+            self.assertEqual(caught.exception.code, "PERSISTENCE_UNAVAILABLE")
+        self.assertEqual(connect.call_count, 2)
+
+    def test_failed_session_setup_closes_cursor_and_connection_without_leak(self):
+        cursor = Mock()
+        cursor.execute.side_effect = RuntimeError("secret_password from server")
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        repo = PostgresRepository({"pg_password": "secret_password"}, "account",
+                                  connect_factory=lambda **kwargs: conn)
+        with self.assertRaises(OrderError) as caught:
+            repo.repo_connect()
+        self.assertEqual(caught.exception.code, "PERSISTENCE_UNAVAILABLE")
+        self.assertNotIn("secret_password", str(caught.exception))
+        cursor.close.assert_called_once()
+        conn.close.assert_called_once()
 
 
 @unittest.skipUnless(os.environ.get("ORDER_TEST_PGHOST"), "ORDER_TEST_PGHOST unset: real PostgreSQL integration skipped")
@@ -287,7 +333,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(current["cancel_status"], "UNKNOWN")
 
     def test_commit_ambiguity_is_error_and_original_id_reads_back(self):
-        from pg8000 import dbapi
+        import psycopg2
         class AmbiguousConnection(object):
             def __init__(self, conn):
                 self.conn, self.commits = conn, 0
@@ -302,7 +348,7 @@ class PostgresRepositoryTests(unittest.TestCase):
                 return self.conn.rollback()
             def close(self):
                 return self.conn.close()
-        repo = self.other(factory=lambda **kwargs: AmbiguousConnection(dbapi.connect(**kwargs)))
+        repo = self.other(factory=lambda **kwargs: AmbiguousConnection(psycopg2.connect(**kwargs)))
         with self.assertRaises(OrderError) as caught:
             repo.accept_order(self.request())
         self.assertEqual(caught.exception.code, "PERSISTENCE_OUTCOME_UNKNOWN")

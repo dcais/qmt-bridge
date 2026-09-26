@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """ORDER 交付工具的无 QMT/PG 验证。"""
 import importlib.util
+import io
 import json
+from contextlib import redirect_stdout
 from pathlib import Path
 import re
 import tempfile
@@ -62,9 +64,17 @@ class BuildTests(unittest.TestCase):
 class DependencyInstallerTests(unittest.TestCase):
     def test_dry_run_does_not_install(self):
         tool = load_tool("install_order_dependencies")
+        output = io.StringIO()
         with patch.object(tool.subprocess, "call") as call:
-            self.assertEqual(tool.main(["--dry-run", "--python36"]), 0)
+            with redirect_stdout(output):
+                self.assertEqual(tool.main(["--dry-run", "--python36"]), 0)
             call.assert_not_called()
+        command = output.getvalue()
+        self.assertIn("--abi cp36m", command)
+        self.assertIn("--platform win_amd64", command)
+        self.assertIn("-r " + str(ROOT / "requirements-order.txt"), command)
+        self.assertEqual((ROOT / "requirements-order.txt").read_text(encoding="utf-8").strip(),
+                         "psycopg2-binary==2.9.5")
 
 
 class SchemaInstallerTests(unittest.TestCase):

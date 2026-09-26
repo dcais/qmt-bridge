@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""安装 HTTP ORDER 的纯 Python PostgreSQL 驱动到隔离 vendor 目录。"""
+"""安装 HTTP ORDER 的 psycopg2 PostgreSQL 驱动到指定目录。"""
 import argparse
 import os
 from pathlib import Path
@@ -18,7 +18,7 @@ def main(argv=None):
     parser.add_argument("--wheel-dir", type=Path,
                         help="离线 wheel 目录；使用 --no-index --find-links")
     parser.add_argument("--python36", action="store_true",
-                        help="为 QMT Python 3.6 选择 cp36/abi3 wheel（在较新 Python 上执行）")
+                        help="为 QMT Python 3.6 选择 cp36m win_amd64 wheel（在较新 Python 上执行）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印 pip 命令")
     args = parser.parse_args(argv)
     requirements = ROOT / "requirements-order.txt"

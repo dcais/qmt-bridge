@@ -1,3 +1,1 @@
-pg8000==1.22.1
-scramp==1.4.1
-asn1crypto==1.5.1
+psycopg2-binary==2.9.5

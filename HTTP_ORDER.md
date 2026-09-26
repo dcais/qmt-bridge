@@ -155,13 +155,13 @@ PG 与 QMT 之间没有原子事务；提交结果不明时保持 `UNKNOWN`，�
 
 ## 新增 ORDER 写入前准备
 
-QMT Python 运行时需要 `pg8000==1.22.1`、`scramp==1.4.1`、`asn1crypto==1.5.1`。在目标 Python 3.6 解释器下运行：
+ORDER 使用 `psycopg2` 导入名，对应锁定依赖 `psycopg2-binary==2.9.5`。先在目标 QMT Python 3.6 解释器中确认 `import psycopg2` 可用；若已安装，无需重复安装。需要安装时，从较新 Python 为 QMT 选择 `cp36m` / `win_amd64` wheel，并把 `--target` 指向目标解释器可导入的 site-packages：
 
 ```powershell
-python tools/install_order_dependencies.py --target "$env:USERPROFILE\qmt-bridge\vendor"
+py -3.14 tools/install_order_dependencies.py --python36 --target "C:\国金证券QMT交易端\bin.x64\Lib\site-packages"
 ```
 
-若从较新 Python 为 QMT Python 3.6 选择 wheel，增加 `--python36`；完全离线时增加 `--wheel-dir C:\path\to\wheels`。先用 `--dry-run` 检查命令。脚本仅写 `--target`，不安装进系统 site-packages。生成单文件策略：
+路径只作本机示例，实际目标须与所运行的 QMT 终端一致；模拟端使用自己的 site-packages。完全离线时增加 `--wheel-dir C:\path\to\wheels`。先用 `--dry-run` 检查命令。脚本仅写 `--target`。`pg_connect_timeout` 默认为 3 秒；配置须为有限正数，小数向上取整，低于 2 秒按 libpq 最小有效值 2 秒处理，以避免零值无限等待。生成单文件策略：
 
 ```powershell
 python tools/build_order_strategy.py

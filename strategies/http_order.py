@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-26 11:32:46
+# Last modified (Asia/Shanghai): 2026-09-26 18:17:51
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -932,6 +932,7 @@ def mark_reconciled(doc, complete=True, now=None):
 """PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。"""
 import hashlib
 import json
+import math
 import re
 import threading
 import uuid
@@ -983,17 +984,24 @@ class PostgresRepository(object):
                                            byteorder="big", signed=True)
 
     def repo_connect(self):
+        conn = None
+        cur = None
         try:
             factory = self.repo_connect_factory
             if factory is None:
-                from pg8000 import dbapi
-                factory = dbapi.connect
+                import psycopg2
+                factory = psycopg2.connect
+            timeout = float(self.config.get("pg_connect_timeout", 3))
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("pg_connect_timeout must be finite and positive")
+            # libpq accepts whole seconds and treats zero as an unlimited wait.
+            connect_timeout = max(2, int(math.ceil(timeout)))
             conn = factory(host=self.config.get("pg_host", "127.0.0.1"),
                            port=int(self.config.get("pg_port", 5432)),
-                           database=self.config.get("pg_database", "postgres"),
+                           dbname=self.config.get("pg_database", "postgres"),
                            user=self.config.get("pg_user", "postgres"),
                            password=self.config.get("pg_password", ""),
-                           timeout=float(self.config.get("pg_connect_timeout", 3)))
+                           connect_timeout=connect_timeout)
             cur = conn.cursor()
             cur.execute("SELECT set_config('statement_timeout', %s, false), set_config('lock_timeout', %s, false)",
                         (str(int(self.config.get("pg_statement_timeout_ms", 2000))),
@@ -1002,8 +1010,14 @@ class PostgresRepository(object):
             cur.close()
             return conn
         except Exception:
+            if cur is not None:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
             try:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             except Exception:
                 pass
             raise repo_error() from None

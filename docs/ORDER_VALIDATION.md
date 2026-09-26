@@ -2,7 +2,14 @@
 
 验证日期：2026-09-26，Asia/Shanghai。以下是代码、HTTP 和 PostgreSQL 验收，不是券商模拟盘交易验收。
 
-## 最新变更：非阻塞、分批执行与持久对账退出
+## 最新变更：psycopg2 驱动迁移
+
+- 2026-09-26：ORDER 默认驱动改为 `psycopg2`，QMT Python 3.6 锁定 `psycopg2-binary==2.9.5`；连接使用 `dbname` 和有界整数 `connect_timeout`，保留事务、幂等、执行权锁及提交结果不明保护。
+- 实际 QMT Python 3.6.8 + psycopg2 2.9.5 + 专用 PostgreSQL 16 容器执行 `unittest discover -s tests -v`：304 项全部通过，无跳过。日志：`.venv/psycopg2-isolated-tests.log`。包含真实数据库迁移、并发、恢复及模拟 QMT 运行时验证。
+- 首轮使用现有容器连接配置时有 47 项数据库连接错误，不计为通过；改用专用容器 `qmt-psycopg2-test-20260926`、端口 15439、数据库 `qmt_order_test` 和随机测试 schema 后完整重跑通过。业务数据库配置和正在运行的 QMT 策略未修改。
+- QMT 解释器下生成器 `--check` 通过，GBK 单文件与源码一致。此次未部署、未重启策略、未调用真实交易 API，也未进行驱动性能基准测试。
+
+## 历史变更：非阻塞、分批执行与持久对账退出
 
 - 交付的 QMT 文件为实际 GBK 单文件；`Last modified`：2026-09-26 11:32:46，SHA256：`8688420afee66456aa317d93dc29b146c85054c93829e92bc8555eb343fa8746`。构建一致性、实际 QMT Python 3.6.8 编译及无 DDL 检查通过。
 - 启动冻结 `submit_batch_size=10`、`cancel_batch_size=10`、`reconcile_batch_size=100`、`schedule_budget_ms=50`。QMT 线程只运行原生调用和短内存操作；数据库、执行权连接和日志各由后台线程处理。HTTP 持久受理仍等待提交确认后才返回 202。
