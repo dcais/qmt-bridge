@@ -10,7 +10,7 @@
 http://127.0.0.1:1688/{method}
 ```
 
-除下载任务和状态查询外，HTTP 层不处理具体 QMT 业务。普通请求会被规范化成
+除下载任务、下载状态和健康查询外，HTTP 层不处理具体 QMT 业务。普通请求会被规范化成
 一个 JSON 任务：
 
 ```json
@@ -35,7 +35,7 @@ http://127.0.0.1:1688/{method}
 、`get_instrument_details`、`get_divid_factors_batch`、`get_weights_in_index`
 、`get_full_tick`、`get_his_index_data`、`get_his_contract_list`、`get_longhubang`
 、`get_market_data_ex`、`get_financial_data`、`download_history_data`
-和 `get_download_status` 分支。
+和 `get_download_status` 分支。`GET /health` 直接读取服务与日志状态，不进入 QMT 队列。
 
 ## Account demo
 
@@ -750,7 +750,11 @@ _FEED_STATE.max_dispatch_seconds
 不能保证快速完成的操作不应加入同步分支，应改成发起异步操作或返回缓存快照。
 
 `stop()` 只发送停止信号、取消定时任务并唤醒排队请求，不执行
-`thread.join()` 或阻塞式 HTTP 关闭。
+`thread.join()` 或阻塞式 HTTP 关闭。已进入的工作和日志由后台收尾；清理完成前
+保持 `STOPPING`，避免新实例覆盖旧实例的日志。停止不尝试中断已经开始的 QMT 下载。
+HTTP 连接读写超时由 `HTTP_CONNECTION_TIMEOUT_SECONDS` 控制，默认 10 秒，
+避免未发送完整请求体的连接一直阻挡清理。日志输出持续阻塞时，后台清理仍会等待，
+期间不能启动新实例。
 
 `Queue`、`Event`、`Thread` 和 `HTTPServer` 等运行时对象只保存在策略模块
 全局 `_FEED_STATE` 中，不能挂到 `ContextInfo`。QMT 会对 `ContextInfo`
@@ -811,9 +815,14 @@ BATCH_METHODS = {
 
 ## 日志
 
-通用方法 `log_message(level, message, **fields)` 同时输出到 QMT console
-和 UTF-8 日志文件，格式为 `YYYY-MM-DD HH:mm:ss [LEVEL] message {fields}`，
-时间使用北京时间（Asia/Shanghai）。
+通用方法 `log_message(level, message, **fields)` 只复制有界的普通数据并尝试入队。
+后台日志线程统一格式化，再分别写入 QMT console 和 UTF-8 日志文件；慢控制台或
+磁盘不会让调用线程等待日志写入。格式为 `YYYY-MM-DD HH:mm:ss [LEVEL] message {fields}`，
+时间按日志产生时刻转换为北京时间（Asia/Shanghai）。
+
+`LOG_QUEUE_MAX_SIZE` 默认 `2048`，在启动时确定队列容量。队列满时丢弃本条日志并
+增加 `logging.dropped`，不阻塞 QMT、不改业务请求结果，也不通过同步写盘补写。
+这是所有级别统一的满队列策略，ERROR 日志也可能被丢弃。
 
 默认目录为 `%USERPROFILE%\qmt-bridge\logs`，可修改脚本顶部的
 `LOG_DIRECTORY`；文件按日期命名为 `feed-YYYY-MM-DD.log`，以追加方式写入。
@@ -822,10 +831,11 @@ BATCH_METHODS = {
 启动服务以及下载开始、完成时输出 INFO；下载异常输出 ERROR。下载日志包含
 `task_id`、`stockcode`、`period`、`startTime`、`endTime`，显式传入时也记录
 `incrementally`。完成表示 QMT 函数已返回，不代表行情覆盖已验证。
-文件写入失败时尝试向 console 输出 ERROR，不改变下载任务结果。
+console 和文件各自独立写入；某一端失败不会阻止另一端，失败次数记入
+`logging.write_errors`，不改变下载任务结果。
 
 `LOG_LEVEL` 默认 `INFO`，可设置 `DEBUG`、`INFO`、`WARNING`、`ERROR`，
-同时控制 console 与文件的最低输出级别。成功的 `get_download_status` 轮询
+同时控制 console 与文件的最低输出级别。成功的 `get_download_status` 和 `/health` 轮询
 使用 DEBUG，默认不输出；失败响应仍按 WARNING/ERROR 记录。
 
 GET/POST 请求日志包含 `request_id`、HTTP 方法、接口名和白名单参数摘要。
@@ -834,6 +844,46 @@ GET/POST 请求日志包含 `request_id`、HTTP 方法、接口名和白名单�
 响应字节数，下载响应另含 `task_id`。同一下载的执行日志关联该 `request_id`。
 请求被拒绝、排队超时、客户端断开记为 WARNING；QMT 执行异常记为 ERROR。
 超时响应记录队列长度，策略停止记录排队请求数与未完成下载数。
+
+日志属于产生请求的 FEED 实例；旧请求在停止期间返回时不会把日志发给重启后的实例。
+队列是内存缓冲，进程异常退出时尚未写出的内容无法保证保留。
+
+## 健康与日志丢弃计数
+
+```powershell
+Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:1688/health'
+```
+
+只接受无参数 GET，POST 返回 405，有查询参数返回 400。此接口不调用 QMT，
+在日志写入阻塞时仍可读取内存状态。响应包含 `instance_id`、`lifecycle`、
+`http_running` 和 `logging`，例如（仅展示主要字段）：
+
+```json
+{
+  "instance_id": "example-feed-instance",
+  "lifecycle": "RUNNING",
+  "http_running": true,
+  "logging": {
+    "capacity": 2048,
+    "queue_size": 0,
+    "dropped": 12,
+    "write_errors": 0,
+    "running": true,
+    "stopping": false,
+    "stopped": false,
+    "sampled_at": "2026-09-26T13:30:00+08:00"
+  }
+}
+```
+
+- `queue_size` 是当前排队条数，不能用零积压证明从未丢日志。
+- `dropped` 是本实例累计丢弃条数，包括队列满或日志已停止后的写入；排空队列不会清零。
+- `write_errors` 是后台输出失败次数，区别于队列丢弃；即使 `dropped=0`，也需要检查该值。
+- 按 `LOG_LEVEL` 正常过滤的记录不计入 `dropped`。
+- 重启策略会产生新的 `instance_id` 并重置计数；需要跨重启追踪时，由监控端保存每次采样。
+- `sampled_at` 是日志线程最近更新状态的时间，写入持续阻塞时可能变旧。
+
+HTTP 200 只表示成功读到健康状态，不代表日志从未丢失，也不证明行情下载覆盖完整。
 
 ## 启动
 
@@ -845,6 +895,18 @@ ACCOUNT_TYPE = "STOCK"
 HTTP_HOST = "127.0.0.1"
 HTTP_PORT = 1688
 ```
+
+端口也可在 QMT 策略编辑器右侧“参数设置”中配置：
+
+| 参数名 | 默认值 | 说明 |
+| --- | --- | --- |
+| `http_port` | `1688` | HTTP 监听端口，整数 `1..65535` |
+
+推荐使用小写 `http_port`，也兼容大写 `HTTP_PORT`；同时存在时小写优先。
+支持整数、面板传入的整数浮点值（如 `1689.0`）及十进制整数字符串（如 `"1689"`）。
+非法值直接阻止启动，不回退默认值；`0` 不作为随机端口使用。
+端口在启动时确定，修改参数后需停止并重新运行策略。账户、日志及其他容量设置
+仍通过脚本顶部常量配置；完整参数说明见策略文件头注释。
 
 启动成功后日志显示：
 

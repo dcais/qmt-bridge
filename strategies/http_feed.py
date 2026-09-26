@@ -1,5 +1,68 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-26 10:05:45
+# Last modified (Asia/Shanghai): 2026-09-26 17:16:31
+
+# QMT FEED 配置说明
+# 配置方式：HTTP 端口可在 QMT 右侧“参数设置”填写小写 http_port；其他配置修改下方大写常量。
+# http_port 优先，兼容大写 HTTP_PORT；保存后停止并重新运行策略，运行中不会热切换端口。
+# 文件必须保持实际 GBK 编码。以下为当前默认值；端口参数非法时启动直接失败。
+#
+# 一、账户、HTTP 与日志
+# ACCOUNT_ID = "66027616"：启动绑定及 /account 默认账户；用字符串保留前导零。
+# ACCOUNT_TYPE = "STOCK"：/account 默认账户类型。
+# HTTP_HOST = "127.0.0.1"：HTTP 监听地址。
+# HTTP_PORT = 1688：默认监听端口（1～65535）；QMT 参数 http_port 可覆盖，其他实例需使用不同端口。
+# LOG_DIRECTORY = 用户主目录/qmt-bridge/logs：日志目录，Windows 默认位于 %USERPROFILE%。
+#   按上海日期追加写入 feed-YYYY-MM-DD.log，同时输出到控制台。
+# LOG_LEVEL = "INFO"：最低日志级别，可选 DEBUG / INFO / WARNING / ERROR。
+# LOG_QUEUE_MAX_SIZE = 2048：日志队列容量（条）；满时丢弃本条并累计 logging.dropped。
+#   GET /health 的 logging 返回排队量、累计丢弃和写入错误；计数重启清零。
+#
+# 二、请求容量与调度
+# QUEUE_MAX_SIZE = 64：待处理业务请求队列容量（条）；满时新请求返回 429。
+# MAX_BODY_BYTES = 1024 * 1024：POST JSON 请求体上限（字节，默认 1 MiB）。
+# REQUEST_TIMEOUT_SECONDS = 10：普通同步请求等待 QMT 结果的超时（秒）。
+#   已受理的历史下载任务不受该等待期限约束，使用 task_id 查询结果。
+# HTTP_CONNECTION_TIMEOUT_SECONDS = 10：HTTP 连接读写等待超时（秒），含未发完请求体。
+# MAX_JOBS_PER_TICK = 10：单次调度回调处理任务的上限；重型/批量接口还受单轮限制。
+# SCHEDULE_BUDGET_MILLISECONDS = 50：单次调度的软时间预算（毫秒）。
+#   已进入的同步 QMT 调用不能被该预算强制中断。
+# SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)：QMT 调度间隔，默认 10 毫秒。
+# MAX_DOWNLOAD_TASKS = 1000：内存下载任务记录容量；重启后记录不保留。
+#
+# 三、接口数据上限（高级配置，通常保留默认值）
+# MAX_TRADING_DATES_COUNT = 10000：交易日查询 count 上限。
+# MAX_STOCKCODE_LENGTH = 64：证券/合约代码字符串长度上限（字符）。
+# MAX_DIVID_FACTOR_RECORDS = 1000：单票除权除息因子记录上限。
+# MAX_FINANCIAL_FIELDS = 16：单次财务查询字段数上限。
+# MAX_FINANCIAL_STOCKS = 20：单次财务查询证券数上限。
+# MAX_FINANCIAL_CELLS = 20000：财务 range 调用前按日历天数×字段数×证券数估算的预算；返回表另受 MAX_QMT_TABLE_* 限制。
+# MAX_FINANCIAL_NAME_LENGTH = 128：财务表名/字段名长度上限（字符）。
+# MAX_FINANCIAL_BARPOS = 10000000：财务查询 barpos 上限。
+# MAX_MARKET_DATA_FIELDS = 32：单次行情查询字段数上限。
+# MAX_MARKET_DATA_STOCKS = 20：单次行情查询证券数上限。
+# MAX_MARKET_DATA_COUNT = 1000：行情查询 count 上限及结果记录数限制。
+# MAX_MARKET_DATA_CELLS = 20000：行情结果单元格预算。
+# MAX_MARKET_DATA_COLUMNS = 128：行情结果列数上限。
+# MAX_MARKET_DATA_JSON_VALUES = 50000：行情结果 JSON 值遍历预算。
+# MAX_FULL_TICK_STOCKS = 20：单次全推 Tick 查询证券数上限。
+# MAX_FULL_TICK_JSON_VALUES = 50000：全推 Tick 结果 JSON 值遍历预算。
+# MAX_BATCH_STOCKS = 20：批量基础数据接口的证券数上限。
+# MAX_BATCH_INSTRUMENT_DETAIL_JSON_VALUES = 50000：批量合约详情 JSON 值遍历预算。
+# MAX_BATCH_DIVID_FACTOR_RECORDS = MAX_BATCH_STOCKS * MAX_DIVID_FACTOR_RECORDS：
+#   批量因子记录总量上限，默认 20000；由上述两项派生。
+# MAX_HIS_INDEX_JSON_VALUES = 50000：历史指数结果 JSON 值遍历预算。
+# MAX_HIS_CONTRACTS = 50000：已退市合约结果条数上限。
+# MAX_LONGHUBANG_STOCKS = 20：单次龙虎榜查询证券数上限。
+# MAX_LONGHUBANG_DATE_DAYS = 3660：龙虎榜起止日期差 (end-start).days 的上限。
+# MAX_LONGHUBANG_STOCK_DAYS = 3660：龙虎榜证券数×含首尾查询天数的预算。
+# MAX_LONGHUBANG_ROWS = 1000：龙虎榜结果行数上限。
+# MAX_LONGHUBANG_COLUMNS = 32：龙虎榜结果列数上限。
+# MAX_LONGHUBANG_CELLS = 20000：龙虎榜结果单元格预算。
+# MAX_LONGHUBANG_JSON_VALUES = 50000：龙虎榜结果 JSON 值遍历预算。
+# MAX_QMT_TABLE_ROWS = 1000：通用 QMT 表格结果行数上限。
+# MAX_QMT_TABLE_COLUMNS = 64：通用 QMT 表格结果列数上限。
+# MAX_QMT_TABLE_CELLS = 20000：通用 QMT 表格结果单元格预算。
+# LOG_LEVELS、支持周期/字段/模式集合属于内部协议定义，不作为运行配置。
 
 import datetime as dt
 import json
@@ -18,14 +81,19 @@ from urllib.parse import parse_qs, unquote, urlsplit
 ACCOUNT_ID = "66027616"
 ACCOUNT_TYPE = "STOCK"
 HTTP_HOST = "127.0.0.1"
-HTTP_PORT = 1688
+# 保留 QMT exec 前注入的大写参数；未配置时使用 1688。
+HTTP_PORT = globals().get("HTTP_PORT", 1688)
 LOG_DIRECTORY = os.path.join(os.path.expanduser("~"), "qmt-bridge", "logs")
 LOG_LEVEL = "INFO"
 LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
-_LOG_LOCK = threading.Lock()
+# 日志队列满时丢弃本条并累计计数，不等待后台写入。
+LOG_QUEUE_MAX_SIZE = 2048
+_FEED_LIFECYCLE_LOCK = threading.Lock()
 QUEUE_MAX_SIZE = 64
 MAX_BODY_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
+# 限制未完整发送请求的连接等待时间，保证停止清理最终能够退出。
+HTTP_CONNECTION_TIMEOUT_SECONDS = 10
 MAX_JOBS_PER_TICK = 10
 SCHEDULE_BUDGET_MILLISECONDS = 50
 SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
@@ -210,36 +278,231 @@ _FEED_STATE = None
 _FEED_TIMER_ID = None
 
 
-def log_message(level, message, **fields):
-    """Write the same timestamped record to QMT console and a daily UTF-8 file."""
-    level = str(level).upper()
-    if LOG_LEVELS.get(level, 20) < LOG_LEVELS.get(LOG_LEVEL.upper(), 20):
-        return
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-    record = "{0} [{1}] {2}".format(
-        now.strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), message
-    )
-    if fields:
-        record += " " + json.dumps(fields, ensure_ascii=False, default=str)
-    record = record.replace("\r", "\\r").replace("\n", "\\n")
-    with _LOG_LOCK:
-        # Console and file are independent sinks; neither failure aborts QMT work.
-        try:
-            print(record, flush=True)
-        except Exception:
-            pass
-        try:
-            os.makedirs(LOG_DIRECTORY, exist_ok=True)
-            path = os.path.join(LOG_DIRECTORY, "feed-" + now.strftime("%Y-%m-%d") + ".log")
-            with open(path, "a", encoding="utf-8") as log_file:
-                log_file.write(record + "\n")
-        except OSError as exc:
+# QMT 参数面板小写 http_port 优先，兼容大写 HTTP_PORT。
+# 接受十进制整数字符串及精确整数浮点值；无效值直接拒绝，不静默回退。
+def runtime_http_port(value):
+    if isinstance(value, bool):
+        raise ValueError("HTTP_PORT must be an integer between 1 and 65535")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or any(char < "0" or char > "9" for char in value):
+            raise ValueError("HTTP_PORT must be an integer between 1 and 65535")
+        value = int(value)
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int) or not 1 <= value <= 65535:
+        raise ValueError("HTTP_PORT must be an integer between 1 and 65535")
+    return value
+
+
+class AsyncFeedLogger(object):
+    """每个实例独立持有日志队列；调用方只做有界快照，不执行输出 I/O。"""
+
+    _ZONE = dt.timezone(dt.timedelta(hours=8))
+    _MAX_FIELDS = 32
+    _MAX_TEXT = 1024
+    _MAX_DEPTH = 4
+    _MAX_NODES = 128
+
+    def __init__(self, log_directory, capacity=2048, sink=None):
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("log capacity must be a positive integer")
+        self.log_directory = log_directory
+        self.capacity = capacity
+        self._queue = queue.Queue(maxsize=capacity)
+        self._sink = sink
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._running = False
+        self._stopped = False
+        self._dropped = 0
+        self._write_errors = 0
+        self._sampled_at = None
+
+    @classmethod
+    def _plain(cls, value, budget, depth=0):
+        # 限制节点数、深度和文本长度，不遍历 QMT 原生对象或调用其字符串转换。
+        if budget[0] <= 0:
+            return "<truncated>"
+        budget[0] -= 1
+        kind = type(value)
+        if kind is str:
+            return value[:cls._MAX_TEXT]
+        if value is None or kind in (bool, int):
+            return value
+        if kind is float:
+            return value if math.isfinite(value) else None
+        if depth >= cls._MAX_DEPTH:
+            return "<truncated>"
+        if kind is dict:
+            result = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= cls._MAX_FIELDS or budget[0] <= 0:
+                    break
+                if type(key) is str:
+                    result[key[:64]] = cls._plain(item, budget, depth + 1)
+            return result
+        if kind in (list, tuple):
+            result = []
+            for index, item in enumerate(value):
+                if index >= cls._MAX_FIELDS or budget[0] <= 0:
+                    break
+                result.append(cls._plain(item, budget, depth + 1))
+            return result
+        return "<unsupported>"
+
+    def __call__(self, level, message, **fields):
+        if type(level) is not str:
+            level = "INFO"
+        level = level.upper()
+        if LOG_LEVELS.get(level, 20) < LOG_LEVELS.get(LOG_LEVEL.upper(), 20):
+            return False
+        budget = [self._MAX_NODES]
+        snapshot = {}
+        for index, (key, value) in enumerate(fields.items()):
+            if index >= self._MAX_FIELDS or budget[0] <= 0:
+                break
+            if type(key) is str:
+                snapshot[key[:64]] = self._plain(value, budget)
+        record = (time.time(), level, self._plain(message, budget), snapshot)
+        with self._state_lock:
+            if self._stop_event.is_set() or self._thread is None:
+                self._dropped += 1
+                return False
             try:
-                print("{0} [ERROR] log file write failed: {1}".format(
-                    now.strftime("%Y-%m-%d %H:%M:%S"), exc
-                ), flush=True)
+                self._queue.put_nowait(record)
+            except queue.Full:
+                # 累计值不会随队列排空归零，便于 health 排查历史丢弃。
+                self._dropped += 1
+                return False
+        return True
+
+    def start(self):
+        with self._state_lock:
+            if self._stop_event.is_set():
+                return False
+            if self._thread is not None:
+                return True
+            thread = threading.Thread(target=self._run, name="feed-log-writer")
+            thread.daemon = True
+            self._thread = thread
+            self._running = True
+            try:
+                thread.start()
             except Exception:
-                pass
+                self._thread = None
+                self._running = False
+                raise
+        return True
+
+    def request_stop(self):
+        with self._state_lock:
+            self._stop_event.set()
+            if self._thread is None:
+                self._stopped = True
+
+    def join(self, timeout=None):
+        with self._state_lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        with self._state_lock:
+            return self._stopped
+
+    def health(self):
+        with self._state_lock:
+            return {
+                "capacity": self.capacity,
+                "queue_size": self._queue.qsize(),
+                "dropped": self._dropped,
+                "write_errors": self._write_errors,
+                "running": self._running,
+                "stopping": self._stop_event.is_set(),
+                "stopped": self._stopped,
+                "sampled_at": self._sampled_at,
+            }
+
+    def _sample(self):
+        now = dt.datetime.now(self._ZONE).isoformat()
+        with self._state_lock:
+            self._sampled_at = now
+
+    def _write_failed(self):
+        with self._state_lock:
+            self._write_errors += 1
+
+    def _write_default(self, record):
+        # 仅日志线程进入此处；控制台与文件各自处理失败，输出期间不持共享锁。
+        line = "{0} [{1}] {2}".format(
+            record["timestamp"], record["level"], record["message"]
+        )
+        if record["fields"]:
+            line += " " + json.dumps(record["fields"], ensure_ascii=False)
+        line = line.replace("\r", "\\r").replace("\n", "\\n")
+        try:
+            print(line, flush=True)
+        except Exception:
+            self._write_failed()
+        try:
+            os.makedirs(self.log_directory, exist_ok=True)
+            path = os.path.join(
+                self.log_directory, "feed-" + record["day"] + ".log"
+            )
+            with open(path, "a", encoding="utf-8") as output:
+                output.write(line + "\n")
+        except Exception as exc:
+            self._write_failed()
+            try:
+                print(
+                    "{0} [ERROR] log file write failed: {1}".format(
+                        record["timestamp"], exc
+                    ),
+                    flush=True,
+                )
+            except Exception:
+                self._write_failed()
+
+    def _run(self):
+        try:
+            while True:
+                try:
+                    item = self._queue.get(timeout=0.1)
+                except queue.Empty:
+                    self._sample()
+                    if self._stop_event.is_set():
+                        break
+                    continue
+                try:
+                    when = dt.datetime.fromtimestamp(item[0], self._ZONE)
+                    record = {
+                        "timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
+                        "day": when.strftime("%Y-%m-%d"),
+                        "level": item[1], "message": item[2], "fields": item[3],
+                    }
+                    if self._sink is None:
+                        self._write_default(record)
+                    else:
+                        try:
+                            self._sink(record)
+                        except Exception:
+                            self._write_failed()
+                except Exception:
+                    self._write_failed()
+                finally:
+                    self._queue.task_done()
+                    self._sample()
+        finally:
+            with self._state_lock:
+                self._running = False
+                self._stopped = True
+                self._sampled_at = dt.datetime.now(self._ZONE).isoformat()
+
+
+def log_message(level, message, **fields):
+    """兼容现有调用入口；在途请求应使用自己所属实例的 log_message。"""
+    state = _FEED_STATE
+    return False if state is None else state.log_message(level, message, **fields)
 
 
 class FeedError(Exception):
@@ -273,7 +536,8 @@ class RequestJob:
 
 
 class FeedState:
-    def __init__(self):
+    def __init__(self, http_port=None):
+        self.http_port = http_port
         self.request_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.stop_event = threading.Event()
         self.admission_lock = threading.Lock()
@@ -285,7 +549,43 @@ class FeedState:
         self.active_job_lock = threading.Lock()
         self.download_tasks = OrderedDict()
         self.download_tasks_lock = threading.Lock()
+        self.instance_id = uuid.uuid4().hex
+        self.logger = AsyncFeedLogger(LOG_DIRECTORY, LOG_QUEUE_MAX_SIZE)
+        self.lifecycle = "STARTING"
+        self.cleanup_done = threading.Event()
+        self._callback_condition = threading.Condition()
+        self._active_callbacks = 0
+        self._cleanup_thread = None
+        self._stop_started = False
 
+    def log_message(self, level, message, **fields):
+        return self.logger(level, message, **fields)
+
+    def enter_callback(self):
+        with self._callback_condition:
+            self._active_callbacks += 1
+
+    def exit_callback(self):
+        with self._callback_condition:
+            self._active_callbacks -= 1
+            self._callback_condition.notify_all()
+
+    def wait_for_callbacks(self):
+        with self._callback_condition:
+            while self._active_callbacks:
+                self._callback_condition.wait()
+
+    def health(self):
+        with self._callback_condition:
+            lifecycle = self.lifecycle
+        return {
+            "instance_id": self.instance_id,
+            "lifecycle": lifecycle,
+            "http_running": bool(
+                self.server_thread is not None and self.server_thread.is_alive()
+            ),
+            "logging": self.logger.health(),
+        }
 
     def enqueue_request(self, job):
         # 与停止入口共享短锁，禁止队列清空后再入队；锁内不执行 QMT 或 HTTP I/O。
@@ -299,16 +599,34 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def process_request(self, request, client_address):
+        self.feed_state.enter_callback()
+        try:
+            return super().process_request(request, client_address)
+        except Exception:
+            self.feed_state.exit_callback()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            return super().process_request_thread(request, client_address)
+        finally:
+            self.feed_state.exit_callback()
+
 
 class FeedRequestHandler(BaseHTTPRequestHandler):
     server_version = "QMTHttpFeed/1.0"
+
+    def setup(self):
+        self.request.settimeout(HTTP_CONNECTION_TIMEOUT_SECONDS)
+        super().setup()
 
     def _begin_request(self, method):
         self.request_id = uuid.uuid4().hex
         self.request_started = time.perf_counter()
         self.request_method = method or "invalid_path"
         self.request_logged = False
-        self.request_log_level = "DEBUG" if method == "get_download_status" else "INFO"
+        self.request_log_level = "DEBUG" if method in ("get_download_status", "health") else "INFO"
 
     def _record_received(self, params=None):
         if self.request_logged:
@@ -321,12 +639,22 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
                      "fields", "incrementally"):
             value = (params or {}).get(name)
             if isinstance(value, list):
-                summary[name] = {"count": len(value), "sample": [str(v)[:64] for v in value[:3]]}
+                summary[name] = {
+                    "count": len(value),
+                    "sample": [
+                        v[:64] if type(v) is str else v
+                        if type(v) in (int, float, bool) or v is None
+                        else "<unsupported>"
+                        for v in value[:3]
+                    ],
+                }
             elif isinstance(value, (str, int, float, bool)):
                 summary[name] = value[:128] if isinstance(value, str) else value
-        log_message(self.request_log_level, "Request received",
-                    request_id=self.request_id, http_method=self.command,
-                    method=self.request_method, params=summary)
+        self.server.feed_state.log_message(
+            self.request_log_level, "Request received",
+            request_id=self.request_id, http_method=self.command,
+            method=self.request_method, params=summary
+        )
 
     def do_GET(self):
         parsed = urlsplit(self.path)
@@ -335,6 +663,12 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
         self._record_received(self._parse_query_params(parsed.query))
         if method is None:
             self._send_error(404, "NOT_FOUND", "expected /{method}")
+            return
+        if method == "health":
+            if parsed.query:
+                self._send_error(400, "INVALID_PARAMS", "health accepts no query parameters")
+                return
+            self._send_json(200, self.server.feed_state.health())
             return
         if method == "download_history_data":
             self._send_error(
@@ -355,6 +689,10 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
         if method is None:
             self._send_error(404, "NOT_FOUND", "expected /{method}")
             return
+        if method == "health":
+            self._record_received()
+            self._send_error(405, "METHOD_NOT_ALLOWED", "health only accepts GET")
+            return
 
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -369,6 +707,9 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
         try:
             raw_body = self.rfile.read(content_length)
             params = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except TimeoutError:
+            self._send_error(408, "REQUEST_TIMEOUT", "request body timed out")
+            return
         except (UnicodeDecodeError, ValueError):
             self._send_error(400, "INVALID_JSON", "request body must be UTF-8 JSON")
             return
@@ -520,7 +861,8 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
-            log_message("WARNING", "Client disconnected; response not delivered",
+            self.server.feed_state.log_message(
+                        "WARNING", "Client disconnected; response not delivered",
                         request_id=self.request_id, method=self.request_method,
                         status=status, elapsed_ms=round((time.perf_counter() - self.request_started) * 1000, 2))
             return
@@ -540,7 +882,7 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
             fields["queue_size"] = self.server.feed_state.request_queue.qsize()
         level = ("WARNING" if status in (429, 503, 504) or 400 <= status < 500
                  else "ERROR" if status >= 500 else self.request_log_level)
-        log_message(level, "Response sent", **fields)
+        self.server.feed_state.log_message(level, "Response sent", **fields)
 
 
 def account_to_dict(account):
@@ -2408,7 +2750,7 @@ def handle_download_history_data(state, request, request_id=None):
         "running",
         "download_history_data is running",
     )
-    log_message("INFO", "Download started", **log_fields)
+    state.log_message("INFO", "Download started", **log_fields)
     try:
         kwargs = {}
         if "incrementally" in params:
@@ -2421,10 +2763,10 @@ def handle_download_history_data(state, request, request_id=None):
             **kwargs,
         )
     except FeedError as exc:
-        log_message("ERROR", "Download failed", error=str(exc), **log_fields)
+        state.log_message("ERROR", "Download failed", error=str(exc), **log_fields)
         raise
     except Exception as exc:
-        log_message("ERROR", "Download failed", error=str(exc), **log_fields)
+        state.log_message("ERROR", "Download failed", error=str(exc), **log_fields)
         mark_download_task_failed(
             state,
             task_id,
@@ -2439,7 +2781,7 @@ def handle_download_history_data(state, request, request_id=None):
         "completed",
         "download_history_data returned; data coverage was not verified",
     )
-    log_message("INFO", "Download completed; QMT returned, coverage not verified", **log_fields)
+    state.log_message("INFO", "Download completed; QMT returned, coverage not verified", **log_fields)
 
 
 def dispatch_request(ContextInfo, request):
@@ -2489,14 +2831,24 @@ def complete_request_job(state, job):
     job.done.set()
 
 
-def process_http_requests(ContextInfo):
-    state = _FEED_STATE
-    if state is None or state.stop_event.is_set():
+def process_http_requests(ContextInfo, state=None):
+    state = _FEED_STATE if state is None else state
+    if state is None:
         return
+    state.enter_callback()
+    try:
+        if not state.stop_event.is_set():
+            _process_http_requests_for_state(ContextInfo, state)
+    finally:
+        state.exit_callback()
 
+
+def _process_http_requests_for_state(ContextInfo, state):
     started_at = time.perf_counter()
     processed = 0
     while processed < MAX_JOBS_PER_TICK:
+        if state.stop_event.is_set():
+            break
         if (
             (time.perf_counter() - started_at) * 1000
             >= SCHEDULE_BUDGET_MILLISECONDS
@@ -2548,8 +2900,8 @@ def process_http_requests(ContextInfo):
                 )
         finally:
             if job.error is not None:
-                log_message("ERROR" if job.error_status == 500 else "WARNING",
-                            "QMT request failed", request_id=job.request_id,
+                state.log_message("ERROR" if job.error_status == 500 else "WARNING",
+                                  "QMT request failed", request_id=job.request_id,
                             method=job.request.get("method"),
                             error_code=job.error["code"],
                             error_message=str(job.error["message"])[:512])
@@ -2588,14 +2940,45 @@ def serve_http(state):
         state.server.server_close()
 
 
+def _finish_stop(state):
+    """后台等待旧实例回调结束并排空日志；不能从 QMT 回调同步调用。"""
+    global _FEED_STATE
+    try:
+        thread = state.server_thread
+        if thread is not None and thread.is_alive():
+            thread.join()
+        state.wait_for_callbacks()
+        state.logger.request_stop()
+        state.logger.join()
+    finally:
+        with state._callback_condition:
+            state.lifecycle = "STOPPED"
+        with _FEED_LIFECYCLE_LOCK:
+            if _FEED_STATE is state:
+                _FEED_STATE = None
+        state.cleanup_done.set()
+
+
 def init(ContextInfo):
     global _FEED_STATE
     global _FEED_TIMER_ID
 
-    ContextInfo.set_account(ACCOUNT_ID)
+    with _FEED_LIFECYCLE_LOCK:
+        if _FEED_STATE is not None:
+            raise RuntimeError("HTTP feed instance is already running or stopping")
 
-    state = FeedState()
-    server = ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), FeedRequestHandler)
+    # 端口先校验，再绑定账户、启动 logger 或监听 socket。
+    http_port = runtime_http_port(globals().get("http_port", HTTP_PORT))
+    ContextInfo.set_account(ACCOUNT_ID)
+    state = FeedState(http_port=http_port)
+    state.logger.start()
+    try:
+        server = ThreadingHTTPServer((HTTP_HOST, state.http_port), FeedRequestHandler)
+    except Exception:
+        state.logger.request_stop()
+        state.logger.join()
+        state.cleanup_done.set()
+        raise
     server.timeout = 0.2
     server.feed_state = state
     state.server = server
@@ -2606,31 +2989,56 @@ def init(ContextInfo):
     )
     state.server_thread.daemon = True
 
-    _FEED_STATE = state
-    _FEED_TIMER_ID = None
+    with _FEED_LIFECYCLE_LOCK:
+        conflict = _FEED_STATE is not None
+        if not conflict:
+            _FEED_STATE = state
+            _FEED_TIMER_ID = None
+    if conflict:
+        server.server_close()
+        state.logger.request_stop()
+        state.logger.join()
+        state.cleanup_done.set()
+        raise RuntimeError("HTTP feed instance is already running or stopping")
     try:
+        def scheduled_process(ContextInfo):
+            process_http_requests(ContextInfo, state)
+
         _FEED_TIMER_ID = ContextInfo.schedule_run(
-            process_http_requests,
+            scheduled_process,
             "20200101000000",
             -1,
             SCHEDULE_INTERVAL,
             "http_feed_timer",
         )
         state.server_thread.start()
+        with state._callback_condition:
+            state.lifecycle = "RUNNING"
     except Exception:
         state.stop_event.set()
         timer_id = _FEED_TIMER_ID
+        _FEED_TIMER_ID = None
         if timer_id is not None:
             try:
                 ContextInfo.cancel_schedule_run(timer_id)
             except Exception:
                 pass
-        server.server_close()
-        _FEED_STATE = None
-        _FEED_TIMER_ID = None
+        if state.server_thread.is_alive():
+            state.server_thread.join()
+        else:
+            server.server_close()
+        state.wait_for_callbacks()
+        state.logger.request_stop()
+        state.logger.join()
+        with state._callback_condition:
+            state.lifecycle = "STOPPED"
+        with _FEED_LIFECYCLE_LOCK:
+            if _FEED_STATE is state:
+                _FEED_STATE = None
+        state.cleanup_done.set()
         raise
 
-    log_message(
+    state.log_message(
         "INFO",
         "QMT HTTP feed listening on http://{0}:{1}/{{method}}".format(
             HTTP_HOST,
@@ -2644,61 +3052,71 @@ def handlebar(ContextInfo):
 
 
 def stop(ContextInfo):
-    global _FEED_STATE
     global _FEED_TIMER_ID
 
     state = _FEED_STATE
-    if state is not None:
-        with state.admission_lock:
-            state.stop_event.set()
+    if state is None:
+        return
+
+    with state.admission_lock:
+        if state._stop_started:
+            return
+        state._stop_started = True
+        state.stop_event.set()
+    with state._callback_condition:
+        state.lifecycle = "STOPPING"
+    try:
         with state.download_tasks_lock:
             unfinished_downloads = sum(
                 task["status"] in ("queued", "running")
                 for task in state.download_tasks.values()
             )
-        log_message("INFO", "Feed stopping", queued_requests=state.request_queue.qsize(),
-                    unfinished_downloads=unfinished_downloads)
-
-    timer_id = _FEED_TIMER_ID
-    if timer_id is not None:
-        ContextInfo.cancel_schedule_run(timer_id)
-        _FEED_TIMER_ID = None
-
-    if state is None:
-        return
-
-    with state.active_job_lock:
-        active_job = state.active_job
-        state.active_job = None
-    if active_job is not None:
-        if active_job.download_task_id is not None:
-            mark_download_task_failed(
-                state,
-                active_job.download_task_id,
-                "FEED_STOPPING",
-                "HTTP feed is stopping",
-            )
-        active_job.set_error(
-            503,
-            "FEED_STOPPING",
-            "HTTP feed is stopping",
+        state.log_message(
+            "INFO", "Feed stopping",
+            queued_requests=state.request_queue.qsize(),
+            unfinished_downloads=unfinished_downloads,
         )
-        complete_request_job(state, active_job)
+        timer_id = _FEED_TIMER_ID
+        _FEED_TIMER_ID = None
+        if timer_id is not None:
+            try:
+                ContextInfo.cancel_schedule_run(timer_id)
+            except Exception as exc:
+                state.log_message(
+                    "ERROR", "Feed timer cancellation failed",
+                    error_type=type(exc).__name__,
+                )
 
-    while True:
-        try:
-            job = state.request_queue.get_nowait()
-        except queue.Empty:
-            break
-        if job.download_task_id is not None:
-            mark_download_task_failed(
-                state,
-                job.download_task_id,
-                "FEED_STOPPING",
-                "HTTP feed is stopping",
-            )
-        job.set_error(503, "FEED_STOPPING", "HTTP feed is stopping")
-        job.done.set()
-        state.request_queue.task_done()
+        with state.active_job_lock:
+            active_job = state.active_job
+            state.active_job = None
+        if active_job is not None:
+            if active_job.download_task_id is not None:
+                mark_download_task_failed(
+                    state, active_job.download_task_id,
+                    "FEED_STOPPING", "HTTP feed is stopping",
+                )
+            active_job.set_error(503, "FEED_STOPPING", "HTTP feed is stopping")
+            complete_request_job(state, active_job)
 
-    _FEED_STATE = None
+        while True:
+            try:
+                job = state.request_queue.get_nowait()
+            except queue.Empty:
+                break
+            if job.download_task_id is not None:
+                mark_download_task_failed(
+                    state, job.download_task_id,
+                    "FEED_STOPPING", "HTTP feed is stopping",
+                )
+            job.set_error(503, "FEED_STOPPING", "HTTP feed is stopping")
+            job.done.set()
+            state.request_queue.task_done()
+    finally:
+        # 慢日志输出和在途 HTTP/QMT 回调由后台收尾，stop 本身不等待。
+        cleanup = threading.Thread(
+            target=_finish_stop, args=(state,), name="feed-cleanup"
+        )
+        cleanup.daemon = True
+        state._cleanup_thread = cleanup
+        cleanup.start()

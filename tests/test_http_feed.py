@@ -3,6 +3,7 @@ import datetime as dt
 import importlib.util
 import json
 import io
+import socket
 import tempfile
 import threading
 import time
@@ -18,11 +19,21 @@ from urllib.parse import urlencode
 STRATEGY_PATH = Path(__file__).resolve().parents[1] / "strategies" / "http_feed.py"
 
 
-def load_strategy():
+def load_strategy(parameters=None):
     spec = importlib.util.spec_from_file_location("http_feed", STRATEGY_PATH)
     module = importlib.util.module_from_spec(spec)
+    if parameters:
+        module.__dict__.update(parameters)
     spec.loader.exec_module(module)
     return module
+
+
+def ephemeral_listener_patch(module):
+    server_class = module.ThreadingHTTPServer
+    return patch.object(
+        module, "ThreadingHTTPServer",
+        side_effect=lambda address, handler: server_class((address[0], 0), handler),
+    )
 
 
 class FakeAccount:
@@ -287,11 +298,23 @@ class FeedLoggingTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.strategy.LOG_DIRECTORY = self.temp.name
+        self.logger = self.strategy.AsyncFeedLogger(self.temp.name)
+        self.assertTrue(self.logger.start())
+        self.addCleanup(self._stop_logger)
+
+    def _stop_logger(self):
+        self.logger.request_stop()
+        self.assertTrue(self.logger.join(2))
+
+    def _drain_logger(self):
+        self.logger.request_stop()
+        self.assertTrue(self.logger.join(2))
 
     def test_console_and_file_have_identical_timestamped_records(self):
         console = io.StringIO()
         with redirect_stdout(console):
-            self.strategy.log_message("info", "Download started", stockcode="000001.SZ")
+            self.logger("info", "Download started", stockcode="000001.SZ")
+            self._drain_logger()
         files = list(Path(self.temp.name).glob("feed-*.log"))
         self.assertEqual(1, len(files))
         record = files[0].read_text(encoding="utf-8")
@@ -302,26 +325,120 @@ class FeedLoggingTest(unittest.TestCase):
     def test_debug_is_filtered_until_enabled(self):
         console = io.StringIO()
         with redirect_stdout(console):
-            self.strategy.log_message("DEBUG", "hidden")
-            self.assertEqual([], list(Path(self.temp.name).glob("*.log")))
+            self.logger("DEBUG", "hidden")
             self.strategy.LOG_LEVEL = "DEBUG"
-            self.strategy.log_message("DEBUG", "visible")
+            self.logger("DEBUG", "visible")
+            self._drain_logger()
         self.assertNotIn("hidden", console.getvalue())
         self.assertIn("[DEBUG] visible", console.getvalue())
+        self.assertNotIn("hidden", next(Path(self.temp.name).glob("*.log")).read_text(encoding="utf-8"))
 
     def test_file_failure_is_reported_without_raising(self):
         console = io.StringIO()
         with patch.object(self.strategy.os, "makedirs", side_effect=PermissionError("denied")):
             with redirect_stdout(console):
-                self.strategy.log_message("info", "test")
+                self.logger("info", "test")
+                self._drain_logger()
         self.assertIn("[INFO] test", console.getvalue())
         self.assertIn("[ERROR] log file write failed", console.getvalue())
+        self.assertEqual(1, self.logger.health()["write_errors"])
 
     def test_console_failure_does_not_prevent_file_write(self):
         with patch("builtins.print", side_effect=OSError("console unavailable")):
-            self.strategy.log_message("warning", "test")
+            self.logger("warning", "test")
+            self._drain_logger()
         record = next(Path(self.temp.name).glob("*.log")).read_text(encoding="utf-8")
         self.assertIn("[WARNING] test", record)
+        self.assertEqual(1, self.logger.health()["write_errors"])
+
+    def test_blocked_sink_does_not_block_producer_and_drop_count_survives_drain(self):
+        entered = threading.Event()
+        release = threading.Event()
+        records = []
+
+        def blocked_sink(record):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release log sink")
+            records.append(record)
+
+        logger = self.strategy.AsyncFeedLogger(self.temp.name, capacity=1, sink=blocked_sink)
+        self.assertTrue(logger.start())
+        try:
+            self.assertTrue(logger("INFO", "first"))
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(logger("INFO", "second"))
+            producer_done = threading.Event()
+
+            def fill_logs():
+                for index in range(3):
+                    logger("INFO", "overflow {0}".format(index))
+                producer_done.set()
+
+            producer = threading.Thread(target=fill_logs)
+            producer.start()
+            self.assertTrue(producer_done.wait(0.5), "logging blocked on full queue")
+            producer.join(1)
+            self.assertEqual(3, logger.health()["dropped"])
+            self.assertEqual(1, logger.health()["queue_size"])
+            self.assertEqual(0, logger.health()["write_errors"])
+        finally:
+            release.set()
+            logger.request_stop()
+            self.assertTrue(logger.join(2))
+        self.assertEqual(2, len(records))
+        self.assertEqual(0, logger.health()["queue_size"])
+        self.assertEqual(3, logger.health()["dropped"])
+        self.assertEqual(0, logger.health()["write_errors"])
+
+    def test_nested_fields_are_snapshotted_without_native_stringification(self):
+        entered = threading.Event()
+        release = threading.Event()
+        records = []
+
+        class NativeValue:
+            def __init__(self):
+                self.string_calls = 0
+
+            def __str__(self):
+                self.string_calls += 1
+                raise AssertionError("native __str__ must not run")
+
+        def blocked_sink(record):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release log sink")
+            records.append(record)
+
+        logger = self.strategy.AsyncFeedLogger(self.temp.name, sink=blocked_sink)
+        self.assertTrue(logger.start())
+        native = NativeValue()
+        params = {"stockcode": "600000.SH", "fields": {"count": 1, "sample": ["close"]}}
+        try:
+            self.assertTrue(logger("INFO", "snapshot", params=params, native=native))
+            self.assertTrue(entered.wait(1))
+            params["fields"]["sample"][0] = "changed"
+        finally:
+            release.set()
+            logger.request_stop()
+            self.assertTrue(logger.join(2))
+        self.assertEqual(0, native.string_calls)
+        self.assertEqual(1, len(records))
+        self.assertIn("600000.SH", json.dumps(records[0], ensure_ascii=False))
+        self.assertIn("close", json.dumps(records[0], ensure_ascii=False))
+        self.assertNotIn("changed", json.dumps(records[0], ensure_ascii=False))
+
+    def test_sink_failure_counts_write_error_separately_from_drops(self):
+        def failing_sink(record):
+            raise OSError("disk unavailable")
+
+        logger = self.strategy.AsyncFeedLogger(self.temp.name, sink=failing_sink)
+        self.assertTrue(logger.start())
+        self.assertTrue(logger("INFO", "write failure"))
+        logger.request_stop()
+        self.assertTrue(logger.join(2))
+        self.assertEqual(1, logger.health()["write_errors"])
+        self.assertEqual(0, logger.health()["dropped"])
 
     def test_download_success_and_failure_records_include_request(self):
         state = self.strategy.FeedState()
@@ -331,17 +448,17 @@ class FeedLoggingTest(unittest.TestCase):
             task = self.strategy.create_download_task(state, params)
             with patch.object(self.strategy, "download_history_data", create=True,
                               side_effect=RuntimeError("download error") if fail else None):
-                with patch.object(self.strategy, "log_message") as log:
+                with patch.object(state, "log_message") as log:
                     self.strategy.handle_download_history_data(
                         state, {"params": params, "task_id": task["task_id"]})
             self.assertEqual(2, log.call_count)
             first, last = log.call_args_list
-            self.assertEqual(("INFO", "Download started"), first.args)
-            self.assertEqual("ERROR" if fail else "INFO", last.args[0])
-            self.assertIn("failed" if fail else "completed", last.args[1])
+            self.assertEqual(("INFO", "Download started"), first[0])
+            self.assertEqual("ERROR" if fail else "INFO", last[0][0])
+            self.assertIn("failed" if fail else "completed", last[0][1])
             for call in (first, last):
                 for key, value in params.items():
-                    self.assertEqual(value, call.kwargs[key])
+                    self.assertEqual(value, call[1][key])
 
 
 class HttpFeedTest(unittest.TestCase):
@@ -350,7 +467,9 @@ class HttpFeedTest(unittest.TestCase):
         log_temp = tempfile.TemporaryDirectory()
         self.addCleanup(log_temp.cleanup)
         self.strategy.LOG_DIRECTORY = log_temp.name
-        self.strategy.HTTP_PORT = 0
+        listener_patch = ephemeral_listener_patch(self.strategy)
+        listener_patch.start()
+        self.addCleanup(listener_patch.stop)
         self.context = FakeContext()
         self.query_calls = []
         self.sector_list_calls = []
@@ -388,6 +507,8 @@ class HttpFeedTest(unittest.TestCase):
         self.strategy.stop(self.context)
         self.state.server_thread.join(timeout=2)
         self.assertFalse(self.state.server_thread.is_alive())
+        self.assertTrue(self.state.cleanup_done.wait(2), "feed cleanup did not finish")
+        self.assertTrue(self.state.logger.join(2), "feed logger did not drain")
 
     def base_url(self):
         port = self.state.server.server_address[1]
@@ -2545,42 +2666,77 @@ class HttpFeedTest(unittest.TestCase):
         self.assertEqual([], self.download_history_calls)
 
     def test_request_logs_correlate_download_without_raw_body(self):
-        with patch.object(self.strategy, "log_message") as log:
+        with patch.object(self.state, "log_message") as log:
             status, task = self.request_json(
                 "/download_history_data", {"stockcode": "600000.SH", "period": "1d"}
             )
             self.context.callback(self.context)
         self.assertEqual(202, status)
         calls = log.call_args_list
-        received = next(c for c in calls if c.args[1] == "Request received")
-        response = next(c for c in calls if c.args[1] == "Response sent")
-        started = next(c for c in calls if c.args[1] == "Download started")
-        self.assertEqual(received.kwargs["request_id"], response.kwargs["request_id"])
-        self.assertEqual(received.kwargs["request_id"], started.kwargs["request_id"])
-        self.assertEqual(task["task_id"], response.kwargs["task_id"])
-        self.assertEqual(202, response.kwargs["status"])
-        self.assertGreater(response.kwargs["response_bytes"], 0)
-        self.assertGreaterEqual(response.kwargs["elapsed_ms"], 0)
+        received = next(c for c in calls if c[0][1] == "Request received")
+        response = next(c for c in calls if c[0][1] == "Response sent")
+        started = next(c for c in calls if c[0][1] == "Download started")
+        self.assertEqual(received[1]["request_id"], response[1]["request_id"])
+        self.assertEqual(received[1]["request_id"], started[1]["request_id"])
+        self.assertEqual(task["task_id"], response[1]["task_id"])
+        self.assertEqual(202, response[1]["status"])
+        self.assertGreater(response[1]["response_bytes"], 0)
+        self.assertGreaterEqual(response[1]["elapsed_ms"], 0)
 
     def test_request_log_redacts_unknown_parameters_and_warns_on_failure(self):
-        with patch.object(self.strategy, "log_message") as log:
+        with patch.object(self.state, "log_message") as log:
             status, _ = self.request_json("/download_history_data", {
                 "stockcode": "600000.SH", "period": "1d", "password": "secret-value"
             })
         self.assertEqual(400, status)
         self.assertNotIn("secret-value", str(log.call_args_list))
-        response = next(c for c in log.call_args_list if c.args[1] == "Response sent")
-        self.assertEqual("WARNING", response.args[0])
-        self.assertEqual("INVALID_PARAMS", response.kwargs["error_code"])
+        response = next(c for c in log.call_args_list if c[0][1] == "Response sent")
+        self.assertEqual("WARNING", response[0][0])
+        self.assertEqual("INVALID_PARAMS", response[1]["error_code"])
 
     def test_successful_status_poll_logs_at_debug(self):
         _, task = self.request_json("/download_history_data", {
             "stockcode": "600000.SH", "period": "1d"
         })
-        with patch.object(self.strategy, "log_message") as log:
+        with patch.object(self.state, "log_message") as log:
             status, _ = self.request_json("/get_download_status?task_id=" + task["task_id"])
         self.assertEqual(200, status)
-        self.assertEqual(["DEBUG", "DEBUG"], [c.args[0] for c in log.call_args_list])
+        self.assertEqual(["DEBUG", "DEBUG"], [c[0][0] for c in log.call_args_list])
+
+    def test_health_remains_available_while_qmt_queue_is_blocked(self):
+        client, response = self.start_request("/account")
+        self.wait_for_queued_job()
+        try:
+            queued_before = self.state.request_queue.qsize()
+            status, body = self.request_json("/health")
+            self.assertEqual(200, status)
+            self.assertEqual(self.state.instance_id, body["instance_id"])
+            self.assertEqual("RUNNING", body["lifecycle"])
+            self.assertTrue(body["http_running"])
+            self.assertIn("logging", body)
+            self.assertEqual(queued_before, self.state.request_queue.qsize())
+            self.assertEqual([], self.query_calls)
+        finally:
+            self.strategy.stop(self.context)
+            client.join(2)
+        self.assertFalse(client.is_alive())
+        self.assertEqual(503, response["status"])
+
+    def test_health_rejects_post_and_unrecognized_query_without_qmt_dispatch(self):
+        status, body = self.request_json("/health", {})
+        self.assertEqual(405, status)
+        self.assertEqual("METHOD_NOT_ALLOWED", body["error"]["code"])
+        status, body = self.request_json("/health?unexpected=1")
+        self.assertEqual(400, status)
+        self.assertEqual("INVALID_PARAMS", body["error"]["code"])
+        self.assertEqual(0, self.state.request_queue.qsize())
+        self.assertEqual([], self.query_calls)
+
+    def test_successful_health_poll_logs_at_debug(self):
+        with patch.object(self.state, "log_message") as log:
+            status, _ = self.request_json("/health")
+        self.assertEqual(200, status)
+        self.assertEqual(["DEBUG", "DEBUG"], [c[0][0] for c in log.call_args_list])
 
     def test_download_history_data_get_is_rejected(self):
         status, body = self.request_json(
@@ -3276,6 +3432,232 @@ class HttpFeedTest(unittest.TestCase):
         self.assertLess(elapsed, 0.05)
         self.assertEqual(self.context.timer_id, self.context.cancelled_timer_id)
         self.assertTrue(self.state.stop_event.is_set())
+
+    def test_qmt_dispatch_and_stop_do_not_wait_for_blocked_log_sink(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_sink(record):
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release log sink")
+
+        self.state.logger._sink = blocked_sink
+        try:
+            self.assertTrue(self.state.logger("INFO", "block writer"))
+            self.assertTrue(entered.wait(1))
+            queued_before = self.state.request_queue.qsize()
+            health_status, health = self.request_json("/health")
+            self.assertEqual(200, health_status)
+            self.assertEqual(self.state.instance_id, health["instance_id"])
+            self.assertEqual(queued_before, self.state.request_queue.qsize())
+            client, response = self.start_request("/account")
+            self.wait_for_queued_job()
+            callback_done = threading.Event()
+
+            def dispatch():
+                self.context.callback(self.context)
+                callback_done.set()
+
+            worker = threading.Thread(target=dispatch)
+            worker.start()
+            self.assertTrue(callback_done.wait(0.5), "QMT dispatch waited for log sink")
+            worker.join(1)
+            client.join(2)
+            self.assertFalse(client.is_alive())
+            self.assertEqual(200, response["status"])
+
+            started = time.perf_counter()
+            self.strategy.stop(self.context)
+            self.assertLess(time.perf_counter() - started, 0.05)
+            self.assertFalse(self.state.cleanup_done.is_set())
+        finally:
+            release.set()
+        self.assertTrue(self.state.cleanup_done.wait(2))
+        self.assertTrue(self.state.logger.join(2))
+
+    def test_partial_post_times_out_after_fast_stop_and_allows_restart(self):
+        with patch.object(self.strategy, "HTTP_CONNECTION_TIMEOUT_SECONDS", 0.3):
+            port = self.state.server.server_address[1]
+            connection = socket.create_connection(("127.0.0.1", port), timeout=2)
+            try:
+                connection.sendall(
+                    b"POST /account HTTP/1.1\r\n"
+                    b"Host: 127.0.0.1\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 100\r\n\r\n{"
+                )
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    with self.state._callback_condition:
+                        if self.state._active_callbacks:
+                            break
+                    time.sleep(0.005)
+                else:
+                    self.fail("partial POST handler did not start")
+                started = time.perf_counter()
+                self.strategy.stop(self.context)
+                self.assertLess(time.perf_counter() - started, 0.05)
+                self.assertTrue(self.state.cleanup_done.wait(2))
+                self.assertIsNone(self.strategy._FEED_STATE)
+            finally:
+                connection.close()
+
+        self.strategy.init(self.context)
+        new_state = self.strategy._FEED_STATE
+        try:
+            self.assertNotEqual(self.state.instance_id, new_state.instance_id)
+            status, health = self._health_of_state(new_state)
+            self.assertEqual(200, status)
+            self.assertEqual(new_state.instance_id, health["instance_id"])
+        finally:
+            self.strategy.stop(self.context)
+            self.assertTrue(new_state.cleanup_done.wait(2))
+
+    def _health_of_state(self, state):
+        port = state.server.server_address[1]
+        with urllib.request.urlopen("http://127.0.0.1:{0}/health".format(port), timeout=2) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+
+
+class FeedLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        self.strategy = load_strategy()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.strategy.LOG_DIRECTORY = self.temp.name
+        listener_patch = ephemeral_listener_patch(self.strategy)
+        listener_patch.start()
+        self.addCleanup(listener_patch.stop)
+        self.context = FakeContext()
+
+    def test_restart_keeps_old_callback_and_handler_logs_on_old_instance(self):
+        self.strategy.init(self.context)
+        old_state = self.strategy._FEED_STATE
+        old_callback = self.context.callback
+        old_handler_state = old_state.server.feed_state
+        self.assertIs(old_state, old_handler_state)
+        self.strategy.stop(self.context)
+        self.assertTrue(old_state.cleanup_done.wait(2))
+
+        self.strategy.init(self.context)
+        new_state = self.strategy._FEED_STATE
+        try:
+            self.assertNotEqual(old_state.instance_id, new_state.instance_id)
+            self.assertIs(new_state, new_state.server.feed_state)
+            self.assertIsNot(old_handler_state, new_state)
+            before = new_state.logger.health()["dropped"]
+            old_callback(self.context)
+            self.assertEqual(0, new_state.request_queue.qsize())
+            self.assertEqual(before, new_state.logger.health()["dropped"])
+
+            old_handler_state.log_message("INFO", "late old handler")
+            self.assertEqual(before, new_state.logger.health()["dropped"])
+            self.assertFalse(old_state.logger.health()["running"])
+            self.assertTrue(self.strategy.log_message("INFO", "new instance"))
+        finally:
+            self.strategy.stop(self.context)
+            self.assertTrue(new_state.cleanup_done.wait(2))
+        log_text = "".join(path.read_text(encoding="utf-8") for path in Path(self.temp.name).glob("*.log"))
+        self.assertIn("new instance", log_text)
+        self.assertNotIn("late old handler", log_text)
+
+    def test_init_failure_stops_logger_and_clears_global_state(self):
+        created = []
+        original = self.strategy.FeedState
+
+        def capture_state(*args, **kwargs):
+            state = original(*args, **kwargs)
+            created.append(state)
+            return state
+
+        with patch.object(self.strategy, "FeedState", side_effect=capture_state):
+            with patch.object(self.context, "schedule_run", side_effect=RuntimeError("schedule failed")):
+                with self.assertRaisesRegex(RuntimeError, "schedule failed"):
+                    self.strategy.init(self.context)
+        self.assertEqual(1, len(created))
+        self.assertIsNone(self.strategy._FEED_STATE)
+        self.assertTrue(created[0].logger.health()["stopped"])
+        self.assertTrue(created[0].cleanup_done.is_set())
+
+
+class FeedRuntimePortTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def assert_runtime_listener(self, parameters, expected_port, early):
+        module = load_strategy(parameters if early else None)
+        if not early:
+            module.__dict__.update(parameters)
+        module.LOG_DIRECTORY = self.temp.name
+        context = FakeContext()
+        with ephemeral_listener_patch(module) as factory:
+            module.init(context)
+        state = module._FEED_STATE
+        try:
+            factory.assert_called_once_with(
+                ("127.0.0.1", expected_port), module.FeedRequestHandler,
+            )
+            self.assertEqual(expected_port, state.http_port)
+            actual_address = state.server.server_address
+            module.http_port = 9998
+            module.HTTP_PORT = 9999
+            self.assertEqual(expected_port, state.http_port)
+            self.assertEqual(actual_address, state.server.server_address)
+            with urllib.request.urlopen(
+                "http://127.0.0.1:{0}/health".format(actual_address[1]), timeout=2,
+            ) as response:
+                self.assertEqual(200, response.status)
+        finally:
+            module.stop(context)
+            self.assertTrue(state.cleanup_done.wait(2))
+        logs = "".join(p.read_text(encoding="utf-8") for p in Path(self.temp.name).glob("feed-*.log"))
+        self.assertIn(
+            "QMT HTTP feed listening on http://127.0.0.1:{0}/".format(actual_address[1]), logs,
+        )
+
+    def test_default_port_remains_1688(self):
+        self.assertEqual(1688, load_strategy().HTTP_PORT)
+        self.assert_runtime_listener({}, 1688, early=True)
+
+    def test_runtime_port_early_and_late_injection_accepts_panel_values(self):
+        for early in (True, False):
+            for name in ("http_port", "HTTP_PORT"):
+                for value, expected in ((1689, 1689), (1690.0, 1690), (" 1691 ", 1691)):
+                    with self.subTest(early=early, name=name, value=value):
+                        self.assert_runtime_listener({name: value}, expected, early)
+
+    def test_lowercase_runtime_port_takes_precedence(self):
+        for early in (True, False):
+            with self.subTest(early=early):
+                self.assert_runtime_listener(
+                    {"http_port": 1692.0, "HTTP_PORT": 1693}, 1692, early,
+                )
+
+    def test_invalid_runtime_port_fails_before_account_logger_or_socket(self):
+        invalid_values = (
+            None, True, False, 0, -1, 65536, 1.5,
+            float("nan"), float("inf"), "", " ", "1688.0", "abc",
+        )
+        for early in (True, False):
+            for name in ("http_port", "HTTP_PORT"):
+                for value in invalid_values:
+                    with self.subTest(early=early, name=name, value=value):
+                        parameters = {"HTTP_PORT": 1688, name: value}
+                        module = load_strategy(parameters if early else None)
+                        if not early:
+                            module.__dict__.update(parameters)
+                        context = FakeContext()
+                        with patch.object(context, "set_account") as account:
+                            with patch.object(module, "AsyncFeedLogger") as logger:
+                                with patch.object(module, "ThreadingHTTPServer") as server:
+                                    with self.assertRaisesRegex(ValueError, "HTTP_PORT"):
+                                        module.init(context)
+                                    account.assert_not_called()
+                                    logger.assert_not_called()
+                                    server.assert_not_called()
+                        self.assertIsNone(module._FEED_STATE)
 
 
 if __name__ == "__main__":
