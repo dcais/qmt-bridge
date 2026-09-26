@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Last modified (Asia/Shanghai): 2026-09-26
 """ORDER schema 与 UNKNOWN 人工管理；此程序从不调用 QMT。"""
 import argparse
 import getpass
@@ -17,7 +18,7 @@ if str(ROOT) not in sys.path:
 from order_bridge.common import OrderError, iso_datetime, public_order  # noqa: E402
 from order_bridge.repository import PostgresRepository  # noqa: E402
 from order_bridge.state import recompute_order  # noqa: E402
-from tools.order_schema import initialize_schema, migrate_schema  # noqa: E402
+from tools.order_schema import initialize_schema  # noqa: E402
 
 
 ENV_CONFIG = {"pg_host": "ORDER_PG_HOST", "pg_port": "ORDER_PG_PORT",
@@ -151,9 +152,9 @@ def execute(repo, args):
     if args.command == "schema":
         if args.action == "init":
             return initialize_schema(repo)
-        if args.action == "migrate":
-            return migrate_schema(repo)
-        return repo.check_schema()
+        if args.action == "check":
+            return repo.check_schema()
+        raise ValueError("unsupported schema action: " + str(args.action))
     if args.action == "list":
         if args.limit < 1 or args.limit > 1000:
             raise ValueError("limit must be 1..1000")
@@ -196,7 +197,7 @@ def parser():
     commands = root.add_subparsers(dest="command")
     commands.required = True  # Python 3.6 的 add_subparsers 尚不接受 required 参数。
     schema = commands.add_parser("schema")
-    schema.add_argument("action", choices=("init", "check", "migrate"))
+    schema.add_argument("action", choices=("init", "check"))
     unknown = commands.add_parser("unknown")
     actions = unknown.add_subparsers(dest="action")
     actions.required = True

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""ORDER 有界异步日志；调用线程只提交普通数据快照。"""
+"""ORDER 有界异步日志；调用线程只提交普通数据快照。Last modified: 2026-09-26。"""
 import datetime as order_log_datetime
 import json as order_log_json
+import math as order_log_math
 import os as order_log_os
 import queue as order_log_queue
 import threading as order_log_threading
@@ -14,6 +15,7 @@ class AsyncOrderLogger(object):
     _ZONE = order_log_datetime.timezone(order_log_datetime.timedelta(hours=8))
     _MAX_FIELDS = 32
     _MAX_TEXT = 1024
+    _DIAGNOSTIC_LIMITS = {"traceback": 16384, "error_message": 4096}
 
     def __init__(self, log_directory, capacity=2048, sink=None):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
@@ -31,12 +33,61 @@ class AsyncOrderLogger(object):
         self._sampled_at = None
 
     @classmethod
-    def _plain(cls, value):
+    def _plain(cls, value, limit=None):
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, str):
-            return value[:cls._MAX_TEXT]
+            return value[:cls._MAX_TEXT if limit is None else limit]
         return "<unsupported>"
+
+    @classmethod
+    def _return_snapshot(cls, value):
+        """只复制有界普通诊断数据；不读取原生属性或调用 repr。"""
+        budget = {"nodes": 2048, "chars": 65536, "truncated": False}
+
+        def plain(item, depth=0):
+            budget["nodes"] -= 1
+            if budget["nodes"] < 0 or depth > 8:
+                budget["truncated"] = True
+                return "<truncated>"
+            if item is None or isinstance(item, (bool, int)):
+                return item
+            if isinstance(item, float):
+                return item if order_log_math.isfinite(item) else None
+            if isinstance(item, str):
+                limit = min(4096, max(0, budget["chars"]))
+                budget["truncated"] |= len(item) > limit
+                budget["chars"] -= min(len(item), limit)
+                return item[:limit]
+            if type(item) is dict:
+                result = {}
+                for index, (key, member) in enumerate(item.items()):
+                    if index >= 128 or budget["nodes"] <= 0 or budget["chars"] <= 0:
+                        budget["truncated"] = True
+                        break
+                    if not isinstance(key, str):
+                        budget["truncated"] = True
+                        continue
+                    bounded_key = key[:256]
+                    budget["truncated"] |= len(key) > 256
+                    budget["chars"] -= len(bounded_key)
+                    result[bounded_key] = plain(member, depth + 1)
+                return result
+            if type(item) in (list, tuple):
+                result = []
+                for index, member in enumerate(item):
+                    if index >= 128 or budget["nodes"] <= 0 or budget["chars"] <= 0:
+                        budget["truncated"] = True
+                        break
+                    result.append(plain(member, depth + 1))
+                return result
+            budget["truncated"] = True
+            return "<unsupported>"
+
+        result = plain(value)
+        if type(result) is dict and budget["truncated"]:
+            result["truncated"] = True
+        return result
 
     def __call__(self, level, message, **fields):
         # 不在 QMT 调用线程格式化、打印、写文件或遍历原生对象。
@@ -44,7 +95,9 @@ class AsyncOrderLogger(object):
         for index, (key, value) in enumerate(fields.items()):
             if index >= self._MAX_FIELDS:
                 break
-            snapshot[key[:64]] = self._plain(value)
+            # 异常堆栈单独限长，避免普通字段的 1 KiB 截断掉底部根因。
+            snapshot[key[:64]] = (self._return_snapshot(value) if key in ("return_snapshot", "qmt_parameters") else
+                                  self._plain(value, self._DIAGNOSTIC_LIMITS.get(key)))
         record = (order_log_time.time(), self._plain(level), self._plain(message), snapshot)
         with self._state_lock:
             if self._stop_event.is_set():

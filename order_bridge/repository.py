@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。"""
+"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-26。"""
 import hashlib
 import json
 import math
@@ -20,6 +20,16 @@ repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
                      "qmt_orders": "qmt_orders", "fills": "fills"}
+repo_RECONCILE_CHECKPOINT_FIELDS = frozenset((
+    "version", "updated_at", "last_reconcile_round", "reconcile_round_fact_version",
+    "last_reconcile_attempt_at", "last_reconciled_at", "reconcile_due_at",
+    "reconcile_priority", "reconcile_requested"))
+
+
+def repo_reconcile_state(doc):
+    """排除轮次和时间检查点，保留同步、终态及子记录的业务变化。"""
+    return {key: value for key, value in doc.items()
+            if key not in repo_RECONCILE_CHECKPOINT_FIELDS}
 
 
 def repo_schema(value):
@@ -269,7 +279,7 @@ class PostgresRepository(object):
             raise OrderError(404, "ORDER_NOT_FOUND", "order not found")
         return doc
 
-    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None):
+    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None, child_fields=None):
         doc.setdefault("fact_version", 0)
         doc.setdefault("last_reconcile_attempt_at", None)
         doc.setdefault("reconcile_due_at", repo_EPOCH)
@@ -303,6 +313,8 @@ class PostgresRepository(object):
                                        doc["last_reconcile_attempt_at"], doc.get("last_reconciled_at"), doc["fact_version"],
                                        doc["created_at"]))
         for table, field in repo_CHILD_TABLES.items():
+            if child_fields is not None and field not in child_fields:
+                continue
             cur.execute("DELETE FROM " + self.repo_s + "." + table +
                         " WHERE account_type=%s AND account_id=%s AND order_id=%s", self.repo_scope + (doc["order_id"],))
             for index, record in enumerate(doc.get(field, [])):
@@ -314,12 +326,13 @@ class PostgresRepository(object):
                 cur.execute("INSERT INTO " + self.repo_s + "." + table +
                             "(account_type,account_id,order_id,record_id,document) VALUES(%s,%s,%s,%s,%s::jsonb)",
                             self.repo_scope + (doc["order_id"], record_id, json_text(record)))
-        cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
-                    "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
-        seq = cur.fetchone()[0]
-        cur.execute("INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
-                    "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                    self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
+        if event_type is not None:
+            cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
+                        "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
+            seq = cur.fetchone()[0]
+            cur.execute("INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
+                        "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                        self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
         return doc
 
     def accept_order(self, normalized):
@@ -506,10 +519,12 @@ class PostgresRepository(object):
             return iso_datetime(value) if value else None
         return self.repo_run(read)
 
-    def begin_reconcile_batch(self, limit=100, round_id=None, cursor=None):
+    def begin_reconcile_batch(self, limit=100, round_id=None, cursor=None, interval_seconds=30):
         """同一轮只选一次订单，逐单记录尝试；后续批次共用外部 QMT 快照。"""
         if not round_id:
             raise ValueError("round_id is required")
+        if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int) or not 1 <= interval_seconds <= 2147483647:
+            raise ValueError("reconcile interval must be a positive integer")
         limit = max(1, min(int(limit), 1000))
         def begin(cur):
             params = self.repo_scope + (iso_datetime(), str(round_id))
@@ -532,9 +547,9 @@ class PostgresRepository(object):
                 doc["reconcile_round_fact_version"] = int(doc.get("fact_version", 0))
                 doc["last_reconcile_attempt_at"] = stamp
                 # 选中的订单至少在本轮归并结束前不会再次进入首页。
-                doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+                doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=interval_seconds))
                 doc["reconcile_priority"] = False
-                self.repo_save(cur, doc, "RECONCILE_ATTEMPT")
+                self.repo_save(cur, doc, None, child_fields=())
                 docs.append(doc)
             next_cursor = None
             if len(rows) > limit and selected:
@@ -560,16 +575,23 @@ class PostgresRepository(object):
                     "has_more": len(docs) > limit}
         return self.repo_run(listing)
 
-    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None):
+    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None, interval_seconds=30):
         """旧快照只能记录尝试，不能清除其后回报/缺口设下的门闩。"""
+        if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int) or not 1 <= interval_seconds <= 2147483647:
+            raise ValueError("reconcile interval must be a positive integer")
         def finish(cur):
             doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
             if int(doc.get("fact_version", 0)) != int(expected_fact_version):
                 return False
+            before = copy_json(doc)
             mark_reconciled(doc, complete=complete, now=stamp)
-            doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+            doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=interval_seconds))
             doc["reconcile_priority"] = False
-            self.repo_save(cur, doc, "RECONCILE_FINISHED")
+            changed_children = tuple(field for field in repo_CHILD_TABLES.values()
+                                     if before.get(field) != doc.get(field))
+            event_type = ("RECONCILE_STATE_CHANGED" if repo_reconcile_state(before) != repo_reconcile_state(doc)
+                          else None)
+            self.repo_save(cur, doc, event_type, child_fields=changed_children)
             return True
         return self.repo_run(finish, mutation=True)
 

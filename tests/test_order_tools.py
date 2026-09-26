@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
+# Last modified (Asia/Shanghai): 2026-09-26
 """ORDER 交付工具的无 QMT/PG 验证。"""
 import importlib.util
 import io
 import json
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import re
 import tempfile
@@ -91,8 +92,6 @@ class SchemaInstallerTests(unittest.TestCase):
             if statement.startswith("INSERT INTO ") and ".schema_version" in statement:
                 if self.version is None:
                     self.version = 2
-            if statement.startswith("UPDATE ") and ".schema_version SET version" in statement:
-                self.version = 2
 
         def fetchone(self):
             if self.last.startswith("SELECT to_regclass"):
@@ -141,12 +140,13 @@ class SchemaInstallerTests(unittest.TestCase):
         with self.assertRaises(OrderError) as caught:
             tool.initialize_schema(self.Repo(cursor))
         self.assertEqual(caught.exception.code, "SCHEMA_VERSION_MISMATCH")
-        self.assertIn("schema migrate", str(caught.exception))
-        self.assertFalse(any(sql.startswith(("CREATE ", "ALTER ", "INSERT "))
+        self.assertIn("no automatic upgrade", str(caught.exception))
+        self.assertFalse(any(sql.startswith(("CREATE ", "ALTER ", "INSERT ", "UPDATE ", "DELETE "))
                              for sql, _ in cursor.statements))
 
     def test_default_sql_contains_all_order_tables(self):
         tool = load_tool("order_schema")
+        self.assertEqual(tool.DEFAULT_SQL_PATH, ROOT / "sql" / "order_init.sql")
         cursor = self.Cursor()
         self.assertEqual(tool.initialize_schema(self.Repo(cursor)), {"schema_version": 2})
         ddl = "\n".join(sql for sql, _ in cursor.statements)
@@ -155,23 +155,16 @@ class SchemaInstallerTests(unittest.TestCase):
         self.assertEqual([params for sql, params in cursor.statements
                           if sql.startswith("INSERT INTO ")], [(2,)])
 
-    def test_migration_checks_version_before_ddl_and_is_idempotent(self):
-        from order_bridge.common import OrderError
+    def test_current_schema_init_can_be_repeated(self):
         tool = load_tool("order_schema")
-        missing = self.Cursor()
-        with self.assertRaises(OrderError) as caught:
-            tool.migrate_schema(self.Repo(missing))
-        self.assertEqual(caught.exception.code, "SCHEMA_NOT_READY")
-        self.assertFalse(any(sql.startswith("ALTER TABLE") for sql, _ in missing.statements))
-
-        old = self.Cursor(existing_version=1)
-        self.assertEqual(tool.migrate_schema(self.Repo(old)), {"schema_version": 2, "migrated": True})
-        self.assertTrue(any(sql.startswith("ALTER TABLE") for sql, _ in old.statements))
-        self.assertEqual(old.version, 2)
-
         current = self.Cursor(existing_version=2)
-        self.assertEqual(tool.migrate_schema(self.Repo(current)), {"schema_version": 2, "migrated": False})
-        self.assertFalse(any(sql.startswith(("ALTER TABLE", "CREATE INDEX", "UPDATE "))
+        repo = self.Repo(current)
+        self.assertEqual(tool.initialize_schema(repo), {"schema_version": 2})
+        first_run = list(current.statements)
+        self.assertEqual(tool.initialize_schema(repo), {"schema_version": 2})
+        self.assertEqual(current.version, 2)
+        self.assertEqual(current.statements, first_run * 2)
+        self.assertFalse(any(sql.startswith(("UPDATE ", "DELETE "))
                              for sql, _ in current.statements))
 
 
@@ -204,13 +197,17 @@ class AdminSafetyTests(unittest.TestCase):
         self.assertEqual(result, {"schema_version": 2})
         install.assert_called_once_with(repo)
 
-    def test_schema_migrate_uses_explicit_migrator(self):
-        repo = object()
-        with patch.object(self.tool, "migrate_schema", return_value={"schema_version": 2,
-                                                                       "migrated": True}) as migrate:
-            result = self.tool.execute(repo, SimpleNamespace(command="schema", action="migrate"))
-        self.assertEqual(result, {"schema_version": 2, "migrated": True})
-        migrate.assert_called_once_with(repo)
+    def test_removed_schema_action_is_rejected_in_parser_and_dispatch(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            self.tool.parser().parse_args(["schema", "migrate"])
+        self.assertEqual(caught.exception.code, 2)
+
+        class Repo:
+            def check_schema(self):
+                raise AssertionError("unsupported action was routed to check")
+
+        with self.assertRaisesRegex(ValueError, "unsupported schema action: migrate"):
+            self.tool.execute(Repo(), SimpleNamespace(command="schema", action="migrate"))
 
     def test_admin_uses_fixed_schema_and_rejects_legacy_setting(self):
         config = {"pg_host": "localhost", "pg_port": 5432, "pg_database": "order_test",
@@ -239,7 +236,7 @@ class AdminSafetyTests(unittest.TestCase):
             source = Path(temp) / "config.json"
             source.write_text(json.dumps(config), encoding="utf-8")
             with patch.dict(self.tool.os.environ, {}, clear=True):
-                for action in ("init", "check", "migrate"):
+                for action in ("init", "check"):
                     args = self.tool.parser().parse_args(["--config", str(source), "schema", action])
                     parsed = self.tool.config_from_args(args)
                     self.assertNotIn("account_id", parsed)

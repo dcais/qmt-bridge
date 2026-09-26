@@ -74,11 +74,74 @@ def state_item(doc, identifiers):
 def state_evidence(doc, kind, raw, source, reason, observed_at):
     evidence = doc.setdefault('unassociated_evidence', [])
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
+    if any(row.get('evidence_id') == key for row in doc.get('resolved_evidence', [])):
+        return
     if not any(row['evidence_id'] == key for row in evidence):
         evidence.append({'evidence_id': key, 'kind': kind, 'raw': copy_json(raw),
                          'source': source, 'reason': reason, 'observed_at': observed_at})
     doc['reconciliation_complete'] = False
     doc['sync_status'] = 'INCOMPLETE'
+
+
+def resolve_missing_order_evidence(doc):
+    """仅以同账户、同日、同市场的双重 QMT 原生引用消解缺委托号回报。"""
+    active = doc.get('unassociated_evidence', [])
+    remaining = []
+    changed = False
+    for evidence in active:
+        if evidence.get('kind') != 'order' or evidence.get('reason') != 'MISSING_QMT_ID':
+            remaining.append(evidence)
+            continue
+        raw = evidence.get('raw') or {}
+        ids = observation_identifiers('order', raw)
+        scope = (ids['account_id'], ids['trading_day'], ids['market'])
+        references = (state_id(raw.get('m_nRef')), state_id(raw.get('m_strOrderRef')))
+        if not all(scope) or ids['account_id'] != doc.get('account_id') or not all(references):
+            remaining.append(evidence)
+            continue
+        candidates = []
+        conflict = False
+        for row in doc['qmt_orders']:
+            known = observation_identifiers('order', row.get('raw') or {})
+            for key in ('account_id', 'trading_day', 'market', 'symbol', 'side',
+                        'remark', 'qmt_task_id'):
+                known[key] = known[key] or row.get(key)
+            known_scope = (known['account_id'], known['trading_day'], known['market'])
+            if known_scope != scope or not all(known_scope) or not row.get('qmt_order_id'):
+                continue
+            native = (state_id(row.get('native_ref') or (row.get('raw') or {}).get('m_nRef')),
+                      state_id(row.get('native_order_ref') or (row.get('raw') or {}).get('m_strOrderRef')))
+            if not any(left == right for left, right in zip(references, native) if right):
+                continue
+            # 共享任一引用却在另一引用或业务字段上冲突时，不猜测子委托归属。
+            if native != references or any(ids[key] and known[key] and ids[key] != known[key]
+                                           for key in ('symbol', 'side', 'remark', 'qmt_task_id')):
+                conflict = True
+                continue
+            candidates.append(row)
+        if conflict or len(candidates) != 1:
+            remaining.append(evidence)
+            continue
+        row = candidates[0]
+        # 旧回报可能带有查询尚未覆盖的累计成交；不能静默丢失该事实。
+        cumulative = max(state_number(raw, 'm_nVolumeTraded'), state_number(raw, 'filled_quantity'))
+        if cumulative > row.get('filled_quantity', 0):
+            remaining.append(evidence)
+            continue
+        resolved = copy_json(evidence)
+        resolved['qmt_order_id'] = row['qmt_order_id']
+        resolved['identity_basis'] = {'account_id': scope[0], 'trading_day': scope[1],
+                                      'market': scope[2], 'm_nRef': references[0],
+                                      'm_strOrderRef': references[1]}
+        previous = doc.setdefault('resolved_evidence', [])
+        if not any(item.get('evidence_id') == evidence.get('evidence_id') for item in previous):
+            previous.append(resolved)
+        changed = True
+    if changed:
+        doc['unassociated_evidence'] = remaining
+        # 身份消解不是一次完整查询；由 mark_reconciled 明确释放对账门闩。
+        doc['reconciliation_complete'] = False
+    return changed
 
 
 def apply_observation(doc, kind, raw, source, observed_at=None):
@@ -144,6 +207,19 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 record.update({key: value for key, value in ids.items() if value is not None})
                 record.update(status=status, terminal=status in terminal)
                 if kind == 'order':
+                    # 成对保存引用，避免两个不完整快照拼出虚假的委托身份。
+                    native_ref = state_id(raw.get('m_nRef'))
+                    native_order_ref = state_id(raw.get('m_strOrderRef'))
+                    previous_raw = previous_record.get('raw') or {}
+                    previous_refs = (state_id(previous_record.get('native_ref') or previous_raw.get('m_nRef')),
+                                     state_id(previous_record.get('native_order_ref') or previous_raw.get('m_strOrderRef')))
+                    reference_conflict = any(old and new and old != new for old, new in
+                                             zip(previous_refs, (native_ref, native_order_ref)))
+                    if reference_conflict:
+                        state_evidence(doc, kind, raw, source, 'CONFLICTING_ORDER_REFERENCE', stamp)
+                    elif native_ref and native_order_ref:
+                        record['native_ref'] = native_ref
+                        record['native_order_ref'] = native_order_ref
                     record['quantity'] = max(record.get('quantity', 0), state_number(raw, 'quantity', 'm_nVolumeTotalOriginal'))
                     record['filled_quantity'] = max(record.get('filled_quantity', 0), state_number(raw, 'filled_quantity', 'm_nVolumeTraded'))
                     item = state_item(doc, record)
@@ -205,6 +281,7 @@ def reconcile_pending(doc):
 
 def recompute_order(doc, now=None, reconciled=False):
     before = copy_json(doc)
+    resolve_missing_order_evidence(doc)
     if reconciled:
         doc['reconciliation_complete'] = True
     if doc['submission_status'] == 'QUEUED' and doc.get('submit_before'):
@@ -398,6 +475,7 @@ def is_order_active(doc):
 
 def mark_reconciled(doc, complete=True, now=None):
     before = copy_json(doc)
+    resolve_missing_order_evidence(doc)
     doc['reconciliation_complete'] = bool(complete)
     if complete:
         doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)

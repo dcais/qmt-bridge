@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""QMT 函数适配层。调用者必须处于策略调度回调线程。"""
+"""QMT 函数适配层。调用者必须处于策略调度回调线程。Last modified: 2026-09-26。"""
 import datetime as dt
 import math
 import re
 from decimal import Decimal, InvalidOperation
 
-from .common import OrderError, copy_json, parse_timestamp
+from .common import OrderError, copy_json, parse_timestamp, qmt_invoke
 
 
 _qmt_quote = {"LATEST": 5, "OWN_BEST": 13, "OPPONENT_BEST": 14, "FAR_LIMIT": 12}
@@ -20,10 +20,143 @@ _qmt_passorder_fields = ("accountID", "currentTime", "formulaName", "modelPrice"
                          "modelVolume", "opType", "orderCode", "orderType", "prType", "strategyName")
 _qmt_history_date = re.compile(r"^\d{8}$")
 _qmt_range = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
+_qmt_diagnostic_missing = object()
 
 
 def _qmt_error(code, message, status=422):
     raise OrderError(status, code, message)
+
+
+def _qmt_exception_context(exc, phase, field=None, value=None):
+    """尽力给原异常附加纯字符串位置，不改变异常类型；Last modified: 2026-09-26。"""
+    for name, text in (("qmt_phase", phase), ("qmt_field", field),
+                       ("qmt_object_type", type(value).__name__ if value is not None else None)):
+        if text is None:
+            continue
+        try:
+            if getattr(exc, name, None) is None:
+                setattr(exc, name, text)
+        except Exception:
+            pass
+
+
+def _qmt_query_result_context(exc, rows, index):
+    for name, item in (("qmt_return_type", type(rows).__name__),
+                       ("qmt_return_count", len(rows)), ("qmt_row_index", index)):
+        try:
+            setattr(exc, name, item)
+        except Exception:
+            pass
+
+
+def _qmt_declared_field(value, name):
+    """静态查描述符定义，不调用原生 getter。"""
+    try:
+        for cls in type(value).__mro__:
+            fields = vars(cls)
+            if name in fields:
+                return cls.__module__ + "." + cls.__name__, type(fields[name]).__name__
+    except Exception:
+        pass
+    return None, None
+
+
+def _qmt_field_error(value, name, exc):
+    declared_on, descriptor_type = _qmt_declared_field(value, name)
+    try:
+        message = str(exc)[:1024]
+    except Exception:
+        message = "<exception message unavailable>"
+    return {"type": type(exc).__name__[:128], "message": message,
+            "declared_on": declared_on, "descriptor_type": descriptor_type}
+
+
+def _qmt_diagnostic_plain(value, budget, depth=0):
+    """仅裁剪已经快照化的普通值；绝不 repr 原生对象。"""
+    if budget["nodes"] <= 0:
+        budget["truncated"] = True
+        return _qmt_diagnostic_missing
+    budget["nodes"] -= 1
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        length = min(len(value), 1024, budget["chars"])
+        budget["chars"] -= length
+        if length < len(value):
+            budget["truncated"] = True
+            if length == 0:
+                return _qmt_diagnostic_missing
+        return value[:length]
+    if isinstance(value, (int, float)):
+        try:
+            length = len(str(value))
+        except Exception:
+            budget["truncated"] = True
+            return _qmt_diagnostic_missing
+        if length > budget["chars"] or length > 1024:
+            budget["truncated"] = True
+            return _qmt_diagnostic_missing
+        budget["chars"] -= length
+        return value if not isinstance(value, float) or math.isfinite(value) else None
+    if isinstance(value, (list, tuple, dict)):
+        if depth >= 4:
+            budget["truncated"] = True
+            return _qmt_diagnostic_missing
+        if isinstance(value, (list, tuple)):
+            result = []
+            if len(value) > 16:
+                budget["truncated"] = True
+            for member in value[:16]:
+                item = _qmt_diagnostic_plain(member, budget, depth + 1)
+                if item is not _qmt_diagnostic_missing:
+                    result.append(item)
+            return result
+        result = {}
+        if len(value) > 16:
+            budget["truncated"] = True
+        for index, (key, member) in enumerate(value.items()):
+            if index >= 16:
+                break
+            if not isinstance(key, str):
+                budget["truncated"] = True
+                continue
+            bounded_key = _qmt_diagnostic_plain(key, budget, depth + 1)
+            bounded_member = _qmt_diagnostic_plain(member, budget, depth + 1)
+            if bounded_key is not _qmt_diagnostic_missing and bounded_member is not _qmt_diagnostic_missing:
+                result[bounded_key] = bounded_member
+        return result
+    budget["truncated"] = True
+    return _qmt_diagnostic_missing
+
+
+def _qmt_return_diagnostic(value, names, raw, errors, stopped_early):
+    budget = {"nodes": 512, "chars": 16384, "truncated": stopped_early}
+    selected = names[:128]
+    first_error = next((name for name in names if name in errors), None)
+    if first_error is not None and first_error not in selected:
+        selected = names[:127] + [first_error]
+    if len(names) > len(selected):
+        budget["truncated"] = True
+    fields, field_errors = {}, {}
+    # 错误字段优先保留；所有文字共用同一个字符预算。
+    for name in selected:
+        if name not in errors:
+            continue
+        bounded_name = _qmt_diagnostic_plain(name[:256], budget)
+        bounded_error = _qmt_diagnostic_plain(errors[name], budget)
+        if bounded_name is not _qmt_diagnostic_missing and bounded_error is not _qmt_diagnostic_missing:
+            field_errors[bounded_name] = bounded_error
+    for name in selected:
+        if name in raw:
+            bounded_name = _qmt_diagnostic_plain(name[:256], budget)
+            plain = _qmt_diagnostic_plain(raw[name], budget)
+            if bounded_name is not _qmt_diagnostic_missing and plain is not _qmt_diagnostic_missing:
+                fields[bounded_name] = plain
+    return {"object_type": type(value).__name__[:128],
+            "object_module": type(value).__module__[:256],
+            "fields_source": "dir(object)", "field_count": len(names),
+            "fields": fields, "field_errors": field_errors,
+            "truncated": budget["truncated"]}
 
 
 def _qmt_number(value, field):
@@ -100,11 +233,33 @@ def _qmt_passorder_snapshot(raw):
 
 
 class QmtAdapter(object):
-    def __init__(self, apis, context, account_id=None, account_type="STOCK"):
+    def __init__(self, apis, context, account_id=None, account_type="STOCK", logger=None):
         self.apis = apis
         self.context = context
         self.account_id = account_id or getattr(context, "account_id", None)
         self.account_type = account_type
+        self.logger = logger
+        self.log_context = {}
+        self._xt_tag_warning_logged = False
+
+    def _warn_excluded_xt_tag(self, value, names, raw):
+        if self._xt_tag_warning_logged:
+            return
+        self._xt_tag_warning_logged = True
+        if self.logger is None:
+            return
+        try:
+            declared_on, descriptor_type = _qmt_declared_field(value, "m_xtTag")
+            diagnostic = _qmt_return_diagnostic(value, names, raw, {}, False)
+            diagnostic["skipped_fields"] = {"m_xtTag": {
+                "reason": "QMT_INTERNAL_NATIVE_FIELD", "declared_on": declared_on,
+                "descriptor_type": descriptor_type}}
+            self.logger("WARN", "QMT snapshot internal field excluded",
+                        account_id=self.account_id, object_type=type(value).__name__[:128],
+                        skipped_field="m_xtTag", return_snapshot=diagnostic)
+        except Exception:
+            # 日志不可用不影响已成功转换的业务字段。
+            pass
 
     def available(self, name):
         return callable(self.apis.get(name))
@@ -115,11 +270,22 @@ class QmtAdapter(object):
             _qmt_error("API_UNAVAILABLE", name + " is unavailable", 501)
         return function
 
+    def _call(self, name, args, parameters, correlation=None):
+        """仅包装一次实际原生调用；上下文不包含 ContextInfo。Last modified: 2026-09-26。"""
+        function = self._require(name)
+        context = dict(self.log_context)
+        context.update(correlation or {})
+        context["account_id"] = self.account_id
+        return qmt_invoke(self.logger, name, function, args=args,
+                          parameters=parameters, correlation=context)
+
     def resolve(self, request, remark):
         result = self._resolve_base(request, remark)
         if request["execution"]["type"] == "SMART":
             smart = request["execution"]
-            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            algorithms = [smart["algorithm"]]
+            data = self.snapshot(self._call("get_smart_algo_param", (algorithms,),
+                                            {"algoList": algorithms}))
             self._resolve_smart(result, smart, remark, data)
         return result
 
@@ -209,17 +375,25 @@ class QmtAdapter(object):
                 _qmt_error("INVALID_PREPARE_STAGE", "SMART stage needs SMART request", 400)
             result = self._resolve_base(request, order.get("remark"))
             smart = request["execution"]
-            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            algorithms = [smart["algorithm"]]
+            data = self.snapshot(self._call("get_smart_algo_param", (algorithms,),
+                                            {"algoList": algorithms},
+                                            {"order_id": order.get("order_id"),
+                                             "client_order_id": request.get("client_order_id")}))
             self._resolve_smart(result, smart, order.get("remark"), data)
             return {"stage": "BASKET_GET" if order.get("order_type") == "BASKET" else None,
                     "updates": {"resolved_request": result}}
         if stage not in ("BASKET_GET", "BASKET_SET", "BASKET_VERIFY"):
             _qmt_error("INVALID_PREPARE_STAGE", "unknown preparation stage", 400)
         expected = self._expected_basket(order)
+        correlation = {"order_id": order.get("order_id"),
+                       "client_order_id": order.get("client_order_id")}
         if stage == "BASKET_SET":
-            self._require("set_basket")(copy_json(expected))
+            basket = copy_json(expected)
+            self._call("set_basket", (basket,), basket, correlation)
             return {"stage": "BASKET_VERIFY", "updates": {}}
-        actual = self.snapshot(self._require("get_basket")(expected["name"]))
+        actual = self.snapshot(self._call("get_basket", (expected["name"],),
+                                          {"name": expected["name"]}, correlation))
         if stage == "BASKET_GET" and not actual:
             return {"stage": "BASKET_SET", "updates": {}}
         self._check_basket(actual, expected)
@@ -241,14 +415,16 @@ class QmtAdapter(object):
             return False
         expected = self._expected_basket(order)
         name = expected["name"]
-        get_basket = self._require("get_basket")
-        set_basket = self._require("set_basket")
-        existing = get_basket(name)
+        self._require("get_basket")
+        self._require("set_basket")
+        correlation = {"order_id": order.get("order_id"),
+                       "client_order_id": order.get("client_order_id")}
+        existing = self._call("get_basket", (name,), {"name": name}, correlation)
         if existing:
             self._check_basket(existing, expected)
             return False
-        set_basket(expected)
-        self._check_basket(get_basket(name), expected)
+        self._call("set_basket", (expected,), expected, correlation)
+        self._check_basket(self._call("get_basket", (name,), {"name": name}, correlation), expected)
         return True
 
     def _check_basket(self, actual, expected):
@@ -279,7 +455,10 @@ class QmtAdapter(object):
             base.extend([frozen["smartAlgoType"], frozen["startTime"], frozen["endTime"],
                          copy_json(frozen["algoParam"])])
         base.append(self.context)
-        return self._require(name)(*base)
+        parameters = {key: value for key, value in frozen.items() if key != "function"}
+        correlation = {"order_id": order.get("order_id"),
+                       "client_order_id": order.get("client_order_id")}
+        return self._call(name, tuple(base), parameters, correlation)
 
     def cancel_action(self, action):
         if not isinstance(action, dict):
@@ -293,8 +472,13 @@ class QmtAdapter(object):
                 not str(identifier).strip() or not account or
                 (self.account_id is not None and account != self.account_id)):
             _qmt_error("INVALID_CANCEL_ACTION", "identifier/account mismatch", 400)
-        return bool(self._require("cancel" if kind == "CANCEL_ORDER" else "cancel_task")(
-            identifier, account, self.account_type, self.context))
+        name = "cancel" if kind == "CANCEL_ORDER" else "cancel_task"
+        result = self._call(name, (identifier, account, self.account_type, self.context),
+                            {"target_id": identifier, "accountID": account,
+                             "accountType": self.account_type},
+                            {"cancel_request_id": action.get("cancel_request_id"),
+                             "qmt_order_id" if kind == "CANCEL_ORDER" else "qmt_task_id": identifier})
+        return bool(result)
 
     def query(self, kind, start_date=None, end_date=None):
         if kind not in ("order", "deal", "task"):
@@ -308,18 +492,30 @@ class QmtAdapter(object):
                 _qmt_error("HISTORY_UNAVAILABLE", "QMT history does not document task data", 501)
             if not _qmt_history_date.match(start_date) or not _qmt_history_date.match(end_date) or start_date > end_date:
                 _qmt_error("INVALID_QUERY", "history dates must be ordered YYYYMMDD", 400)
-            rows = self._require("get_history_trade_detail_data")(
-                self.account_id, self.account_type, kind.upper(), start_date, end_date)
+            try:
+                rows = self._call("get_history_trade_detail_data",
+                                  (self.account_id, self.account_type, kind.upper(), start_date, end_date),
+                                  {"accountID": self.account_id, "accountType": self.account_type,
+                                   "dataType": kind.upper(), "startDate": start_date, "endDate": end_date},
+                                  {"query_kind": kind})
+            except Exception as exc:
+                _qmt_exception_context(exc, "native_query")
+                raise
             if not isinstance(rows, (list, tuple)):
                 _qmt_error("INVALID_QMT_RESULT", "history query returned invalid collection", 502)
             result = []
-            for row in rows:
+            for row_index, row in enumerate(rows):
                 if not isinstance(row, (list, tuple)) or len(row) < 2:
                     _qmt_error("INVALID_QMT_RESULT", "history query returned invalid tuple", 502)
                 for raw_item in row[1:]:
                     group = raw_item if isinstance(raw_item, (list, tuple)) else [raw_item]
                     for member in group:
-                        item = self.snapshot(member)
+                        try:
+                            item = self.snapshot(member)
+                        except Exception as exc:
+                            _qmt_exception_context(exc, "snapshot", value=member)
+                            _qmt_query_result_context(exc, rows, row_index)
+                            raise
                         if not isinstance(item, dict):
                             _qmt_error("INVALID_QMT_RESULT", "history entry has no QMT fields", 502)
                         if not item.get("m_strTradingDay"):
@@ -329,10 +525,24 @@ class QmtAdapter(object):
                             item["m_strTradingDay"] = trading_day
                         result.append(item)
             return result
-        rows = self._require("get_trade_detail_data")(self.account_id, self.account_type, kind)
+        try:
+            rows = self._call("get_trade_detail_data", (self.account_id, self.account_type, kind),
+                              {"accountID": self.account_id, "accountType": self.account_type,
+                               "dataType": kind}, {"query_kind": kind})
+        except Exception as exc:
+            _qmt_exception_context(exc, "native_query")
+            raise
         if not isinstance(rows, (list, tuple)):
             _qmt_error("INVALID_QMT_RESULT", "query returned invalid collection", 502)
-        return [self.snapshot(row) for row in rows]
+        result = []
+        for row_index, row in enumerate(rows):
+            try:
+                result.append(self.snapshot(row))
+            except Exception as exc:
+                _qmt_exception_context(exc, "snapshot", value=row)
+                _qmt_query_result_context(exc, rows, row_index)
+                raise
+        return result
 
     def snapshot(self, value):
         if value is None or isinstance(value, (str, bool, int)):
@@ -348,11 +558,62 @@ class QmtAdapter(object):
             if any(key in raw for key in _qmt_passorder_fields):
                 return _qmt_passorder_snapshot(raw)
             return raw
-        names = [name for name in dir(value) if name.startswith("m_")]
-        names.extend(name for name in _qmt_passorder_fields if name not in names and hasattr(value, name))
+        try:
+            names = [name for name in dir(value) if name.startswith("m_")]
+        except Exception as exc:
+            _qmt_exception_context(exc, "snapshot", value=value)
+            raise
+        preloaded = {}
+        field_errors = {}
+        first_error = None
+        for name in _qmt_passorder_fields:
+            if name in names:
+                continue
+            try:
+                member = getattr(value, name, _qmt_diagnostic_missing)
+                if member is not _qmt_diagnostic_missing:
+                    names.append(name)
+                    preloaded[name] = member
+            except Exception as exc:
+                _qmt_exception_context(exc, "snapshot", field=name, value=value)
+                if first_error is None:
+                    first_error = exc
+                names.append(name)
+                field_errors[name] = _qmt_field_error(value, name, exc)
         if not names:
             _qmt_error("INVALID_QMT_RESULT", "object has no recognized QMT fields", 502)
-        raw = {name: self.snapshot(getattr(value, name)) for name in names}
+        raw = {}
+        stopped_early = False
+        for index, name in enumerate(names):
+            if first_error is not None and index >= 128:
+                stopped_early = True
+                break
+            if name == "m_xtTag":
+                # QMT 内部标签的 native getter 缺少 Python 转换器；不参与业务委托字段。
+                continue
+            if name in field_errors:
+                continue
+            try:
+                member = preloaded[name] if name in preloaded else getattr(value, name)
+                raw[name] = self.snapshot(member)
+            except Exception as exc:
+                _qmt_exception_context(exc, "snapshot", field=name, value=value)
+                if first_error is None:
+                    first_error = exc
+                field_errors[name] = _qmt_field_error(value, name, exc)
+        if first_error is not None:
+            try:
+                first_error.qmt_return_snapshot = _qmt_return_diagnostic(
+                    value, names, raw, field_errors, stopped_early)
+            except Exception:
+                pass
+            raise first_error
+        if not raw and "m_xtTag" in names:
+            _qmt_error("INVALID_QMT_RESULT", "native object has no readable QMT fields after excluding m_xtTag", 502)
         if any(key in raw for key in _qmt_passorder_fields):
-            return _qmt_passorder_snapshot(raw)
-        return raw
+            result = _qmt_passorder_snapshot(raw)
+        else:
+            result = raw
+        if "m_xtTag" in names:
+            self._warn_excluded_xt_tag(value, names, raw)
+        return result

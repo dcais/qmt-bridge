@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from .common import copy_json, iso_datetime, parse_timestamp, utc_now
+from .common import copy_json, iso_datetime, parse_timestamp, qmt_exception_details, utc_now
 from .state import pending_cancellations, recompute_order, observation_identifiers
 
 
@@ -37,6 +37,10 @@ class OrderBackground(object):
         self.qmt_ms = 0
         self.round = None
         self.next_round = 0
+        self.last_reconcile_attempt_at = None
+        self.last_reconcile_finished_at = None
+        self.next_reconcile_at = None
+        self.last_reconcile_error = None
         self.cursors = {'submit': None, 'cancel': None}
         self.last_sample = 0
         self.gap_cursor = None
@@ -161,6 +165,16 @@ class OrderBackground(object):
                     continue
                 self.consumed.add(token)
                 call_start = r.clock()
+                # 一次调度指令内可能有多个 QMT 调用；用持久尝试/轮次串联，不泄露到下一笔。
+                document = directive.get('document') or {}
+                action = directive.get('action') or {}
+                previous_log_context = getattr(r.adapter, 'log_context', {})
+                r.adapter.log_context = dict(
+                    order_id=document.get('order_id'), client_order_id=document.get('client_order_id'),
+                    cancel_request_id=action.get('cancel_request_id'),
+                    attempt_id=token if kind in ('submit', 'cancel') else None,
+                    directive_id=token, round_id=directive.get('round_id'), stage=kind,
+                    query_kind=directive.get('query_kind'))
                 try:
                     if not r.stop_event.is_set() and (kind == 'query' or self.authorized(directive, require_database=False)):
                         if kind != 'query' and not self.db_ready:
@@ -192,8 +206,13 @@ class OrderBackground(object):
                             result['value'] = r.adapter.query(directive['query_kind'], *directive.get('dates', ()))
                         result['status'] = 'RETURNED'
                 except Exception as exc:
-                    result.update(status='UNKNOWN', error={'code': getattr(exc, 'code', 'QMT_ERROR'),
-                                  'message': str(exc)[:4096], 'type': type(exc).__name__})
+                    if kind == 'query':
+                        result.update(status='UNKNOWN', error=qmt_exception_details(exc))
+                    else:
+                        result.update(status='UNKNOWN', error={'code': getattr(exc, 'code', 'QMT_ERROR'),
+                                      'message': str(exc)[:4096], 'type': type(exc).__name__})
+                finally:
+                    r.adapter.log_context = previous_log_context
                 self.qmt_ms = (r.clock() - call_start) * 1000
                 # 预留令牌保证队列不会满，QMT 线程从不等待消费者。
                 self.results.put_nowait(result)
@@ -425,7 +444,24 @@ class OrderBackground(object):
                     raise _ContinueMerge()
             else:
                 self.round['complete'] = False
-                self._log('WARNING', 'QMT reconciliation incomplete', kind=result['query_kind'], error_code=(result.get('error') or {}).get('code', result['status']))
+                error = result.get('error') or {}
+                summary = {key: error[key] for key in ('code', 'message', 'type', 'phase', 'field', 'object_type')
+                           if key in error}
+                summary.setdefault('code', result['status'])
+                self.last_reconcile_error = summary
+                dates = result.get('dates') or ()
+                self._log('ERROR', 'QMT reconciliation incomplete', account_id=r.account_id,
+                          kind=result['query_kind'], query_kind=result['query_kind'],
+                          round_id=result.get('round_id') or self.round['id'],
+                          history_start=dates[0] if dates else None,
+                          history_end=dates[1] if dates else None,
+                          error_code=summary['code'],
+                          error_message=error.get('message'), error_type=error.get('type'),
+                          error_phase=error.get('phase'), error_field=error.get('field'),
+                          object_type=error.get('object_type'),
+                          return_type=error.get('return_type'), return_count=error.get('return_count'),
+                          row_index=error.get('row_index'), return_snapshot=error.get('return_snapshot'),
+                          traceback=error.get('traceback'))
                 if not result.get('dates'):
                     self.round['live_complete'] = False
             self.round['waiting'] = False
@@ -472,15 +508,27 @@ class OrderBackground(object):
 
     def _reconcile_step(self):
         r = self.r
+        interval = r.settings['reconcile_interval_seconds']
         if self.round is None:
             if r.clock() < self.next_round:
                 return
             self.round = dict(id=uuid.uuid4().hex, stage=0, waiting=False, complete=True,
                               generation=self.fact_generation, cursor=None, frozen=False, live_complete=True)
+            self.last_reconcile_attempt_at = iso_datetime()
+            self.next_reconcile_at = None
         current = self.round
         if not current['frozen']:
             batch = r.repo.begin_reconcile_batch(limit=r.settings['reconcile_batch_size'],
-                                                 round_id=current['id'], cursor=current['cursor'])
+                                                 round_id=current['id'], cursor=current['cursor'],
+                                                 interval_seconds=interval)
+            # begin 返回的逐单尝试已经落库；只在此时发异步诊断日志。
+            for document in batch['orders']:
+                self._log('INFO', 'RECONCILE_ATTEMPT', account_id=r.account_id,
+                          order_id=document['order_id'], client_order_id=document.get('client_order_id'),
+                          round_id=current['id'], version=document.get('version'),
+                          fact_version=document.get('reconcile_round_fact_version'),
+                          last_reconcile_attempt_at=document.get('last_reconcile_attempt_at'),
+                          reconcile_due_at=document.get('reconcile_due_at'))
             current['cursor'] = batch['next_cursor']
             if batch['has_more']:
                 return
@@ -500,7 +548,7 @@ class OrderBackground(object):
             return
         if current['stage'] < len(current['queries']):
             kind, dates = current['queries'][current['stage']]
-            if self._enqueue('query', query_kind=kind, dates=dates):
+            if self._enqueue('query', query_kind=kind, dates=dates, round_id=current['id']):
                 current['waiting'] = True
             return
         batch = r.repo.reconcile_round_batch(current['id'], limit=r.settings['reconcile_batch_size'],
@@ -517,7 +565,19 @@ class OrderBackground(object):
                             row.update(submission_status='UNKNOWN', execution_status='UNKNOWN',
                                        error={'code': 'SUBMISSION_OUTCOME_UNKNOWN', 'message': 'QMT acknowledgement is not yet associated'})
                     document = r.repo.update_order(document['order_id'], 'SUBMISSION_UNKNOWN', unknown)
-            r.repo.finish_reconcile(document['order_id'], document.get('reconcile_round_fact_version', -1), complete, stamp)
+            checkpoint_applied = r.repo.finish_reconcile(
+                document['order_id'], document.get('reconcile_round_fact_version', -1),
+                complete, stamp, interval_seconds=interval)
+            # False 表示查询期间事实已更新，旧快照未写入；不得记录为对账完成。
+            outcome = ('STALE_FACT_VERSION' if not checkpoint_applied else
+                       'COMPLETE' if complete else 'INCOMPLETE')
+            self._log('INFO', 'RECONCILE_FINISHED', account_id=r.account_id,
+                      order_id=document['order_id'], client_order_id=document.get('client_order_id'),
+                      round_id=current['id'], source_version=document.get('version'),
+                      fact_version=document.get('reconcile_round_fact_version'),
+                      checkpoint_applied=bool(checkpoint_applied),
+                      complete=bool(complete) if checkpoint_applied else None,
+                      outcome=outcome)
         current['cursor'] = batch['next_cursor']
         if batch['has_more']:
             return
@@ -525,9 +585,12 @@ class OrderBackground(object):
             r.recovery_complete = True
         if complete:
             r.last_reconciled_at = stamp
+            self.last_reconcile_error = None
         r.history_coverage_complete = current['complete']
         self.round = None
-        self.next_round = r.clock() + 1
+        self.last_reconcile_finished_at = stamp
+        self.next_round = r.clock() + interval
+        self.next_reconcile_at = iso_datetime(utc_now() + dt.timedelta(seconds=interval))
 
     def health(self):
         r = self.r
@@ -539,7 +602,11 @@ class OrderBackground(object):
                     accepting_orders=bool(self.authorized() and r.recovery_complete and alive),
                     executor_owned=bool(grant and r.clock() < grant[2]), schema_version=self.sample.get('schema_version'),
                     unknown_order_count=self.sample.get('unknown_order_count'), pending_count=self.sample.get('pending_count'),
-                    account_id=r.account_id, last_reconciled_at=r.last_reconciled_at, error_code=r.last_error,
+                    account_id=r.account_id, last_reconciled_at=r.last_reconciled_at,
+                    last_reconcile_attempt_at=self.last_reconcile_attempt_at,
+                    last_reconcile_finished_at=self.last_reconcile_finished_at,
+                    next_reconcile_at=self.next_reconcile_at,
+                    last_reconcile_error=self.last_reconcile_error, error_code=r.last_error,
                     observation_gap=r.observation_gap, sampled_at=self.sampled_at,
                     lifecycle=('STOPPED' if self.stopped else 'STOPPING' if r.stop_event.is_set() else 'RUNNING' if r.recovery_complete else 'RECOVERING' if r.initialized else 'STARTING'),
                     state='STOPPED' if self.stopped else ('STOPPING' if r.stop_event.is_set() else 'RUNNING'),

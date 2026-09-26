@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, public_order, utc_now
+from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, public_order, qmt_exception_details, utc_now
 from .contracts import normalize_order, normalize_cancel, capabilities
 from .qmt import QmtAdapter
 from .background import OrderBackground
@@ -102,10 +102,11 @@ class OrderRuntime:
         self.apis = apis
         self.account_id = account_id
         self.config = pg_config
-        self.adapter = QmtAdapter(apis, context, account_id=account_id, account_type="STOCK")
+        self.logger = logger or (lambda *args, **kwargs: None)
+        self.adapter = QmtAdapter(apis, context, account_id=account_id, account_type="STOCK",
+                                  logger=self.logger)
         self.repo = repository or (PostgresRepository(pg_config, account_id) if pg_config else None)
         self.local_lock = local_lock or (LocalExecutorLock(pg_config, account_id) if pg_config else None)
-        self.logger = logger or (lambda *args, **kwargs: None)
         self.clock = clock or time.monotonic
         self.instance_id = uuid.uuid4().hex
         self.host_id = socket.gethostname().lower()
@@ -125,7 +126,8 @@ class OrderRuntime:
         self.next_reconcile = 0
         self.next_initialize = 0
         self.confirmation_timeout = 30
-        self.settings = dict(submit_batch_size=10, cancel_batch_size=10, reconcile_batch_size=100, schedule_budget_ms=50)
+        self.settings = dict(submit_batch_size=10, cancel_batch_size=10, reconcile_batch_size=100,
+                             schedule_budget_ms=50, reconcile_interval_seconds=30)
         self.settings.update(settings or {})
         self.background = OrderBackground(self)
 
@@ -260,11 +262,51 @@ class OrderRuntime:
         if self.repo is None:
             return
         try:
-            self.observations.put_nowait((kind, self.adapter.snapshot(value)))
+            snapshot = self.adapter.snapshot(value)
+        except Exception as exc:
+            self._observation_failed(kind, "snapshot", exc)
+            return
+        try:
+            self.observations.put_nowait((kind, snapshot))
+        except queue.Full as exc:
+            self._observation_failed(kind, "enqueue", exc, "OBSERVATION_QUEUE_FULL")
+        except Exception as exc:
+            self._observation_failed(kind, "enqueue", exc)
+
+    def observe_error(self, pass_order_info, message):
+        """在 QMT 回调线程构造错误事实，再交给普通观察队列。"""
+        if self.repo is None:
+            return
+        try:
+            snapshot = self.adapter.snapshot(pass_order_info)
+        except Exception as exc:
+            self._observation_failed("error", "snapshot", exc)
+            return
+        try:
+            snapshot["error_message"] = str(message)
+        except Exception as exc:
+            self._observation_failed("error", "convert_error", exc)
+            return
+        self.observe("error", snapshot)
+
+    def _observation_failed(self, kind, phase, exc, default_code="QMT_ERROR"):
+        # 保留既有缺口代数与 overflow_count 语义，日志只进入异步队列。
+        self.observation_gap = True
+        self.background.overflows += 1
+        self.background.fact_generation += 1
+        try:
+            details = qmt_exception_details(exc, default_code)
+            self.logger("ERROR", "QMT observation failed", account_id=self.account_id,
+                        kind=kind, source="qmt_callback", phase=phase,
+                        error_code=details["code"], error_type=details["type"],
+                        error_message=details["message"] or (
+                            "observation queue is full" if isinstance(exc, queue.Full) else ""),
+                        error_field=details.get("field"), object_type=details.get("object_type"),
+                        return_snapshot=details.get("return_snapshot"),
+                        qmt_phase=details.get("phase"), traceback=details["traceback"])
         except Exception:
-            self.observation_gap = True
-            self.background.overflows += 1
-            self.background.fact_generation += 1
+            # 诊断通道失效不能中断 QMT 回调。
+            pass
 
     def tick(self, deadline=None, budget=None, max_actions=None):
         """只消费内存指令；budget 可在一个外层回调的多次单步间共享。"""

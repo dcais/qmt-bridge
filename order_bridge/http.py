@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Last modified (Asia/Shanghai): 2026-09-25 23:21:38
+# Last modified (Asia/Shanghai): 2026-09-26 21:15:00
 
 import datetime as dt
 import json
@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 # 未传运行参数时使用下面的默认值；账户号按字符串处理以保留前导零。
 DEFAULT_ACCOUNT_ID = "66027616"
 DEFAULT_HTTP_PORT = 8888
-from .common import OrderError
+from .common import OrderError, qmt_invoke
 from .runtime import OrderRuntime, read_pg_config
 from .async_log import AsyncOrderLogger
 
@@ -173,7 +173,8 @@ def runtime_http_port(value):
 def runtime_schedule_settings(values):
     """面板整数浮点值可接受；小写优先，启动后复制冻结，不读取热修改。"""
     defaults = {"submit_batch_size": 10, "cancel_batch_size": 10,
-                "reconcile_batch_size": 100, "schedule_budget_ms": SCHEDULE_BUDGET_MILLISECONDS}
+                "reconcile_batch_size": 100, "schedule_budget_ms": SCHEDULE_BUDGET_MILLISECONDS,
+                "reconcile_interval_seconds": 30}
     result = {}
     for name, default in defaults.items():
         value = values.get(name, values.get(name.upper(), default))
@@ -275,7 +276,7 @@ def qmt_fields_to_dict(value):
 
 
 # 业务分发只由 QMT 定时回调执行，HTTP 线程不得直接调用此函数。
-def dispatch_request(ContextInfo, request):
+def dispatch_request(ContextInfo, request, logger=None, correlation=None):
     if not isinstance(request, dict):
         raise OrderError(400, "INVALID_REQUEST", "request must be an object")
     method = request.get("method")
@@ -284,10 +285,19 @@ def dispatch_request(ContextInfo, request):
         raise OrderError(400, "INVALID_REQUEST", "method and params are required")
     normalized = normalize_request(method, params)
     params = normalized["params"]
+    if logger is None:
+        state = _ORDER_STATE
+        logger = state.logger if state is not None and state.logger is not None else log_message
+    correlation = dict(correlation or {})
     if method in ("account", "positions"):
         detail_type = "account" if method == "account" else "position"
-        rows = get_trade_detail_data(
-            params["accountId"], params["accountType"], detail_type
+        correlation.update(account_id=params["accountId"], query_kind=detail_type)
+        rows = qmt_invoke(
+            logger, "get_trade_detail_data", get_trade_detail_data,
+            args=(params["accountId"], params["accountType"], detail_type),
+            parameters={"account_id": params["accountId"],
+                        "account_type": params["accountType"], "query_kind": detail_type},
+            correlation=correlation,
         )
         # None 或异常类型不能伪装成空持仓，只有有效空列表表示无记录。
         if not isinstance(rows, (list, tuple)):
@@ -303,7 +313,14 @@ def dispatch_request(ContextInfo, request):
     api = globals().get("get_smart_algo_param")
     if not callable(api):
         raise OrderError(501, "API_UNAVAILABLE", "get_smart_algo_param is unavailable")
-    result = api(params["algoList"])
+    correlation["query_kind"] = method
+    state = _ORDER_STATE
+    if state is not None and state.account_id is not None:
+        correlation["account_id"] = state.account_id
+    result = qmt_invoke(logger, "get_smart_algo_param", api,
+                        args=(params["algoList"],),
+                        parameters={"algo_list": params["algoList"]},
+                        correlation=correlation)
     if not isinstance(result, dict):
         raise OrderError(500, "INVALID_QMT_RESULT", "get_smart_algo_param must return a dict")
     return qmt_json_value(result)
@@ -346,7 +363,10 @@ def process_http_requests(ContextInfo):
                             elif not job.try_start():
                                 job.set_error(504, "REQUEST_EXPIRED", "request expired before QMT processing")
                         if job.error is None:
-                            job.result = dispatch_request(ContextInfo, job.request)
+                            job.result = dispatch_request(
+                                ContextInfo, job.request, logger=state.logger,
+                                correlation={"request_id": job.request_id},
+                            )
                     except OrderError as exc:
                         job.set_error(exc.status, exc.code, exc.message)
                     except Exception:
@@ -546,7 +566,7 @@ def serve_http(state):
             state.server.server_close()
 
 
-# QMT 启动入口：先校验参数，再绑定账户、监听端口并注册定时任务。
+# QMT 启动入口：先校验参数和启动异步日志，再绑定账户、监听端口并注册定时任务。
 # 有效配置固定在 OrderState 中，运行期间修改面板不会热切换账户或端口。
 def init(ContextInfo):
     global _ORDER_STATE, _ORDER_TIMER_ID, _ORDER_LOGGER
@@ -557,50 +577,68 @@ def init(ContextInfo):
     http_port = runtime_http_port(globals().get("http_port", HTTP_PORT))
     settings = runtime_schedule_settings(globals())
     pg_config = read_pg_config(globals())
-    ContextInfo.set_account(account_id)
     state = OrderState()
     state.account_id = account_id
     state.http_port = http_port
     state.settings = dict(settings)
     state.logger = AsyncOrderLogger(LOG_DIRECTORY)
-    state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config,
-                                 logger=state.logger, settings=settings)
-    state.runtime.external_idle = state.callback_idle
-    server = ThreadingHTTPServer((HTTP_HOST, http_port), OrderRequestHandler)
-    server.timeout = 0.2
-    server.order_state = state
-    state.server = server
-    state.server_thread = threading.Thread(
-        target=serve_http, args=(state,), name="qmt-http-order", daemon=True
-    )
-    _ORDER_STATE = state
-    _ORDER_LOGGER = state.logger
     try:
-        _ORDER_TIMER_ID = ContextInfo.schedule_run(
-            process_http_requests, "20200101000000", -1,
-            SCHEDULE_INTERVAL, "http_order_timer",
-        )
         state.logger.start()
+        qmt_invoke(state.logger, "ContextInfo.set_account", ContextInfo.set_account,
+                   args=(account_id,), parameters={"account_id": account_id},
+                   correlation={"account_id": account_id})
+        state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config,
+                                     logger=state.logger, settings=settings)
+        state.runtime.external_idle = state.callback_idle
+        server = ThreadingHTTPServer((HTTP_HOST, http_port), OrderRequestHandler)
+        server.timeout = 0.2
+        server.order_state = state
+        state.server = server
+        state.server_thread = threading.Thread(
+            target=serve_http, args=(state,), name="qmt-http-order", daemon=True
+        )
+        _ORDER_STATE = state
+        _ORDER_LOGGER = state.logger
+        _ORDER_TIMER_ID = qmt_invoke(
+            state.logger, "ContextInfo.schedule_run", ContextInfo.schedule_run,
+            args=(process_http_requests, "20200101000000", -1,
+                  SCHEDULE_INTERVAL, "http_order_timer"),
+            parameters={"callback": "process_http_requests", "start_time": "20200101000000",
+                        "repeat_times": -1,
+                        "interval_ms": SCHEDULE_INTERVAL.total_seconds() * 1000,
+                        "timer_name": "http_order_timer"},
+            correlation={"account_id": account_id},
+        )
         state.runtime.initialize()
         state.server_thread.start()
     except Exception:
-        # 启动中途失败时撤销定时器并关闭端口，便于修正配置后重新启动。
+        # 启动中途失败时撤销定时器并关闭端口；账户绑定失败也保留失败日志。
         state.stop_event.set()
         state.http_closed.set()
         timer_id = _ORDER_TIMER_ID
         _ORDER_TIMER_ID = None
         if timer_id is not None:
             try:
-                ContextInfo.cancel_schedule_run(timer_id)
+                qmt_invoke(state.logger, "ContextInfo.cancel_schedule_run",
+                           ContextInfo.cancel_schedule_run, args=(timer_id,),
+                           parameters={"timer_id": timer_id if type(timer_id) in (str, int) else None},
+                           correlation={"account_id": account_id, "stage": "init_failure"})
             except Exception:
                 pass
-        server.server_close()
-        state.runtime.stop()
-        _start_order_cleanup(state)
+        if state.server is not None:
+            state.server.server_close()
+        if _ORDER_STATE is state:
+            try:
+                state.runtime.stop()
+            finally:
+                _start_order_cleanup(state)
+        else:
+            state.logger.request_stop()
+            state.logger.join(0.2)
         raise
     log_message(
         "INFO", "QMT HTTP order listening",
-        host=HTTP_HOST, port=server.server_address[1], account_id=state.account_id, **settings
+        host=HTTP_HOST, port=state.server.server_address[1], account_id=state.account_id, **settings
     )
     if pg_config:
         log_message("INFO", "ORDER persistence configured", account_id=account_id,
@@ -661,7 +699,10 @@ def stop(ContextInfo):
     _ORDER_TIMER_ID = None
     try:
         if timer_id is not None:
-            ContextInfo.cancel_schedule_run(timer_id)
+            qmt_invoke(state.logger, "ContextInfo.cancel_schedule_run",
+                       ContextInfo.cancel_schedule_run, args=(timer_id,),
+                       parameters={"timer_id": timer_id if type(timer_id) in (str, int) else None},
+                       correlation={"account_id": state.account_id, "stage": "stop"})
     finally:
         if state.runtime is not None:
             try:
@@ -705,9 +746,4 @@ def task_callback(ContextInfo, taskInfo):
 def orderError_callback(ContextInfo, passOrderInfo, msg):
     state = _ORDER_STATE
     if state is not None and state.runtime is not None:
-        try:
-            raw = state.runtime.adapter.snapshot(passOrderInfo)
-            raw["error_message"] = str(msg)
-            state.runtime.observe("error", raw)
-        except Exception:
-            state.runtime.observation_gap = True
+        state.runtime.observe_error(passOrderInfo, msg)

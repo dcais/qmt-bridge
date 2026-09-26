@@ -1,4 +1,6 @@
--- PostgreSQL ORDER v2. Explicit installer; runtime never executes DDL.
+-- PostgreSQL ORDER 当前结构初始化；由独立工具执行，策略运行时不执行 DDL。
+-- 表间关联由应用层维护，不使用外键约束。
+-- Last modified (Asia/Shanghai): 2026-09-26 20:05:51
 CREATE SCHEMA IF NOT EXISTS "qmt_order";
 
 CREATE TABLE IF NOT EXISTS "qmt_order".schema_version(version integer PRIMARY KEY);
@@ -37,21 +39,20 @@ CREATE TABLE IF NOT EXISTS "qmt_order".qmt_observations (
  observation_id bigserial PRIMARY KEY, account_type text NOT NULL, account_id text NOT NULL,
  kind text NOT NULL, source text NOT NULL, observed_at text NOT NULL, raw jsonb NOT NULL,
  order_id text, applied boolean NOT NULL DEFAULT false, observation_hash text);
-ALTER TABLE "qmt_order".qmt_observations ADD COLUMN IF NOT EXISTS observation_hash text;
 CREATE UNIQUE INDEX IF NOT EXISTS qmt_observation_content ON "qmt_order".qmt_observations(account_type,account_id,observation_hash)
  WHERE observation_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS qmt_observations_pending ON "qmt_order".qmt_observations(account_type,account_id,applied);
 
-CREATE TABLE IF NOT EXISTS "qmt_order".order_items (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".order_items (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 
-CREATE TABLE IF NOT EXISTS "qmt_order".execution_attempts (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".execution_attempts (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 
-CREATE TABLE IF NOT EXISTS "qmt_order".cancel_requests (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".cancel_requests (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 
-CREATE TABLE IF NOT EXISTS "qmt_order".qmt_tasks (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".qmt_tasks (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 
-CREATE TABLE IF NOT EXISTS "qmt_order".qmt_orders (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".qmt_orders (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 
-CREATE TABLE IF NOT EXISTS "qmt_order".fills (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
+CREATE TABLE IF NOT EXISTS "qmt_order".fills (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id));
 CREATE UNIQUE INDEX IF NOT EXISTS cancel_request_scope_id ON "qmt_order".cancel_requests(account_type,account_id,record_id);
 -- The schema version is seeded by tools/order_schema.py; strategy startup creates its account_runtime row.

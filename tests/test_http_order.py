@@ -200,7 +200,8 @@ class RuntimeParameterTests(unittest.TestCase):
     def test_batch_settings_defaults_priority_and_validation(self):
         module = load_strategy()
         defaults = {'submit_batch_size': 10, 'cancel_batch_size': 10,
-                    'reconcile_batch_size': 100, 'schedule_budget_ms': 50}
+                    'reconcile_batch_size': 100, 'schedule_budget_ms': 50,
+                    'reconcile_interval_seconds': 30}
         self.assertEqual(module.runtime_schedule_settings({}), defaults)
         for name in defaults:
             configured = module.runtime_schedule_settings({name.upper(): 8, name: 3.0})
@@ -212,7 +213,8 @@ class RuntimeParameterTests(unittest.TestCase):
     def test_batch_settings_panel_injection_is_frozen_at_startup(self):
         for early in (True, False):
             values = {'submit_batch_size': 2.0, 'cancel_batch_size': '3',
-                      'reconcile_batch_size': 4, 'schedule_budget_ms': 5}
+                      'reconcile_batch_size': 4, 'schedule_budget_ms': 5,
+                      'reconcile_interval_seconds': 17.0}
             module = load_strategy(values if early else None)
             if not early:
                 module.__dict__.update(values)
@@ -247,7 +249,8 @@ class RuntimeParameterTests(unittest.TestCase):
                         log.assert_called_with('INFO', 'QMT HTTP order listening',
                                                host='127.0.0.1', port=actual_port, account_id='8890763409',
                                                submit_batch_size=10, cancel_batch_size=10,
-                                               reconcile_batch_size=100, schedule_budget_ms=50)
+                                               reconcile_batch_size=100, schedule_budget_ms=50,
+                                               reconcile_interval_seconds=30)
                         module.get_trade_detail_data = Mock(return_value=[])
                         module.dispatch_request(None, {'method': 'positions', 'params': {}})
                         module.get_trade_detail_data.assert_called_with('8890763409', 'STOCK', 'position')

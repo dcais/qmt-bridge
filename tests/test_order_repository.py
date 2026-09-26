@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """真实 PostgreSQL 隔离 schema 验证；未配置数据库时明确跳过。"""
 import os
+import datetime as dt
 import sys
 import threading
 import unittest
@@ -9,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from order_bridge.common import OrderError, json_text, new_order_document
+from order_bridge.common import OrderError, iso_datetime, json_text, new_order_document, parse_timestamp, utc_now
 from order_bridge.repository import PostgresRepository
 from tools.order_schema import initialize_schema
 
@@ -25,6 +26,16 @@ def repo_test_config():
 
 
 class RepositoryConfigurationTests(unittest.TestCase):
+    def test_reconcile_interval_rejects_invalid_values_before_sql(self):
+        repo = PostgresRepository({}, "account")
+        with patch.object(repo, "repo_run") as run:
+            for invalid in (0, -1, True, 1.5, "30", 2147483648):
+                with self.assertRaises(ValueError):
+                    repo.begin_reconcile_batch(round_id="r", interval_seconds=invalid)
+                with self.assertRaises(ValueError):
+                    repo.finish_reconcile("o", 0, False, interval_seconds=invalid)
+            run.assert_not_called()
+
     def test_schema_identifier_rejects_injection(self):
         with self.assertRaises(OrderError):
             PostgresRepository({"pg_schema": 'a"; DROP SCHEMA public;--'}, "account")
@@ -117,6 +128,79 @@ class PostgresRepositoryTests(unittest.TestCase):
 
     def owner(self):
         self.repo.acquire_executor("instance-one", "host-one")
+
+    def legacy_missing_order_identity(self):
+        """重现旧版本已持久化的缺号回报，不依赖新归并器再次制造缺陷。"""
+        doc = self.order("legacy-missing-order-id")
+        early = {"m_strRemark": doc["remark"], "m_strAccountID": "test-account",
+                 "m_strOrderSysID": "", "m_nOrderStatus": 50,
+                 "m_nVolumeTotalOriginal": 100, "m_nVolumeTraded": 0,
+                 "m_strInstrumentID": "510300", "m_nOffsetFlag": 48,
+                 "m_strExchangeID": "SH", "m_strInsertDate": "20260926",
+                 "m_nRef": 123456, "m_strOrderRef": "9000000000000000123",
+                 "m_nTaskId": 1}
+        initial = self.repo.ingest_observation("order", early)
+        evidence = initial["unassociated_evidence"]
+        final = dict(early, m_strOrderSysID="xt-test-rejected", m_nOrderStatus=57,
+                     m_strCancelInfo="[120141] test counter not initialized")
+        self.repo.ingest_observation("order", final)
+        current = self.repo.ingest_observation("task", {
+            "m_strRemark": doc["remark"], "m_strAccountID": "test-account",
+            "m_nTaskId": 1, "m_eStatus": 10})
+        current["unassociated_evidence"] = evidence
+        current.pop("resolved_evidence", None)
+        current.update(execution_status="INCOMPLETE", sync_status="INCOMPLETE",
+                       reconciliation_complete=True, reconcile_requested=False,
+                       reconcile_pending=True)
+        current["items"][0]["execution_status"] = "INCOMPLETE"
+        self.repo.repo_run(lambda cur: self.repo.repo_save(cur, current, None), mutation=True)
+        return self.repo.get_by_id(doc["order_id"]), early, final
+
+    def test_legacy_missing_identity_resolves_after_restart_and_completed_round(self):
+        legacy, early, unused = self.legacy_missing_order_identity()
+        self.owner()
+        self.repo.close()
+        reopened = self.other()
+        reopened.acquire_executor("restarted-instance", "host-one")
+        reopened.recover()
+        current = reopened.get_by_id(legacy["order_id"])
+        self.assertTrue(reopened.finish_reconcile(current["order_id"], current["fact_version"], True))
+        stored = reopened.get_by_id(current["order_id"])
+        self.assertEqual(stored["execution_status"], "REJECTED")
+        self.assertEqual(stored["sync_status"], "COMPLETE")
+        self.assertFalse(stored["reconcile_pending"])
+        self.assertEqual(stored["unassociated_evidence"], [])
+        self.assertEqual(stored["resolved_evidence"][0]["raw"], early)
+        self.assertEqual(stored["attempts"], [])
+        self.assertEqual(reopened.reconcile_orders(due_before="2099-01-01T00:00:00Z"), [])
+        self.assertEqual(len(reopened.lookup_observations(current["order_id"])), 3)
+
+    def test_duplicate_observation_dedup_does_not_block_legacy_resolution(self):
+        legacy, early, final = self.legacy_missing_order_identity()
+        duplicate = self.repo.ingest_observation("order", final)
+        self.assertEqual(duplicate["version"], legacy["version"])
+        self.assertTrue(self.repo.finish_reconcile(legacy["order_id"], legacy["fact_version"], True))
+        stored = self.repo.get_by_id(legacy["order_id"])
+        self.assertFalse(stored["reconcile_pending"])
+        self.assertEqual(stored["execution_status"], "REJECTED")
+        self.assertEqual(len(stored["resolved_evidence"]), 1)
+        version, event_count = stored["version"], len(self.repo.events()["events"])
+        self.repo.ingest_observation("order", early)
+        self.repo.ingest_observation("order", final)
+        self.assertEqual(self.repo.get_by_id(legacy["order_id"])["version"], version)
+        self.assertEqual(len(self.repo.events()["events"]), event_count)
+        self.assertEqual(self.repo.events()["events"][-1]["type"], "RECONCILE_STATE_CHANGED")
+
+    def test_legacy_resolution_keeps_stale_and_incomplete_round_guards(self):
+        legacy, unused, unused_final = self.legacy_missing_order_identity()
+        self.assertFalse(self.repo.finish_reconcile(legacy["order_id"], legacy["fact_version"] - 1, True))
+        self.assertEqual(self.repo.get_by_id(legacy["order_id"]), legacy)
+        self.assertTrue(self.repo.finish_reconcile(legacy["order_id"], legacy["fact_version"], False))
+        current = self.repo.get_by_id(legacy["order_id"])
+        self.assertTrue(current["reconcile_pending"])
+        self.assertEqual(current["sync_status"], "INCOMPLETE")
+        self.assertTrue(self.repo.finish_reconcile(current["order_id"], current["fact_version"], True))
+        self.assertFalse(self.repo.get_by_id(current["order_id"])["reconcile_pending"])
 
     def test_schema_check_needs_no_account_and_does_not_insert_one(self):
         other = self.other("new-startup-account")
@@ -485,6 +569,167 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertTrue(reopened["reconcile_pending"])
         self.assertEqual(reopened["fact_version"], 3)
         self.assertIsNotNone(self.repo.reconcile_history_start())
+
+    def test_custom_reconcile_interval_persists_on_begin_and_failure(self):
+        doc = self.order("custom-interval")
+        current = self.repo.ingest_observation("order", {
+            "remark": doc["remark"], "qmt_order_id": "interval-order",
+            "trading_day": "20260926", "market": "SH", "symbol": "510300.SH",
+            "side": "BUY", "quantity": 100, "filled_quantity": 0, "status": 50})
+        fixed = utc_now()
+        with patch("order_bridge.repository.utc_now", return_value=fixed):
+            batch = self.repo.begin_reconcile_batch(round_id="custom-round", interval_seconds=17)
+            self.assertEqual(len(batch["orders"]), 1)
+            self.assertEqual(parse_timestamp(batch["orders"][0]["reconcile_due_at"]),
+                             fixed + dt.timedelta(seconds=17))
+            self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"],
+                                                       False, interval_seconds=43))
+        stored = self.repo.get_by_id(doc["order_id"])
+        self.assertEqual(parse_timestamp(stored["reconcile_due_at"]), fixed + dt.timedelta(seconds=43))
+        self.assertEqual(stored["sync_status"], "INCOMPLETE")
+        self.assertIsNone(stored["last_reconciled_at"])
+
+    def test_unchanged_reconcile_rounds_keep_events_and_child_rows(self):
+        doc = self.order("reconcile-checkpoint")
+        current = self.repo.ingest_observation("order", {
+            "remark": doc["remark"], "qmt_order_id": "checkpoint-order",
+            "trading_day": "20260926", "market": "SH", "symbol": "510300.SH",
+            "side": "BUY", "quantity": 100, "filled_quantity": 0, "status": 50})
+        def snapshot(cur):
+            cur.execute("SELECT event_seq FROM " + self.repo.repo_s +
+                        ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo.repo_scope)
+            sequence = cur.fetchone()[0]
+            cur.execute("SELECT ctid::text FROM " + self.repo.repo_s +
+                        ".order_items WHERE account_type=%s AND account_id=%s AND order_id=%s",
+                        self.repo.repo_scope + (doc["order_id"],))
+            return sequence, [row[0] for row in cur.fetchall()]
+        initial = self.repo.get_by_id(doc["order_id"])
+        sequence, child_rows = self.repo.repo_run(snapshot)
+        event_count = len(self.repo.events()["events"])
+        self.assertEqual(initial["sync_status"], "INCOMPLETE")
+        for round_id in ("checkpoint-one", "checkpoint-two"):
+            if round_id == "checkpoint-two":
+                # 推进候选查询的时间，避免测试依赖墙钟等待。
+                clock = patch("order_bridge.repository.iso_datetime",
+                              side_effect=lambda value=None: iso_datetime(value or (utc_now() + dt.timedelta(seconds=5))))
+            else:
+                clock = patch("order_bridge.repository.iso_datetime", wraps=iso_datetime)
+            with clock:
+                batch = self.repo.begin_reconcile_batch(limit=1, round_id=round_id, interval_seconds=1)
+                self.assertEqual(len(batch["orders"]), 1)
+                self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"], False,
+                                                           interval_seconds=1))
+            stored = self.repo.get_by_id(doc["order_id"])
+            self.assertEqual(stored["last_reconcile_round"], round_id)
+            self.assertIsNotNone(stored["last_reconcile_attempt_at"])
+            self.assertIsNotNone(stored["reconcile_due_at"])
+            self.assertEqual(stored["fact_version"], current["fact_version"])
+            self.assertEqual(self.repo.repo_run(snapshot), (sequence, child_rows))
+            self.assertEqual(len(self.repo.events()["events"]), event_count)
+        self.assertEqual(stored["version"], initial["version"] + 4)
+
+    def test_reconcile_completion_emits_final_state_snapshot_and_stale_round_does_not_write(self):
+        doc = self.order("reconcile-final-state")
+        raw = {"remark": doc["remark"], "qmt_order_id": "final-order", "trading_day": "20260926",
+               "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100,
+               "filled_quantity": 100, "status": 56}
+        self.repo.ingest_observation("order", raw)
+        current = self.repo.ingest_observation("deal", {
+            "qmt_order_id": "final-order", "trade_id": "final-fill", "trading_day": "20260926",
+            "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100, "amount": "420"})
+        before = self.repo.get_by_id(doc["order_id"])
+        previous = self.repo.events()["events"]
+        self.assertFalse(self.repo.finish_reconcile(doc["order_id"], current["fact_version"] - 1, True))
+        self.assertEqual(self.repo.get_by_id(doc["order_id"]), before)
+        self.assertEqual(self.repo.events()["events"], previous)
+        self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True))
+        finished = self.repo.get_by_id(doc["order_id"])
+        events = self.repo.events()["events"]
+        self.assertEqual(len(events), len(previous) + 1)
+        self.assertEqual(events[-1]["event_seq"], previous[-1]["event_seq"] + 1)
+        self.assertEqual(events[-1]["type"], "RECONCILE_STATE_CHANGED")
+        self.assertEqual(events[-1]["order"], finished)
+        self.assertEqual(events[-1]["order_version"], finished["version"])
+        self.assertEqual(finished["sync_status"], "COMPLETE")
+        self.assertFalse(finished["reconcile_pending"])
+        self.assertTrue(finished["basket_cleanup_eligible"] is False)
+
+    def test_working_reconcile_sync_changes_emit_once_per_transition(self):
+        doc = self.order("reconcile-working-sync")
+        current = self.repo.ingest_observation("order", {
+            "remark": doc["remark"], "qmt_order_id": "working-sync-order",
+            "trading_day": "20260926", "market": "SH", "symbol": "510300.SH",
+            "side": "BUY", "quantity": 100, "filled_quantity": 0, "status": 50})
+        previous_count = len(self.repo.events()["events"])
+        previous_version = current["version"]
+        steps = ((True, "2026-09-26T01:00:00Z", "COMPLETE", 1),
+                 (True, "2026-09-26T01:01:00Z", "COMPLETE", 0),
+                 (False, "2026-09-26T01:02:00Z", "INCOMPLETE", 1),
+                 (False, "2026-09-26T01:03:00Z", "INCOMPLETE", 0),
+                 (True, "2026-09-26T01:04:00Z", "COMPLETE", 1),
+                 (True, "2026-09-26T01:05:00Z", "COMPLETE", 0))
+        for complete, stamp, expected_sync, new_events in steps:
+            self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"],
+                                                       complete, stamp=stamp))
+            stored = self.repo.get_by_id(doc["order_id"])
+            events = self.repo.events()["events"]
+            previous_count += new_events
+            previous_version += 1
+            self.assertEqual(len(events), previous_count)
+            self.assertEqual(stored["version"], previous_version)
+            self.assertEqual(stored["sync_status"], expected_sync)
+            self.assertTrue(stored["reconcile_pending"])
+            if complete:
+                self.assertEqual(stored["last_reconciled_at"], stamp)
+            if new_events:
+                self.assertEqual(events[-1]["type"], "RECONCILE_STATE_CHANGED")
+                self.assertEqual(events[-1]["order"], stored)
+        self.assertEqual(stored["last_reconciled_at"], "2026-09-26T01:05:00Z")
+
+    def test_reconcile_cancel_completion_updates_cancel_request_projection(self):
+        doc = self.order("reconcile-cancel-projection")
+        raw = {"remark": doc["remark"], "qmt_order_id": "cancel-projection-order",
+               "trading_day": "20260926", "market": "SH", "symbol": "510300.SH",
+               "side": "BUY", "quantity": 100, "filled_quantity": 0, "status": 50}
+        self.repo.ingest_observation("order", raw)
+        self.repo.request_cancel({"client_order_id": doc["client_order_id"],
+                                  "cancel_request_id": "cancel-projection"})
+        current = self.repo.ingest_observation("order", dict(raw, status=54))
+        def projected_status(cur):
+            cur.execute("SELECT document->>'status' FROM " + self.repo.repo_s +
+                        ".cancel_requests WHERE account_type=%s AND account_id=%s AND order_id=%s "
+                        "AND record_id=%s", self.repo.repo_scope +
+                        (doc["order_id"], "cancel-projection"))
+            return cur.fetchone()[0]
+        self.assertEqual(self.repo.repo_run(projected_status), "REQUESTED")
+        before_count = len(self.repo.events()["events"])
+        self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True))
+        stored = self.repo.get_by_id(doc["order_id"])
+        self.assertEqual(stored["cancel_status"], "CONFIRMED")
+        self.assertEqual(stored["cancel_requests"][0]["status"], "CONFIRMED")
+        self.assertEqual(self.repo.repo_run(projected_status), "CONFIRMED")
+        events = self.repo.events()["events"]
+        self.assertEqual(len(events), before_count + 1)
+        self.assertEqual(events[-1]["type"], "RECONCILE_STATE_CHANGED")
+        self.assertEqual(events[-1]["order"], stored)
+
+    def test_reconcile_event_failure_rolls_back_checkpoint_and_sequence(self):
+        doc = self.order("reconcile-rollback")
+        current = self.repo.ingest_observation("order", {
+            "remark": doc["remark"], "qmt_order_id": "rollback-order", "trading_day": "20260926",
+            "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100,
+            "filled_quantity": 0, "status": 50})
+        before = self.repo.get_by_id(doc["order_id"])
+        events = self.repo.events()["events"]
+        save = self.repo.repo_save
+        def fail_after_save(cur, document, event_type, **kwargs):
+            save(cur, document, event_type, **kwargs)
+            raise RuntimeError("forced rollback after event insert")
+        with patch.object(self.repo, "repo_save", side_effect=fail_after_save):
+            with self.assertRaises(OrderError):
+                self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True)
+        self.assertEqual(self.repo.get_by_id(doc["order_id"]), before)
+        self.assertEqual(self.repo.events()["events"], events)
 
     def test_restart_gap_reopens_terminal_in_bounded_pages(self):
         docs = [self.order("gap-" + str(index)) for index in range(3)]

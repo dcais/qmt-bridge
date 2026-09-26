@@ -16,6 +16,7 @@
 | `submit_batch_size` | `10` | 每轮实际派发业务订单上限，篮子算一笔 |
 | `cancel_batch_size` | `10` | 每轮实际 QMT 撤单动作上限，任务和子委托分别计数 |
 | `reconcile_batch_size` | `100` | 每批进入对账的业务订单上限 |
+| `reconcile_interval_seconds` | `30` | 每轮账户对账完成后等待的秒数；成功、失败均生效，也用于逐单 `reconcile_due_at` |
 | `schedule_budget_ms` | `50` | 整个 `process_http_requests` 回调的毫秒预算 |
 
 优先读取小写参数名，也兼容对应的大写参数名。
@@ -29,7 +30,7 @@
 会转成 `"66027616"`。字符串前导零保留；数值参数无法恢复已丢失的前导零。
 端口支持整数、整数浮点值或十进制整数字符串，范围 `1–65535`。
 显式填写非法值会阻止启动，不会悄悄使用默认值。
-四个批量/预算参数须为正整数；面板可传可精确表达的整数浮点值，范围为 `1..2147483647`。
+批量、预算和对账间隔参数须为正整数；面板可传可精确表达的整数浮点值，范围为 `1..2147483647`。
 批量值是上限，仍受本轮时间预算约束；剩余工作跨调度轮次继续。已开始的同步 QMT 调用无法强制中断。
 
 不同实例分别配置各自账户和未占用端口；端口本身不决定模拟／实盘模式，仍以对应客户端
@@ -51,7 +52,7 @@
 启动成功后日志包含实际账户和绑定端口。例如上述参数生效时，启动日志为：
 
 ```text
-... [INFO] QMT HTTP order listening {"host": "127.0.0.1", "port": 8886, "account_id": "8890763409", "submit_batch_size": 10, "cancel_batch_size": 10, "reconcile_batch_size": 100, "schedule_budget_ms": 50}
+... [INFO] QMT HTTP order listening {"host": "127.0.0.1", "port": 8886, "account_id": "8890763409", "submit_batch_size": 10, "cancel_batch_size": 10, "reconcile_batch_size": 100, "schedule_budget_ms": 50, "reconcile_interval_seconds": 30}
 ```
 
 这条启动日志会打印完整账户号；查询响应正文仍不写入日志。
@@ -153,6 +154,18 @@ PG 与 QMT 之间没有原子事务；提交结果不明时保持 `UNKNOWN`，�
 使用上海时区，以 `request_id` 关联请求。日志记录 method、状态及耗时等元信息，不记录账户、
 持仓或算法配置响应正文。日志队列满时计入丢弃数，不在 QMT 调度线程同步补写。
 
+所有 ORDER 主动 QMT 调用均记录 INFO：`QMT call started` 在调用前，
+`QMT call returned` 在返回后，原生调用抛异常时记录 `QMT call failed`。
+覆盖三种下单、撤销任务/委托、当前及历史交易查询、旧账户/持仓查询、算法配置、篮子读写、账户绑定和定时器启停。
+同一次调用用 `qmt_call_id` 串联，记录 `qmt_method`、`qmt_parameters`、`elapsed_ms`；
+按调用来源附带 `request_id`、`order_id`、`client_order_id`、`cancel_request_id`、
+`attempt_id`、`qmt_order_id`、`qmt_task_id` 或 `round_id`。
+`attempt_id` 对应已持久化的派发尝试；HTTP 持久受理与异步派发之间用订单 ID 关联。
+调用参数有界复制并屏蔽凭据，不序列化 `ContextInfo` 或额外读取原生对象属性。
+大篮子等超出参数日志预算时标记 `parameters_truncated=true`，完整冻结参数仍在数据库。
+返回记录保留类型：`0`、`false`、`true`、`null` 不互相转换；普通集合只记条数，
+异常记录类型、正文和堆栈。函数正常返回只表示调用结束，订单/撤单是否完成仍按 QMT 回报和对账确认。
+
 ## 新增 ORDER 写入前准备
 
 ORDER 使用 `psycopg2` 导入名，对应锁定依赖 `psycopg2-binary==2.9.5`。先在目标 QMT Python 3.6 解释器中确认 `import psycopg2` 可用；若已安装，无需重复安装。需要安装时，从较新 Python 为 QMT 选择 `cp36m` / `win_amd64` wheel，并把 `--target` 指向目标解释器可导入的 site-packages：
@@ -168,29 +181,22 @@ python tools/build_order_strategy.py
 python tools/build_order_strategy.py --check
 ```
 
-策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具的 schema init/check/migrate 只需数据库配置，例如 `config.json`：
+策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具的 schema init/check 只需数据库配置，例如 `config.json`：
 
 ```json
 {"pg_host":"127.0.0.1","pg_port":5432,"pg_database":"paper","pg_user":"order_service","pg_password":"<secret>"}
 ```
 
-也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD` 环境变量。数据库须事先创建。全新安装使用 `sql/order_v2.sql`；已有 v1 库仅通过 `sql/order_v1_to_v2.sql` 显式迁移。`sql/order_v1.sql` 保留历史布局。以下命令只对所指定的**目标隔离数据库**执行：
+也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD` 环境变量。数据库须事先创建。初始化 DDL 统一存放在 `sql/order_init.sql`，不创建外键，表间关联由应用层维护，同时保留主键、幂等唯一约束和索引。以下命令只对所指定的**目标隔离数据库**执行：
 
 ```powershell
 python tools/order_admin.py --config config.json schema init
 python tools/order_admin.py --config config.json schema check
 ```
 
-已有 v1 库部署新策略前，先停止连接该库的 ORDER 策略并等待清理完成，再备份选定数据库、执行迁移并检查版本：
+开发阶段只维护当前初始化结构，不提供历史版本升级命令。`schema init` 用于全新或与当前结构兼容的库，重复执行保留已有数据和账户记录；`schema check` 只读检查关键表、字段及结构版本。不兼容版本在执行 DDL 前被拒绝，不会自动重建或删除数据。结构版本标识仍为 2，与现有数据库保持兼容；初始化不用于清理既有约束。
 
-```powershell
-python tools/order_admin.py --config config.json schema migrate
-python tools/order_admin.py --config config.json schema check
-```
-
-`schema init` 仅用于全新或兼容 v2 的库；遇到 v1 会提示显式迁移。`schema migrate` 只接受 v1/v2，v2 重复执行不改数据。迁移在单个事务中保留订单、事件、账户事件序号和幂等键；旧单只在能确认未进入 QMT 时退出待对账，其余保守重开。命令不会自动迁移其他数据库或业务库。
-
-策略文件不包含 DDL；后台启动先检查固定 schema 内的关键表、字段和 v2 版本，再按策略配置的 `account_id` 幂等创建缺失的 `account_runtime` 行；已存在行的 `event_seq`、执行主机和代次保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`schema init/check/migrate` 只需数据库配置，`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
+策略文件不包含 DDL；后台启动先检查固定 schema 内的关键表、字段和当前结构版本，再按策略配置的 `account_id` 幂等创建缺失的 `account_runtime` 行；已存在行的 `event_seq`、执行主机和代次保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`schema init/check` 只需数据库配置，`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
 
 ## 订单输入
 
@@ -296,6 +302,18 @@ GET /health
 
 健康采样含 `sampled_at`、`schema_version`、`pending_count`、`unknown_order_count`、`last_reconciled_at`、`observation_gap`、`history_coverage_complete`、`queues`、`overflow_count`、`tick_ms`、`qmt_ms`、`authority_remaining_ms`、`executor_owned` 和 `error_code`。HTTP 层另附 `schedule_settings`、`scheduler` 与 `logging`（包括日志队列大小、丢弃数及写入错误）。这些是缓存或采样值，应结合采样时间判断；单一 HTTP 200 不能证明交易可用或 QMT 实机验收完成。
 
+账户级对账首次启动立即执行；每轮查询任务、委托和成交后，无论结果成功或失败，都从本轮结束时等待 `reconcile_interval_seconds`（默认 30 秒），不会因为上次成功时间未更新而每秒重试。轮次不重叠，等待期间回报归并、下单和撤单调度继续运行。逐笔订单的 `reconcile_due_at` 同样使用此配置；已有到期时间保持原值，下一次选中或完成对账时按当前配置计算。
+
+若早期回报缺委托号，而后续正式委托可通过账户、交易日、市场及两项原生委托引用唯一核对，bridge 会自动解除该项关联缺口，原始回报保存在 `resolved_evidence` 和 `qmt_observations` 中。旧版留下的此类记录也在启动恢复或下次对账时处理。拒单仍须确认相关任务停止、委托终态、成交一致且完整对账成功，才返回 `execution_status=REJECTED`、`sync_status=COMPLETE`、`reconcile_pending=false` 并退出逐单周期对账；有歧义或缺失成交的记录继续核对。
+
+`/health` 另返回 `last_reconcile_attempt_at`（最近轮次开始）、`last_reconcile_finished_at`（最近轮次结束，包括失败）、`next_reconcile_at`（预计下次轮次，执行中为空）及 `last_reconcile_error`（最近查询异常摘要）。`last_reconciled_at` 只表示成功完成对账的时间，失败不得刷新它。调度使用单调时钟，展示时间使用带时区的 UTC 时间戳；这些轮次诊断字段在策略重启后重新采样。
+
+QMT 查询及回调转换异常日志保存 `error_code`、`error_type`、`error_message` 和 `traceback`，并带账户、查询类型、阶段等上下文。异常正文最多 4096 字符，堆栈最多 16384 字符，不包含局部变量。属性转换失败时，`return_snapshot.fields` 保存同一对象可读字段的实际值，`field_errors` 保存失败字段、异常和静态声明来源；查询另记录返回容器类型、条数和行索引。诊断限制 128 个字段、深度 4、每个集合 16 项、单字符串 1024 字符，总预算 512 个节点和 16384 个文本字符；截断标记为 `truncated=true`。诊断不调用原生对象的 `repr`，不读取 C++ 指针内容，也不作为完整委托入库；HTTP 健康接口不返回这些字段值。
+
+已确认本机 `COrderDetail.m_xtTag` 是无法转换为 Python 值的内部属性，bridge 在读取前排除这个属性，保留委托号、备注、状态、数量等业务字段。每个策略运行实例首次成功排除时输出一次 `QMT snapshot internal field excluded` 警告，带可读字段诊断及 `skipped_fields.m_xtTag` 原因和声明来源；不会每轮重复打印，也不会伪造该属性值。其他属性转换异常仍使本次快照失败，并维持对账缺口。
+
+队列满使用 `OBSERVATION_QUEUE_FULL`，与快照转换失败分别记录；兼容字段 `overflow_count` 仍统计上述回报采集缺口。查询异常日志不等于券商拒单，`qmt_observations` 仍保存成功采集的原始事实。
+
 `/capabilities` 和 `/health` 示例（均只列关键字段）：
 
 ```json
@@ -303,7 +321,7 @@ GET /health
 ```
 
 ```json
-{"http_running":true,"database_available":true,"scheduler_alive":true,"lifecycle":"RUNNING","recovery_complete":true,"accepting_orders":true,"sampled_at":"2026-09-26T09:30:00+08:00","pending_count":0,"queues":{"cancel":0,"submit":0,"prepare":0,"query":0,"results":0,"observations":0},"overflow_count":0,"authority_remaining_ms":500,"last_reconciled_at":null,"observation_gap":false,"schedule_settings":{"submit_batch_size":10,"cancel_batch_size":10,"reconcile_batch_size":100,"schedule_budget_ms":50},"error_code":null}
+{"http_running":true,"database_available":true,"scheduler_alive":true,"lifecycle":"RUNNING","recovery_complete":true,"accepting_orders":true,"sampled_at":"2026-09-26T09:30:00+08:00","pending_count":0,"queues":{"cancel":0,"submit":0,"prepare":0,"query":0,"results":0,"observations":0},"overflow_count":0,"authority_remaining_ms":500,"last_reconciled_at":null,"last_reconcile_attempt_at":null,"last_reconcile_finished_at":null,"next_reconcile_at":null,"last_reconcile_error":null,"observation_gap":false,"schedule_settings":{"submit_batch_size":10,"cancel_batch_size":10,"reconcile_batch_size":100,"schedule_budget_ms":50,"reconcile_interval_seconds":30},"error_code":null}
 ```
 
 错误响应示例：
@@ -313,6 +331,12 @@ GET /health
 ```
 
 订单里的 `submission_status`、`execution_status`、`cancel_status` 需要分别看。`UNKNOWN` 表示提交是否进入 QMT 尚无法确认，不可盲目重试原单。`/order_events` 是状态变化证据流，事件保存账户作用域的连续序号、事件类型、发生时间和当时订单快照。健康接口单一成功状态不等于已验证交易能力。
+
+`order_events` 用于客户端按 `after` 增量获取变化和历史追溯；下单派发、幂等、撤单和重启恢复读取当前订单、执行尝试、撤单请求及 QMT 事实，不通过回放事件恢复状态。事件与对应业务状态在同一事务中保存。
+
+常规 `RECONCILE_ATTEMPT`、`RECONCILE_FINISHED` 只记录 INFO 日志，不再追加数据库事件。最近尝试/成功时间、轮次、事实代次和下次执行时间等运行检查点仍会事务持久化；单纯更新时间不会产生事件，也不会重写未变化的子表。对账实际改变订单、撤单或同步完整性等状态时，追加 `RECONCILE_STATE_CHANGED`，保留当时完整快照。既有下单、成交、撤单、UNKNOWN 和缺口等业务事件继续保留。
+
+`event_id` 只在追加事件时递增，旧事件和游标不重排、不清理；订单 `version` 仍随持久化更新递增，用于并发校验，所以相邻事件的 `order_version` 可以跳号。当前版本不提供自动事件清理或归档。
 
 ## UNKNOWN 人工处置
 

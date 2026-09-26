@@ -12,6 +12,49 @@ from order_bridge.async_log import AsyncOrderLogger
 
 
 class AsyncOrderLoggerTests(unittest.TestCase):
+    def test_return_snapshot_keeps_plain_values_without_native_objects(self):
+        class Native(object):
+            def __repr__(self):
+                raise AssertionError("native repr forbidden")
+
+        with tempfile.TemporaryDirectory() as directory:
+            received = []
+            logger = AsyncOrderLogger(directory, sink=received.append)
+            snapshot = {"object_type": "COrderDetail", "fields_source": "dir(object)",
+                        "fields": {"m_nVolume": 100, "m_strOrderSysID": "1"},
+                        "field_errors": {"m_xtTag": {"type": "TypeError", "message": "converter missing"}},
+                        "truncated": False}
+            logger("ERROR", "query snapshot", return_snapshot=snapshot)
+            snapshot["fields"]["m_nVolume"] = 999
+            logger("ERROR", "bounded snapshot", return_snapshot={"native": Native(), "large": "x" * 100000})
+            logger.start()
+            logger.request_stop()
+            self.assertTrue(logger.join(2))
+            actual = received[0]["fields"]["return_snapshot"]
+            self.assertEqual(actual["fields"]["m_nVolume"], 100)
+            self.assertEqual(actual["field_errors"]["m_xtTag"]["message"], "converter missing")
+            self.assertFalse(actual["truncated"])
+            bounded = received[1]["fields"]["return_snapshot"]
+            self.assertEqual(bounded["native"], "<unsupported>")
+            self.assertLessEqual(len(bounded["large"]), 4096)
+            self.assertTrue(bounded["truncated"])
+
+    def test_diagnostic_fields_keep_bounded_traceback_and_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            received = []
+            logger = AsyncOrderLogger(directory, sink=received.append)
+            trace = "stack frame\n" * 150 + "RuntimeError: diagnostic-marker"
+            logger("WARNING", "query failed", traceback=trace,
+                   error_message="e" * 6000, text="x" * 2000)
+            logger("WARNING", "long trace", traceback="t" * 20000)
+            logger.start()
+            logger.request_stop()
+            self.assertTrue(logger.join(2))
+            self.assertEqual(received[0]["fields"]["traceback"], trace)
+            self.assertEqual(len(received[0]["fields"]["error_message"]), 4096)
+            self.assertEqual(len(received[0]["fields"]["text"]), 1024)
+            self.assertEqual(len(received[1]["fields"]["traceback"]), 16384)
+
     def test_full_queue_and_stop_drop_without_waiting_for_blocked_sink(self):
         entered, release = threading.Event(), threading.Event()
         written = []
