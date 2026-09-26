@@ -37,4 +37,4 @@ CREATE TABLE IF NOT EXISTS "qmt_order".qmt_orders (account_type text NOT NULL,ac
 
 CREATE TABLE IF NOT EXISTS "qmt_order".fills (account_type text NOT NULL,account_id text NOT NULL,order_id text NOT NULL,record_id text NOT NULL,document jsonb NOT NULL,PRIMARY KEY(account_type,account_id,order_id,record_id),FOREIGN KEY(account_type,account_id,order_id) REFERENCES "qmt_order".orders(account_type,account_id,order_id));
 CREATE UNIQUE INDEX IF NOT EXISTS cancel_request_scope_id ON "qmt_order".cancel_requests(account_type,account_id,record_id);
--- Version and current-account rows are seeded by tools/order_schema.py in the same transaction.
+-- The schema version is seeded by tools/order_schema.py; strategy startup creates its account_runtime row.

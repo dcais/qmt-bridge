@@ -12,7 +12,8 @@
 # pg_database、pg_user、pg_password 全部未配置或为空时，仅开放查询模式；启用交易须完整填写。
 # 每个数据库内部固定使用 qmt_order schema，不接受 pg_schema 运行参数。
 # DDL 独立存放在 sql/order_v1.sql；tools/order_admin.py schema init 显式读取并安装。
-# 策略启动只检查关键表、字段和版本，不自动建表或升级。
+# 策略启动检查关键表、字段和版本，再按 account_id 自动补齐账户运行记录；已有记录不重置。
+# 不自动建表或升级，无需在部署前手工注册账户。
 # 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
 # HTTP_HOST 固定为 127.0.0.1，交易账户类型固定为 STOCK；日志和队列设置是代码常量。
 #

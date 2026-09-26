@@ -85,8 +85,6 @@ class SchemaInstallerTests(unittest.TestCase):
         def fetchone(self):
             if self.last.startswith("SELECT to_regclass"):
                 return ("schema_version" if self.existing_version is not None else None,)
-            if ".account_runtime WHERE " in self.last:
-                return (1,)
             raise AssertionError("unexpected fetchone: " + self.last)
 
         def fetchall(self):
@@ -98,7 +96,6 @@ class SchemaInstallerTests(unittest.TestCase):
         def __init__(self, cursor, schema='"qmt_order"'):
             self.cursor = cursor
             self.repo_s = schema
-            self.repo_scope = ("STOCK", "test-account")
 
         def repo_run(self, callback, mutation=False):
             assert not mutation
@@ -123,7 +120,7 @@ class SchemaInstallerTests(unittest.TestCase):
         self.assertNotIn("bad", "\n".join(ddl))
         self.assertEqual(cursor.statements[0],
                          ("SELECT to_regclass(%s)", ('"test_schema".schema_version',)))
-        self.assertIn(("STOCK", "test-account"), [params for _, params in cursor.statements])
+        self.assertFalse(any(".account_runtime" in sql for sql, _ in cursor.statements))
 
     def test_existing_incompatible_version_blocks_all_ddl(self):
         from order_bridge.common import OrderError
@@ -142,6 +139,8 @@ class SchemaInstallerTests(unittest.TestCase):
         ddl = "\n".join(sql for sql, _ in cursor.statements)
         for table in ("orders", "order_events", "qmt_observations", "order_items", "fills"):
             self.assertIn('"qmt_order".' + table, ddl)
+        self.assertEqual([params for sql, params in cursor.statements
+                          if sql.startswith("INSERT INTO ")], [(1,)])
 
 
 class AdminSafetyTests(unittest.TestCase):
@@ -179,7 +178,7 @@ class AdminSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "config.json"
             source.write_text(json.dumps(config), encoding="utf-8")
-            args = SimpleNamespace(config=source, account_id=None)
+            args = SimpleNamespace(config=source, account_id=None, command="unknown")
             with patch.dict(self.tool.os.environ, {}, clear=True):
                 self.assertEqual(self.tool.config_from_args(args)["pg_schema"], "qmt_order")
                 source.write_text(json.dumps(dict(config, pg_schema="legacy")), encoding="utf-8")
@@ -192,6 +191,26 @@ class AdminSafetyTests(unittest.TestCase):
             with patch.dict(self.tool.os.environ, {"ORDER_PG_SCHEMA": "legacy"}, clear=True):
                 with self.assertRaisesRegex(ValueError, "ORDER_PG_SCHEMA"):
                     self.tool.config_from_args(args)
+
+    def test_schema_commands_accept_db_only_config_but_unknown_requires_account(self):
+        config = {"pg_host": "localhost", "pg_port": 5432, "pg_database": "order_test",
+                  "pg_user": "order_user", "pg_password": "secret"}
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "config.json"
+            source.write_text(json.dumps(config), encoding="utf-8")
+            with patch.dict(self.tool.os.environ, {}, clear=True):
+                for action in ("init", "check"):
+                    args = self.tool.parser().parse_args(["--config", str(source), "schema", action])
+                    parsed = self.tool.config_from_args(args)
+                    self.assertNotIn("account_id", parsed)
+                    with patch.object(self.tool, "PostgresRepository") as repository, \
+                            patch.object(self.tool, "execute", return_value={"schema_version": 1}):
+                        self.assertEqual(self.tool.main(["--config", str(source), "schema", action]), 0)
+                    repository.assert_called_once()
+                    self.assertEqual(repository.call_args[0][1], "")
+                unknown = self.tool.parser().parse_args(["--config", str(source), "unknown", "list"])
+                with self.assertRaisesRegex(ValueError, "account_id"):
+                    self.tool.config_from_args(unknown)
 
     def test_observed_requires_explicit_distinct_identifiers(self):
         args = SimpleNamespace(observation_id=[19], qmt_order_id=["abc"], qmt_task_id=None)

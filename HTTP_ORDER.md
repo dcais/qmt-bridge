@@ -155,20 +155,20 @@ python tools/build_order_strategy.py
 python tools/build_order_strategy.py --check
 ```
 
-策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具接受 `--config config.json`，内容形如：
+策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具的 schema init/check 只需数据库配置，例如 `config.json`：
 
 ```json
-{"pg_host":"127.0.0.1","pg_port":5432,"pg_database":"paper","pg_user":"order_service","pg_password":"<secret>","account_id":"<account>"}
+{"pg_host":"127.0.0.1","pg_port":5432,"pg_database":"paper","pg_user":"order_service","pg_password":"<secret>"}
 ```
 
-也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD`、`ORDER_ACCOUNT_ID` 环境变量。数据库须事先创建。DDL 唯一存放在 `sql/order_v1.sql`，以下安装命令读取该文件，在**目标隔离数据库**显式建表并注册当前账户，再检查：
+也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD` 环境变量。数据库须事先创建。DDL 唯一存放在 `sql/order_v1.sql`，以下安装命令读取该文件，在**目标隔离数据库**显式建表、登记 schema 版本，再检查：
 
 ```powershell
 python tools/order_admin.py --config config.json schema init
 python tools/order_admin.py --config config.json schema check
 ```
 
-策略文件不包含 DDL；启动只检查固定 schema 内的关键表、字段、版本和账户记录，缺失时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`，不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password`，且 `account_id` 与数据库要与管理命令一致；大写 PG 参数名也兼容，小写优先。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
+策略文件不包含 DDL；启动先检查固定 schema 内的关键表、字段和版本，再按策略配置的 `account_id` 创建缺失的 `account_runtime` 行；已存在的账户行及其字段值保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
 
 ## 订单输入
 

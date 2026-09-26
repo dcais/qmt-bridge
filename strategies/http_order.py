@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-26 08:53:06
+# Last modified (Asia/Shanghai): 2026-09-26 09:50:50
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -15,7 +15,8 @@
 # pg_database、pg_user、pg_password 全部未配置或为空时，仅开放查询模式；启用交易须完整填写。
 # 每个数据库内部固定使用 qmt_order schema，不接受 pg_schema 运行参数。
 # DDL 独立存放在 sql/order_v1.sql；tools/order_admin.py schema init 显式读取并安装。
-# 策略启动只检查关键表、字段和版本，不自动建表或升级。
+# 策略启动检查关键表、字段和版本，再按 account_id 自动补齐账户运行记录；已有记录不重置。
+# 不自动建表或升级，无需在部署前手工注册账户。
 # 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
 # HTTP_HOST 固定为 127.0.0.1，交易账户类型固定为 STOCK；日志和队列设置是代码常量。
 #
@@ -988,7 +989,7 @@ class PostgresRepository(object):
                 cur.execute("SELECT event_seq FROM " + self.repo_s +
                             ".account_runtime WHERE account_type=%s AND account_id=%s FOR UPDATE", self.repo_scope)
                 if cur.fetchone() is None:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "initialize the account schema before runtime")
+                    raise OrderError(503, "SCHEMA_NOT_READY", "account runtime record is missing; restart the bridge")
             result = callback(cur)
             try:
                 conn.commit()
@@ -1014,7 +1015,7 @@ class PostgresRepository(object):
                 pass
 
     def check_schema(self):
-        """启动只检查既有结构及账户记录；建表由外部 SQL 安装工具负责。"""
+        """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
         def check(cur):
             required = {
                 "schema_version": ("version",),
@@ -1039,11 +1040,18 @@ class PostgresRepository(object):
             cur.execute("SELECT version FROM " + self.repo_s + ".schema_version")
             if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
                 raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
-            cur.execute("SELECT 1 FROM " + self.repo_s + ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
-            if cur.fetchone() is None:
-                raise OrderError(503, "SCHEMA_NOT_READY", "account runtime has not been initialized")
             return {"schema_version": repo_SCHEMA_VERSION, "ready": True}
         return self.repo_run(check)
+
+    def ensure_account_runtime(self):
+        """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
+        def ensure(cur):
+            cur.execute("INSERT INTO " + self.repo_s +
+                        ".account_runtime(account_type,account_id) VALUES(%s,%s) "
+                        "ON CONFLICT(account_type,account_id) DO NOTHING RETURNING account_id", self.repo_scope)
+            return cur.fetchone() is not None
+        # 首次运行尚无可锁的账户行，依靠主键和 ON CONFLICT 处理并发创建。
+        return self.repo_run(ensure)
 
     def health(self):
         result = self.check_schema()
@@ -1974,6 +1982,7 @@ class OrderRuntime:
             if self.local_lock:
                 self.local_lock.acquire()
             schema = self.repo.check_schema()
+            self.repo.ensure_account_runtime()  # 使用启动参数账户；已有运行状态不重置。
             self.repo.acquire_executor(self.instance_id, self.host_id)
             self.repo.recover()
             self.initialized = True

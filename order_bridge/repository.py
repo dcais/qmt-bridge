@@ -87,7 +87,7 @@ class PostgresRepository(object):
                 cur.execute("SELECT event_seq FROM " + self.repo_s +
                             ".account_runtime WHERE account_type=%s AND account_id=%s FOR UPDATE", self.repo_scope)
                 if cur.fetchone() is None:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "initialize the account schema before runtime")
+                    raise OrderError(503, "SCHEMA_NOT_READY", "account runtime record is missing; restart the bridge")
             result = callback(cur)
             try:
                 conn.commit()
@@ -113,7 +113,7 @@ class PostgresRepository(object):
                 pass
 
     def check_schema(self):
-        """启动只检查既有结构及账户记录；建表由外部 SQL 安装工具负责。"""
+        """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
         def check(cur):
             required = {
                 "schema_version": ("version",),
@@ -138,11 +138,18 @@ class PostgresRepository(object):
             cur.execute("SELECT version FROM " + self.repo_s + ".schema_version")
             if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
                 raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
-            cur.execute("SELECT 1 FROM " + self.repo_s + ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
-            if cur.fetchone() is None:
-                raise OrderError(503, "SCHEMA_NOT_READY", "account runtime has not been initialized")
             return {"schema_version": repo_SCHEMA_VERSION, "ready": True}
         return self.repo_run(check)
+
+    def ensure_account_runtime(self):
+        """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
+        def ensure(cur):
+            cur.execute("INSERT INTO " + self.repo_s +
+                        ".account_runtime(account_type,account_id) VALUES(%s,%s) "
+                        "ON CONFLICT(account_type,account_id) DO NOTHING RETURNING account_id", self.repo_scope)
+            return cur.fetchone() is not None
+        # 首次运行尚无可锁的账户行，依靠主键和 ON CONFLICT 处理并发创建。
+        return self.repo_run(ensure)
 
     def health(self):
         result = self.check_schema()

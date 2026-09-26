@@ -66,7 +66,7 @@ def sql_statements(script):
 
 
 def initialize_schema(repo, sql_path=None):
-    """Install schema from the SQL file and seed this account in one transaction."""
+    """Install schema from the SQL file and seed its version in one transaction."""
     schema = repo.repo_s
     if not isinstance(schema, str) or len(schema) < 3 or repo_schema(schema[1:-1]) != schema:
         raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
@@ -91,18 +91,11 @@ def initialize_schema(repo, sql_path=None):
             cur.execute(statement)
         cur.execute("INSERT INTO " + schema + ".schema_version(version) VALUES(%s) ON CONFLICT DO NOTHING",
                     (repo_SCHEMA_VERSION,))
-        cur.execute("INSERT INTO " + schema +
-                    ".account_runtime(account_type,account_id) VALUES(%s,%s) ON CONFLICT DO NOTHING",
-                    repo.repo_scope)
         cur.execute("SELECT version FROM " + schema + ".schema_version")
         if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
         for table in ("orders", "order_events", "qmt_observations"):
             cur.execute("SELECT 1 FROM " + schema + "." + table + " LIMIT 0")
-        cur.execute("SELECT 1 FROM " + schema +
-                    ".account_runtime WHERE account_type=%s AND account_id=%s", repo.repo_scope)
-        if cur.fetchone() is None:
-            raise OrderError(503, "SCHEMA_NOT_READY", "account runtime has not been initialized")
         return {"schema_version": repo_SCHEMA_VERSION}
 
     return repo.repo_run(install)

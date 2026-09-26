@@ -130,6 +130,7 @@ class OrderRuntime:
             if self.local_lock:
                 self.local_lock.acquire()
             schema = self.repo.check_schema()
+            self.repo.ensure_account_runtime()  # 使用启动参数账户；已有运行状态不重置。
             self.repo.acquire_executor(self.instance_id, self.host_id)
             self.repo.recover()
             self.initialized = True

@@ -42,6 +42,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.config = repo_test_config()
         self.repo = PostgresRepository(self.config, "test-account")
         initialize_schema(self.repo)
+        self.repo.ensure_account_runtime()
         self.extra = []
 
     def tearDown(self):
@@ -70,6 +71,42 @@ class PostgresRepositoryTests(unittest.TestCase):
 
     def owner(self):
         self.repo.acquire_executor("instance-one", "host-one")
+
+    def test_schema_check_needs_no_account_and_does_not_insert_one(self):
+        other = self.other("new-startup-account")
+        self.assertEqual(other.check_schema(), {"schema_version": 1, "ready": True})
+        def records(cur):
+            cur.execute("SELECT account_id FROM " + other.repo_s +
+                        ".account_runtime WHERE account_type=%s AND account_id=%s", other.repo_scope)
+            return [tuple(row) for row in cur.fetchall()]
+        self.assertEqual(other.repo_run(records), [])
+        self.assertTrue(other.ensure_account_runtime())
+        self.assertEqual(other.repo_run(records), [("new-startup-account",)])
+
+    def test_concurrent_account_creation_has_one_row_and_preserves_existing_state(self):
+        other = self.other("concurrent-startup-account")
+        barrier = threading.Barrier(8)
+        def ensure(index):
+            barrier.wait()
+            return other.ensure_account_runtime()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            created = list(pool.map(ensure, range(8)))
+        self.assertEqual(sum(created), 1)
+        def initial(cur):
+            cur.execute("SELECT event_seq,executor_host,executor_instance,executor_epoch FROM " + other.repo_s +
+                        ".account_runtime WHERE account_type=%s AND account_id=%s", other.repo_scope)
+            return [tuple(row) for row in cur.fetchall()]
+        self.assertEqual(other.repo_run(initial), [(0, None, None, 0)])
+        def set_existing(cur):
+            cur.execute("UPDATE " + other.repo_s + ".account_runtime SET event_seq=37,executor_host='bound-host',"
+                        "executor_instance='running-instance',executor_epoch=8 "
+                        "WHERE account_type=%s AND account_id=%s", other.repo_scope)
+        other.repo_run(set_existing)
+        self.assertFalse(other.ensure_account_runtime())
+        self.assertEqual(other.repo_run(initial), [(37, "bound-host", "running-instance", 8)])
+        with self.assertRaises(OrderError) as caught:
+            other.acquire_executor("new-instance", "different-host")
+        self.assertEqual(caught.exception.code, "EXECUTOR_HOST_MISMATCH")
 
     def test_concurrent_idempotent_accept_and_conflict(self):
         barrier = threading.Barrier(8)
@@ -253,7 +290,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertFalse(following["has_more"])
         self.assertNotEqual(page["orders"][0]["order_id"], following["orders"][0]["order_id"])
         other = self.other("different-account")
-        initialize_schema(other)
+        other.ensure_account_runtime()
         self.assertEqual(other.events()["events"], [])
         with self.assertRaises(OrderError) as caught:
             other.get_by_id(first["order_id"])

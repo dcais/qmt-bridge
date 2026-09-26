@@ -2,7 +2,15 @@
 
 验证日期：2026-09-26，Asia/Shanghai。以下是代码、HTTP 和 PostgreSQL 验收，不是券商模拟盘交易验收。
 
-## 最新变更：DDL 外置及数据库隔离
+## 最新变更：策略启动动态注册账户
+
+- 策略按实际启动参数 `account_id` 在结构检查后、取得执行权前执行 `INSERT ... ON CONFLICT DO NOTHING`。只创建缺失的账户行，已有事件游标、主机绑定和执行代次不被初始化操作覆盖；正常取得执行权仍会更新实例和递增代次。
+- 外部安装器只建表并登记版本；`schema init/check` 无需账户参数。实际 PostgreSQL 验证两条 CLI 命令成功后 `account_runtime` 仍为零行，策略启动才注册账户。
+- 当前策略 `Last modified`：2026-09-26 09:50:50；SHA256：`591fa6ecc9eb23175c4ef839f713d9e67521efddea51f110e92210bb671095ab`。实际 GBK，构建一致性检查通过，生成策略不含 DDL。
+- QMT Python 3.6.8 + 真实 PostgreSQL：完整 ORDER 运行 135 项，其中 134 项通过；新增重启用例的断言从“游标不变”修正为“保留旧事件并继续递增”，随后 runtime 12 项全部通过。重启对账正常产生新事件，不应禁止序号增加。日志：`.venv/order-account-startup-python36-tests.log`、`.venv/order-account-startup-runtime-recheck.log`。
+- 覆盖首次注册、八路并发只创建一行、保留已有状态和主机约束、前导零账户、重启幂等重放、事件历史及序号延续、结构检查或注册失败时禁止进入执行。测试使用专用容器 `qmt-order-startup-test-20260926`、端口 15439；不修改 `qmt_paper`，不调用真实 QMT 交易函数。
+
+## 历史变更：DDL 外置及数据库隔离
 
 - DDL 唯一存放在 `sql/order_v1.sql`，管理命令通过 `tools/order_schema.py` 显式读取并安装；策略启动只检查既有关键表、字段、版本及账户记录。
 - 公开配置移除 `pg_schema`，内部固定使用 `qmt_order`。模拟盘和实盘通过不同 `pg_database` 隔离；旧 schema 配置会明确报错。

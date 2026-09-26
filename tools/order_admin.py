@@ -39,7 +39,9 @@ def config_from_args(args):
             config[key] = os.environ[env_name]
     if args.account_id:
         config["account_id"] = args.account_id
-    required = ("pg_host", "pg_port", "pg_database", "pg_user", "pg_password", "account_id")
+    required = ("pg_host", "pg_port", "pg_database", "pg_user", "pg_password")
+    if getattr(args, "command", None) != "schema":
+        required += ("account_id",)
     missing = [key for key in required if key not in config or str(config[key]) == ""]
     if missing:
         raise ValueError("missing config keys: " + ", ".join(missing))
@@ -218,7 +220,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         config = config_from_args(args)
-        repo = PostgresRepository(config, config["account_id"])
+        repo = PostgresRepository(config, config.get("account_id", ""))
         result = execute(repo, args)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
         return 0

@@ -121,6 +121,10 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.runtimes = []
         first = self._new_runtime(_FakeQmt())
         initialize_schema(first.repo)
+        def registered_accounts(cur):
+            cur.execute("SELECT count(*) FROM " + first.repo.repo_s + ".account_runtime")
+            return cur.fetchone()[0]
+        self.assertEqual(first.repo.repo_run(registered_accounts), 0)
         first.initialize()
         first.tick()  # First full QMT read completes recovery.
         self.assertTrue(first.recovery_complete, first.last_error)
@@ -137,10 +141,11 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def _new_runtime(self, qmt):
-        repo = PostgresRepository(self.config, self.account_id)
+    def _new_runtime(self, qmt, account_id=None):
+        account_id = self.account_id if account_id is None else account_id
+        repo = PostgresRepository(self.config, account_id)
         self.repositories.append(repo)
-        runtime = OrderRuntime(qmt.apis(), object(), self.account_id,
+        runtime = OrderRuntime(qmt.apis(), object(), account_id,
                                pg_config=self.config, repository=repo, local_lock=_LocalLock())
         self.runtimes.append(runtime)
         runtime.fake_qmt = qmt
@@ -178,6 +183,43 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         for unused in range(count):
             runtime.tick()
             self.assertTrue(runtime.initialized, runtime.last_error)
+
+    def test_startup_uses_configured_account_and_restart_preserves_event_cursor(self):
+        account_id = "0012345678"
+        runtime = self._new_runtime(_FakeQmt(), account_id=account_id)
+        runtime.initialize()
+        self._tick(runtime)
+        self.assertTrue(runtime.recovery_complete, runtime.last_error)
+        request = self.single(client="startup-order")
+        request["account_id"] = account_id
+        runtime.handle("submit_order", request, "POST")
+        runtime.handle("cancel_order", {"account_id": account_id, "client_order_id": "startup-order",
+                                       "cancel_request_id": "startup-cancel"}, "POST")
+        def account_row(cur):
+            cur.execute("SELECT account_id,event_seq,executor_host,executor_instance,executor_epoch FROM " +
+                        runtime.repo.repo_s + ".account_runtime WHERE account_type=%s AND account_id=%s",
+                        runtime.repo.repo_scope)
+            return tuple(cur.fetchone())
+        before = runtime.repo.repo_run(account_row)
+        previous_events = runtime.repo.events()["events"]
+        self.assertEqual(before[0], account_id)
+        self.assertGreater(before[1], 0)
+        runtime.stop()
+        restarted = self._new_runtime(_FakeQmt(), account_id=account_id)
+        restarted.initialize()
+        self._tick(restarted)
+        after = restarted.repo.repo_run(account_row)
+        self.assertEqual(after[0], before[0])
+        self.assertGreaterEqual(after[1], before[1])  # 重启对账可追加事件，但不能重置游标。
+        self.assertEqual(after[2], before[2])
+        self.assertEqual(after[3], restarted.instance_id)
+        self.assertEqual(after[4], before[4] + 1)
+        events = restarted.repo.events()["events"]
+        self.assertEqual(events[:len(previous_events)], previous_events)
+        self.assertEqual([event["event_id"] for event in events], list(range(1, after[1] + 1)))
+        replay = restarted.handle("submit_order", request, "POST")[1]
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["submission_status"], "CANCELLED_LOCAL")
 
     def test_submit_replay_conflict_and_single_dispatch_once(self):
         qmt = self.runtime.fake_qmt

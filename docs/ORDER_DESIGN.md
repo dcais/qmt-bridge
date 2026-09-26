@@ -4,7 +4,7 @@
 
 `order_bridge/*.py` 是 UTF-8 开发源码。`python tools/build_order_strategy.py` 按 common、contracts、state、repository、qmt、runtime、http 顺序生成 `strategies/http_order.py`，交给 QMT 的是单份 GBK 文件。`--check` 仅检查是否与源码一致，忽略生成时间。策略不依赖运行时可导入 `order_bridge` 包，但 QMT Python 环境需要 PostgreSQL 驱动。`tools/install_order_dependencies.py` 默认把锁定的 wheel 装到 `%USERPROFILE%\qmt-bridge\vendor`，支持 `--wheel-dir` 离线安装与 `--python36` 目标兼容选择；不修改系统 site-packages。
 
-配置通过 pg_database 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 qmt_order schema，不提供 pg_schema 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。DDL 唯一存放在 sql/order_v1.sql。tools/order_admin.py schema init 显式读取 SQL 文件安装并注册账户；生成的策略不包含安装工具或 DDL。策略启动只检查既有关键表、字段、版本及账户记录，成功后才接收写请求。
+配置通过 pg_database 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 qmt_order schema，不提供 pg_schema 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。DDL 唯一存放在 sql/order_v1.sql。tools/order_admin.py schema init 显式读取 SQL 文件安装表并登记 schema 版本，schema init/check 不要求账户 ID；unknown 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL。策略启动检查既有关键表、字段及版本，再按配置的账户 ID 插入缺失的 account_runtime 行；已有行保持原值，成功后才接收写请求。策略运行时不执行 DDL。
 
 ## 合同与 QMT 映射
 

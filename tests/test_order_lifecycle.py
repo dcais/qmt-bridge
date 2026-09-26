@@ -3,12 +3,39 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 from order_bridge.common import OrderError, public_order
 from order_bridge.runtime import LocalExecutorLock, OrderRuntime, read_pg_config
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_startup_checks_schema_then_registers_account_before_execution(self):
+        store, lock = Mock(), Mock()
+        store.check_schema.return_value = {"schema_version": 1, "ready": True}
+        runtime = OrderRuntime({}, object(), "configured-account", repository=store, local_lock=lock)
+        runtime.initialize()
+        self.assertTrue(runtime.initialized)
+        self.assertFalse(runtime.recovery_complete)
+        self.assertEqual([call[0] for call in store.method_calls],
+                         ["check_schema", "ensure_account_runtime", "acquire_executor", "recover"])
+        store.acquire_executor.assert_called_once_with(runtime.instance_id, runtime.host_id)
+
+    def test_failed_schema_check_or_account_insert_blocks_execution_and_recovery(self):
+        for failed_method in ("check_schema", "ensure_account_runtime"):
+            store, lock = Mock(), Mock()
+            store.check_schema.return_value = {"schema_version": 1, "ready": True}
+            getattr(store, failed_method).side_effect = OrderError(503, "TEST_STORE_FAILURE", "test failure")
+            runtime = OrderRuntime({}, object(), "configured-account", repository=store, local_lock=lock)
+            runtime.initialize()
+            self.assertFalse(runtime.initialized)
+            self.assertFalse(runtime.recovery_complete)
+            self.assertEqual(runtime.last_error, "TEST_STORE_FAILURE")
+            store.acquire_executor.assert_not_called()
+            store.recover.assert_not_called()
+            if failed_method == "check_schema":
+                store.ensure_account_runtime.assert_not_called()
+
     def test_query_only_and_lowercase_configuration(self):
         self.assertIsNone(read_pg_config({}))
         config = read_pg_config({"PG_DATABASE": "ignored", "pg_database": "orders",
