@@ -10,7 +10,8 @@
 http://127.0.0.1:1688/{method}
 ```
 
-HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSON 任务：
+除下载任务和状态查询外，HTTP 层不处理具体 QMT 业务。普通请求会被规范化成
+一个 JSON 任务：
 
 ```json
 {
@@ -33,7 +34,8 @@ HTTP 层不处理具体 QMT 业务。每个请求都会被规范化成一个 JSO
 、`get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
 、`get_instrument_details`、`get_divid_factors_batch`、`get_weights_in_index`
 、`get_full_tick`、`get_his_index_data`、`get_his_contract_list`、`get_longhubang`
-、`get_market_data_ex` 和 `get_financial_data` 分支。
+、`get_market_data_ex`、`get_financial_data`、`download_history_data`
+和 `get_download_status` 分支。
 
 ## Account demo
 
@@ -272,6 +274,83 @@ curl.exe -X POST `
 50000 个 JSON 值。返回值中的 numpy 数组会转换为 JSON 数组，`NaN`、
 正负无穷会转换为 `null`。历史数据应先在 QMT 数据管理中下载；
 `subscribe=false` 不会补取尚未下载的数据。
+
+## 下载历史行情
+
+FEED 支持通过 QMT 内置 `download_history_data` 发起单证券历史行情下载。
+启动下载只能使用 POST：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"stockcode":"600000.SH","period":"1m","startTime":"20260701093000","endTime":"20260701150000"}' `
+  "http://127.0.0.1:1688/download_history_data"
+```
+
+成功时立即返回 `202` 和任务号：
+
+```json
+{
+  "task_id": "download-4a6d2f6d9d8a45ad8d03d5baf9e4d6a1",
+  "status": "queued",
+  "stockcode": "600000.SH",
+  "period": "1m",
+  "startTime": "20260701093000",
+  "endTime": "20260701150000",
+  "created_at": 1782871200.0,
+  "updated_at": 1782871200.0,
+  "message": "queued"
+}
+```
+
+参数：
+
+- `stockcode`：必填，单个 `stock.market` 格式证券代码。
+- `period`：必填，只接受 `tick`、`1m`、`5m`、`1d`。
+- `startTime`、`endTime`：可选，空字符串表示不限定；非空时必须是
+  `YYYYMMDD` 或 `YYYYMMDDHHMMSS`，且开始时间不能晚于结束时间。
+- `incrementally`：可选布尔值或 `null`。只有显式传入时才会作为
+  `incrementally=` 关键字参数传给 QMT；如果当前 QMT 不支持该参数，
+  任务会变为 `failed`，FEED 不做兼容性重试。
+
+下载进度通过任务快照查询：
+
+```powershell
+curl.exe --get `
+  --data-urlencode "task_id=download-4a6d2f6d9d8a45ad8d03d5baf9e4d6a1" `
+  "http://127.0.0.1:1688/get_download_status"
+```
+
+`get_download_status` 也接受 POST JSON：
+
+```powershell
+curl.exe -X POST `
+  -H "Content-Type: application/json" `
+  -d '{"task_id":"download-4a6d2f6d9d8a45ad8d03d5baf9e4d6a1"}' `
+  "http://127.0.0.1:1688/get_download_status"
+```
+
+状态只保存在进程内存中，重启策略后会丢失。`status` 取值：
+
+- `queued`：已进入 FEED 队列，尚未进入 QMT 调度回调。
+- `running`：本次 schedule 回调已经开始执行 `download_history_data`。
+- `completed`：`download_history_data` 函数已经返回；这只说明 QMT API
+  调用结束，不证明本地历史数据覆盖完整。
+- `failed`：参数进入队列后执行失败，`error.code` 和 `error.message`
+  会保留 QMT 异常信息。
+
+单证券下载没有来自 QMT 的真实百分比进度，FEED 不伪造百分比。
+`get_download_status` 直接读取线程安全内存快照，不进入 QMT 请求队列；
+因此即使某个下载正在 QMT 策略线程里同步执行，HTTP 状态轮询也不会排队等
+下一次 QMT 调度。内存任务表最多保留 1000 个任务；满时会优先淘汰已经结束
+的任务，若全是未结束任务则返回 `429 DOWNLOAD_TASKS_FULL`。
+
+`download_history_data` 是 QMT 同步调用，FEED 无法从 HTTP 线程强制中断。
+调用期间它会占用本策略的 QMT 请求处理路径，其他需要 QMT 的 FEED 查询会
+等到该调用返回后再处理。
+
+停止与请求入队通过同一把短锁协调。停止先于下载入队时返回
+`503 FEED_STOPPING`，并移除尚未受理的任务；不会在队列清空后留下无人执行的新任务。
 
 ## 最新全推 Tick
 
@@ -657,8 +736,9 @@ QMT 策略线程不等待队列、HTTP 连接或 HTTP 服务线程。当前各�
 `get_stock_list_in_sector`、`get_sector_list` 和 `get_trading_dates`；
 `get_instrument_detail`、`get_divid_factors`、`get_weight_in_index`
 、`get_full_tick`、`get_his_index_data`、`get_his_contract_list`、`get_longhubang`
-、`get_market_data_ex` 和 `get_financial_data`
-同样为同步调用。这些调用必须保持极短。
+、`get_market_data_ex`、`get_financial_data` 和 `download_history_data`
+同样为同步调用。其中 `download_history_data` 可能明显慢于普通查询，会阻塞
+后续需要 QMT 的 FEED 请求，直到 QMT 函数返回。
 策略会在以下字段中记录最近和历史最长处理耗时，便于在 QMT 中观察：
 
 ```python
@@ -715,7 +795,8 @@ def dispatch_request(ContextInfo, request):
     raise FeedError(404, "METHOD_NOT_FOUND", "unsupported method")
 ```
 
-HTTP 层无需增加新的 Handler。
+普通同步接口无需增加新的 HTTP Handler。`download_history_data` 是异步
+`202` 任务接口，由 HTTP 层先创建任务并入队，再由 schedule 回调执行。
 
 批量方法不在 `dispatch_request` 中循环执行，而是由 `process_batch_request`
 跨 schedule tick 增量推进：
@@ -727,6 +808,32 @@ BATCH_METHODS = {
     "get_weights_in_index",
 }
 ```
+
+## 日志
+
+通用方法 `log_message(level, message, **fields)` 同时输出到 QMT console
+和 UTF-8 日志文件，格式为 `YYYY-MM-DD HH:mm:ss [LEVEL] message {fields}`，
+时间使用北京时间（Asia/Shanghai）。
+
+默认目录为 `%USERPROFILE%\qmt-bridge\logs`，可修改脚本顶部的
+`LOG_DIRECTORY`；文件按日期命名为 `feed-YYYY-MM-DD.log`，以追加方式写入。
+日志文件不会自动清理。
+
+启动服务以及下载开始、完成时输出 INFO；下载异常输出 ERROR。下载日志包含
+`task_id`、`stockcode`、`period`、`startTime`、`endTime`，显式传入时也记录
+`incrementally`。完成表示 QMT 函数已返回，不代表行情覆盖已验证。
+文件写入失败时尝试向 console 输出 ERROR，不改变下载任务结果。
+
+`LOG_LEVEL` 默认 `INFO`，可设置 `DEBUG`、`INFO`、`WARNING`、`ERROR`，
+同时控制 console 与文件的最低输出级别。成功的 `get_download_status` 轮询
+使用 DEBUG，默认不输出；失败响应仍按 WARNING/ERROR 记录。
+
+GET/POST 请求日志包含 `request_id`、HTTP 方法、接口名和白名单参数摘要。
+数组仅记录数量及前 3 项，每项最多 64 字符，字符串最多 128 字符；
+不记录完整请求体、账户响应或行情响应。响应日志包含状态码、耗时（毫秒）、
+响应字节数，下载响应另含 `task_id`。同一下载的执行日志关联该 `request_id`。
+请求被拒绝、排队超时、客户端断开记为 WARNING；QMT 执行异常记为 ERROR。
+超时响应记录队列长度，策略停止记录排队请求数与未完成下载数。
 
 ## 启动
 
@@ -754,8 +861,10 @@ Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:1688/account'
 ## HTTP 状态
 
 - `200`：method 执行成功。
+- `202`：异步下载任务已创建。
 - `400`：参数或 JSON 不合法。
 - `404`：method 不存在或账户不存在。
+- `405`：方法不允许，例如使用 GET 启动下载。
 - `413`：POST JSON 超过 1 MiB。
 - `429`：请求队列已满。
 - `500`：未处理的 QMT 异常。

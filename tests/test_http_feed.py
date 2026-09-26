@@ -2,12 +2,16 @@ import copy
 import datetime as dt
 import importlib.util
 import json
+import io
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from contextlib import redirect_stdout
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 
@@ -277,9 +281,75 @@ class BrokenInstrumentContext(FakeContext):
         return decode_instrument_detail(stockcode, iscomplete)
 
 
+class FeedLoggingTest(unittest.TestCase):
+    def setUp(self):
+        self.strategy = load_strategy()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.strategy.LOG_DIRECTORY = self.temp.name
+
+    def test_console_and_file_have_identical_timestamped_records(self):
+        console = io.StringIO()
+        with redirect_stdout(console):
+            self.strategy.log_message("info", "Download started", stockcode="000001.SZ")
+        files = list(Path(self.temp.name).glob("feed-*.log"))
+        self.assertEqual(1, len(files))
+        record = files[0].read_text(encoding="utf-8")
+        self.assertEqual(console.getvalue(), record)
+        self.assertRegex(record, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[INFO\] Download started')
+        self.assertIn('"stockcode": "000001.SZ"', record)
+
+    def test_debug_is_filtered_until_enabled(self):
+        console = io.StringIO()
+        with redirect_stdout(console):
+            self.strategy.log_message("DEBUG", "hidden")
+            self.assertEqual([], list(Path(self.temp.name).glob("*.log")))
+            self.strategy.LOG_LEVEL = "DEBUG"
+            self.strategy.log_message("DEBUG", "visible")
+        self.assertNotIn("hidden", console.getvalue())
+        self.assertIn("[DEBUG] visible", console.getvalue())
+
+    def test_file_failure_is_reported_without_raising(self):
+        console = io.StringIO()
+        with patch.object(self.strategy.os, "makedirs", side_effect=PermissionError("denied")):
+            with redirect_stdout(console):
+                self.strategy.log_message("info", "test")
+        self.assertIn("[INFO] test", console.getvalue())
+        self.assertIn("[ERROR] log file write failed", console.getvalue())
+
+    def test_console_failure_does_not_prevent_file_write(self):
+        with patch("builtins.print", side_effect=OSError("console unavailable")):
+            self.strategy.log_message("warning", "test")
+        record = next(Path(self.temp.name).glob("*.log")).read_text(encoding="utf-8")
+        self.assertIn("[WARNING] test", record)
+
+    def test_download_success_and_failure_records_include_request(self):
+        state = self.strategy.FeedState()
+        params = {"stockcode": "000001.SZ", "period": "1m",
+                  "startTime": "20260921000000", "endTime": "20260921235959"}
+        for fail in (False, True):
+            task = self.strategy.create_download_task(state, params)
+            with patch.object(self.strategy, "download_history_data", create=True,
+                              side_effect=RuntimeError("download error") if fail else None):
+                with patch.object(self.strategy, "log_message") as log:
+                    self.strategy.handle_download_history_data(
+                        state, {"params": params, "task_id": task["task_id"]})
+            self.assertEqual(2, log.call_count)
+            first, last = log.call_args_list
+            self.assertEqual(("INFO", "Download started"), first.args)
+            self.assertEqual("ERROR" if fail else "INFO", last.args[0])
+            self.assertIn("failed" if fail else "completed", last.args[1])
+            for call in (first, last):
+                for key, value in params.items():
+                    self.assertEqual(value, call.kwargs[key])
+
+
 class HttpFeedTest(unittest.TestCase):
     def setUp(self):
         self.strategy = load_strategy()
+        log_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(log_temp.cleanup)
+        self.strategy.LOG_DIRECTORY = log_temp.name
         self.strategy.HTTP_PORT = 0
         self.context = FakeContext()
         self.query_calls = []
@@ -303,6 +373,14 @@ class HttpFeedTest(unittest.TestCase):
             return [["沪深300", "上证50"], ["行业", "概念"]]
 
         self.strategy.get_sector_list = fake_get_sector_list
+        self.download_history_calls = []
+
+        def fake_download_history_data(*args, **kwargs):
+            self.download_history_calls.append(
+                (threading.get_ident(), args, kwargs)
+            )
+
+        self.strategy.download_history_data = fake_download_history_data
         self.strategy.init(self.context)
         self.state = self.strategy._FEED_STATE
 
@@ -340,6 +418,30 @@ class HttpFeedTest(unittest.TestCase):
         thread = threading.Thread(target=send_request)
         thread.start()
         return thread, result
+
+    def request_json(self, path, body=None, method=None):
+        data = None
+        headers = {}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            self.base_url() + path,
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return (
+                    response.status,
+                    json.loads(response.read().decode("utf-8")),
+                )
+        except urllib.error.HTTPError as exc:
+            return (
+                exc.code,
+                json.loads(exc.read().decode("utf-8")),
+            )
 
     def wait_for_queued_job(self):
         request_queue = self.state.request_queue
@@ -2185,6 +2287,339 @@ class HttpFeedTest(unittest.TestCase):
         self.assertEqual(200, first_response["status"])
         self.assertEqual(200, second_response["status"])
         self.assertEqual(2, len(self.context.market_data_ex_calls))
+
+    def test_download_history_data_returns_task_and_runs_in_schedule(self):
+        status, body = self.request_json(
+            "/download_history_data",
+            {
+                "stockcode": "600000.SH",
+                "period": "1m",
+                "startTime": "20260701093000",
+                "endTime": "20260701150000",
+            },
+        )
+
+        self.assertEqual(202, status)
+        self.assertEqual("queued", body["status"])
+        task_id = body["task_id"]
+        self.assertEqual(1, self.state.request_queue.qsize())
+        self.assertEqual([], self.download_history_calls)
+
+        queued_status, queued_body = self.request_json(
+            "/get_download_status?task_id={0}".format(task_id)
+        )
+        self.assertEqual(200, queued_status)
+        self.assertEqual("queued", queued_body["status"])
+        self.assertEqual(1, self.state.request_queue.qsize())
+
+        schedule_thread_id = threading.get_ident()
+        self.context.callback(self.context)
+
+        completed_status, completed_body = self.request_json(
+            "/get_download_status?task_id={0}".format(task_id)
+        )
+        self.assertEqual(200, completed_status)
+        self.assertEqual("completed", completed_body["status"])
+        self.assertIn("coverage was not verified", completed_body["message"])
+        self.assertEqual(
+            [
+                (
+                    schedule_thread_id,
+                    (
+                        "600000.SH",
+                        "1m",
+                        "20260701093000",
+                        "20260701150000",
+                    ),
+                    {},
+                )
+            ],
+            self.download_history_calls,
+        )
+
+    def test_download_history_data_passes_incrementally_only_when_explicit(self):
+        status, body = self.request_json(
+            "/download_history_data",
+            {
+                "stockcode": "600000.SH",
+                "period": "1d",
+                "startTime": "",
+                "endTime": "",
+                "incrementally": True,
+            },
+        )
+
+        self.assertEqual(202, status)
+        self.assertTrue(body["incrementally"])
+        self.context.callback(self.context)
+
+        self.assertEqual(
+            [
+                (
+                    threading.get_ident(),
+                    (
+                        "600000.SH",
+                        "1d",
+                        "",
+                        "",
+                    ),
+                    {"incrementally": True},
+                )
+            ],
+            self.download_history_calls,
+        )
+
+    def test_download_history_data_preserves_explicit_incrementally_null(self):
+        status, body = self.request_json(
+            "/download_history_data",
+            {
+                "stockcode": "600000.SH",
+                "period": "1d",
+                "incrementally": None,
+            },
+        )
+
+        self.assertEqual(202, status)
+        self.assertIsNone(body["incrementally"])
+        self.context.callback(self.context)
+
+        self.assertEqual(
+            [
+                (
+                    threading.get_ident(),
+                    (
+                        "600000.SH",
+                        "1d",
+                        "",
+                        "",
+                    ),
+                    {"incrementally": None},
+                )
+            ],
+            self.download_history_calls,
+        )
+
+    def test_download_history_data_marks_qmt_errors_failed_without_retry(self):
+        def unsupported_incrementally(*args, **kwargs):
+            raise TypeError("too many arguments")
+
+        self.strategy.download_history_data = unsupported_incrementally
+        status, body = self.request_json(
+            "/download_history_data",
+            {
+                "stockcode": "600000.SH",
+                "period": "1d",
+                "incrementally": True,
+            },
+        )
+
+        self.assertEqual(202, status)
+        self.context.callback(self.context)
+        failed_status, failed_body = self.request_json(
+            "/get_download_status?task_id={0}".format(body["task_id"])
+        )
+
+        self.assertEqual(200, failed_status)
+        self.assertEqual("failed", failed_body["status"])
+        self.assertEqual("QMT_ERROR", failed_body["error"]["code"])
+        self.assertIn("too many arguments", failed_body["error"]["message"])
+        self.assertEqual(0, self.state.request_queue.qsize())
+
+    def test_download_history_data_rejects_invalid_or_unordered_params(self):
+        valid = {
+            "stockcode": "600000.SH",
+            "period": "1m",
+            "startTime": "20260701093000",
+            "endTime": "20260701150000",
+        }
+        invalid_params = (
+            {},
+            dict(valid, stockcode="600000"),
+            dict(valid, period="15m"),
+            dict(valid, startTime="2026-07-01"),
+            dict(valid, startTime="20260702", endTime="20260701"),
+            dict(valid, incrementally="yes"),
+            dict(valid, unknown="value"),
+        )
+        for params in invalid_params:
+            status, body = self.request_json("/download_history_data", params)
+            self.assertEqual(400, status)
+            self.assertEqual("INVALID_PARAMS", body["error"]["code"])
+
+        self.assertEqual(0, self.state.request_queue.qsize())
+        self.assertEqual([], self.download_history_calls)
+
+    def test_download_status_remains_available_while_qmt_is_blocked(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_download(*args):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release download")
+
+        self.strategy.download_history_data = blocking_download
+        _, task = self.request_json(
+            "/download_history_data", {"stockcode": "600000.SH", "period": "1d"}
+        )
+        worker = threading.Thread(target=self.context.callback, args=(self.context,))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            status, snapshot = self.request_json(
+                "/get_download_status?task_id=" + task["task_id"]
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("running", snapshot["status"])
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("completed", self.strategy.get_download_task_snapshot(
+            self.state, task["task_id"]
+        )["status"])
+
+    def test_download_ignores_normal_request_deadline_and_stop_fails_queued(self):
+        _, task = self.request_json(
+            "/download_history_data", {"stockcode": "600000.SH", "period": "1d"}
+        )
+        with self.state.request_queue.mutex:
+            job = self.state.request_queue.queue[0]
+            job.deadline = 0
+        self.context.callback(self.context)
+        self.assertEqual("completed", self.strategy.get_download_task_snapshot(
+            self.state, task["task_id"]
+        )["status"])
+        _, queued = self.request_json(
+            "/download_history_data", {"stockcode": "000001.SZ", "period": "1d"}
+        )
+        self.strategy.stop(self.context)
+        snapshot = self.strategy.get_download_task_snapshot(self.state, queued["task_id"])
+        self.assertEqual("failed", snapshot["status"])
+        self.assertEqual("FEED_STOPPING", snapshot["error"]["code"])
+        self.assertEqual(1, len(self.download_history_calls))
+        self.assertEqual(0, self.state.request_queue.unfinished_tasks)
+
+    def test_download_cache_preserves_active_tasks_and_evicts_terminal_tasks(self):
+        self.strategy.MAX_DOWNLOAD_TASKS = 1
+        params = {"stockcode": "600000.SH", "period": "1d"}
+        _, first = self.request_json("/download_history_data", params)
+        status, error = self.request_json("/download_history_data", params)
+        self.assertEqual(429, status)
+        self.assertEqual("DOWNLOAD_TASKS_FULL", error["error"]["code"])
+        self.context.callback(self.context)
+        status, second = self.request_json("/download_history_data", params)
+        self.assertEqual(202, status)
+        self.assertNotEqual(first["task_id"], second["task_id"])
+        self.assertNotIn(first["task_id"], self.state.download_tasks)
+        self.assertEqual(1, len(self.state.download_tasks))
+
+    def test_stop_before_download_enqueue_rejects_without_orphaned_job(self):
+        created = threading.Event()
+        release = threading.Event()
+        original = self.strategy.create_download_task
+
+        def paused_create(state, params):
+            task = original(state, params)
+            created.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release download admission")
+            return task
+
+        with patch.object(self.strategy, "create_download_task", side_effect=paused_create):
+            client, response = self.start_request(
+                "/download_history_data", {"stockcode": "600000.SH", "period": "1d"}
+            )
+            try:
+                self.assertTrue(created.wait(1))
+                self.strategy.stop(self.context)
+            finally:
+                release.set()
+                client.join(2)
+        self.assertFalse(client.is_alive())
+        self.assertEqual(503, response["status"])
+        self.assertEqual("FEED_STOPPING", response["body"]["error"]["code"])
+        self.assertEqual(0, self.state.request_queue.qsize())
+        self.assertEqual(0, self.state.request_queue.unfinished_tasks)
+        self.assertEqual(0, len(self.state.download_tasks))
+        self.assertEqual([], self.download_history_calls)
+
+    def test_request_logs_correlate_download_without_raw_body(self):
+        with patch.object(self.strategy, "log_message") as log:
+            status, task = self.request_json(
+                "/download_history_data", {"stockcode": "600000.SH", "period": "1d"}
+            )
+            self.context.callback(self.context)
+        self.assertEqual(202, status)
+        calls = log.call_args_list
+        received = next(c for c in calls if c.args[1] == "Request received")
+        response = next(c for c in calls if c.args[1] == "Response sent")
+        started = next(c for c in calls if c.args[1] == "Download started")
+        self.assertEqual(received.kwargs["request_id"], response.kwargs["request_id"])
+        self.assertEqual(received.kwargs["request_id"], started.kwargs["request_id"])
+        self.assertEqual(task["task_id"], response.kwargs["task_id"])
+        self.assertEqual(202, response.kwargs["status"])
+        self.assertGreater(response.kwargs["response_bytes"], 0)
+        self.assertGreaterEqual(response.kwargs["elapsed_ms"], 0)
+
+    def test_request_log_redacts_unknown_parameters_and_warns_on_failure(self):
+        with patch.object(self.strategy, "log_message") as log:
+            status, _ = self.request_json("/download_history_data", {
+                "stockcode": "600000.SH", "period": "1d", "password": "secret-value"
+            })
+        self.assertEqual(400, status)
+        self.assertNotIn("secret-value", str(log.call_args_list))
+        response = next(c for c in log.call_args_list if c.args[1] == "Response sent")
+        self.assertEqual("WARNING", response.args[0])
+        self.assertEqual("INVALID_PARAMS", response.kwargs["error_code"])
+
+    def test_successful_status_poll_logs_at_debug(self):
+        _, task = self.request_json("/download_history_data", {
+            "stockcode": "600000.SH", "period": "1d"
+        })
+        with patch.object(self.strategy, "log_message") as log:
+            status, _ = self.request_json("/get_download_status?task_id=" + task["task_id"])
+        self.assertEqual(200, status)
+        self.assertEqual(["DEBUG", "DEBUG"], [c.args[0] for c in log.call_args_list])
+
+    def test_download_history_data_get_is_rejected(self):
+        status, body = self.request_json(
+            "/download_history_data?stockcode=600000.SH&period=1d"
+        )
+
+        self.assertEqual(405, status)
+        self.assertEqual("METHOD_NOT_ALLOWED", body["error"]["code"])
+        self.assertEqual(0, self.state.request_queue.qsize())
+
+    def test_download_status_rejects_unknown_task_without_qmt_dispatch(self):
+        status, body = self.request_json(
+            "/get_download_status?task_id=download-missing"
+        )
+
+        self.assertEqual(404, status)
+        self.assertEqual("DOWNLOAD_TASK_NOT_FOUND", body["error"]["code"])
+        self.assertEqual(0, self.state.request_queue.qsize())
+        self.assertEqual([], self.download_history_calls)
+
+    def test_download_history_data_rolls_back_task_when_queue_is_full(self):
+        request_queue = self.state.request_queue
+        for _ in range(self.strategy.QUEUE_MAX_SIZE):
+            request_queue.put_nowait(
+                self.strategy.RequestJob({"method": "account", "params": {}})
+            )
+
+        status, body = self.request_json(
+            "/download_history_data",
+            {
+                "stockcode": "600000.SH",
+                "period": "1d",
+            },
+        )
+
+        self.assertEqual(429, status)
+        self.assertEqual("QUEUE_FULL", body["error"]["code"])
+        self.assertEqual(0, len(self.state.download_tasks))
+        self.assertEqual([], self.download_history_calls)
 
     def test_get_full_tick_uses_current_schedule_context(self):
         body = {"stock_code": ["600000.SH", "000001.SZ"]}

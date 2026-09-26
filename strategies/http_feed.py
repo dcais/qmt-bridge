@@ -1,11 +1,15 @@
 # -*- coding: gbk -*-
+# Last modified (Asia/Shanghai): 2026-09-26 10:05:45
 
 import datetime as dt
 import json
 import math
+import os
 import queue
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -15,6 +19,10 @@ ACCOUNT_ID = "66027616"
 ACCOUNT_TYPE = "STOCK"
 HTTP_HOST = "127.0.0.1"
 HTTP_PORT = 1688
+LOG_DIRECTORY = os.path.join(os.path.expanduser("~"), "qmt-bridge", "logs")
+LOG_LEVEL = "INFO"
+LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+_LOG_LOCK = threading.Lock()
 QUEUE_MAX_SIZE = 64
 MAX_BODY_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 10
@@ -55,6 +63,8 @@ MAX_LONGHUBANG_JSON_VALUES = 50000
 MAX_QMT_TABLE_ROWS = 1000
 MAX_QMT_TABLE_COLUMNS = 64
 MAX_QMT_TABLE_CELLS = 20000
+MAX_DOWNLOAD_TASKS = 1000
+DOWNLOAD_HISTORY_PERIODS = {"tick", "1m", "5m", "1d"}
 MARKET_DATA_BAR_FIELDS = (
     "time",
     "open",
@@ -168,6 +178,7 @@ MARKET_DATA_DIVIDEND_TYPES = {
     "back_ratio",
 }
 ONE_JOB_PER_TICK_METHODS = {
+    "download_history_data",
     "get_divid_factors",
     "get_full_tick",
     "get_his_index_data",
@@ -199,6 +210,38 @@ _FEED_STATE = None
 _FEED_TIMER_ID = None
 
 
+def log_message(level, message, **fields):
+    """Write the same timestamped record to QMT console and a daily UTF-8 file."""
+    level = str(level).upper()
+    if LOG_LEVELS.get(level, 20) < LOG_LEVELS.get(LOG_LEVEL.upper(), 20):
+        return
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    record = "{0} [{1}] {2}".format(
+        now.strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), message
+    )
+    if fields:
+        record += " " + json.dumps(fields, ensure_ascii=False, default=str)
+    record = record.replace("\r", "\\r").replace("\n", "\\n")
+    with _LOG_LOCK:
+        # Console and file are independent sinks; neither failure aborts QMT work.
+        try:
+            print(record, flush=True)
+        except Exception:
+            pass
+        try:
+            os.makedirs(LOG_DIRECTORY, exist_ok=True)
+            path = os.path.join(LOG_DIRECTORY, "feed-" + now.strftime("%Y-%m-%d") + ".log")
+            with open(path, "a", encoding="utf-8") as log_file:
+                log_file.write(record + "\n")
+        except OSError as exc:
+            try:
+                print("{0} [ERROR] log file write failed: {1}".format(
+                    now.strftime("%Y-%m-%d %H:%M:%S"), exc
+                ), flush=True)
+            except Exception:
+                pass
+
+
 class FeedError(Exception):
     def __init__(self, status, code, message):
         Exception.__init__(self, message)
@@ -218,6 +261,8 @@ class RequestJob:
         self.error_status = 500
         self.batch_state = None
         self.queue_task_pending = False
+        self.download_task_id = None
+        self.request_id = None
 
     def set_error(self, status, code, message):
         self.error_status = status
@@ -231,12 +276,23 @@ class FeedState:
     def __init__(self):
         self.request_queue = queue.Queue(maxsize=QUEUE_MAX_SIZE)
         self.stop_event = threading.Event()
+        self.admission_lock = threading.Lock()
         self.server = None
         self.server_thread = None
         self.last_dispatch_seconds = 0.0
         self.max_dispatch_seconds = 0.0
         self.active_job = None
         self.active_job_lock = threading.Lock()
+        self.download_tasks = OrderedDict()
+        self.download_tasks_lock = threading.Lock()
+
+
+    def enqueue_request(self, job):
+        # 与停止入口共享短锁，禁止队列清空后再入队；锁内不执行 QMT 或 HTTP I/O。
+        with self.admission_lock:
+            if self.stop_event.is_set():
+                raise FeedError(503, "FEED_STOPPING", "HTTP feed is stopping")
+            self.request_queue.put_nowait(job)
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -247,17 +303,55 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 class FeedRequestHandler(BaseHTTPRequestHandler):
     server_version = "QMTHttpFeed/1.0"
 
+    def _begin_request(self, method):
+        self.request_id = uuid.uuid4().hex
+        self.request_started = time.perf_counter()
+        self.request_method = method or "invalid_path"
+        self.request_logged = False
+        self.request_log_level = "DEBUG" if method == "get_download_status" else "INFO"
+
+    def _record_received(self, params=None):
+        if self.request_logged:
+            return
+        self.request_logged = True
+        summary = {}
+        # Only bounded, known query fields; never account data or arbitrary bodies.
+        for name in ("stockcode", "stock_code", "stock_list", "period", "startTime",
+                     "endTime", "start_time", "end_time", "count", "task_id",
+                     "fields", "incrementally"):
+            value = (params or {}).get(name)
+            if isinstance(value, list):
+                summary[name] = {"count": len(value), "sample": [str(v)[:64] for v in value[:3]]}
+            elif isinstance(value, (str, int, float, bool)):
+                summary[name] = value[:128] if isinstance(value, str) else value
+        log_message(self.request_log_level, "Request received",
+                    request_id=self.request_id, http_method=self.command,
+                    method=self.request_method, params=summary)
+
     def do_GET(self):
         parsed = urlsplit(self.path)
         method = self._method_from_path(parsed.path)
+        self._begin_request(method)
+        self._record_received(self._parse_query_params(parsed.query))
         if method is None:
             self._send_error(404, "NOT_FOUND", "expected /{method}")
+            return
+        if method == "download_history_data":
+            self._send_error(
+                405,
+                "METHOD_NOT_ALLOWED",
+                "download_history_data only accepts POST",
+            )
+            return
+        if method == "get_download_status":
+            self._send_download_status(self._parse_query_params(parsed.query))
             return
         self._submit(method, self._parse_query_params(parsed.query))
 
     def do_POST(self):
         parsed = urlsplit(self.path)
         method = self._method_from_path(parsed.path)
+        self._begin_request(method)
         if method is None:
             self._send_error(404, "NOT_FOUND", "expected /{method}")
             return
@@ -282,6 +376,13 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(params, dict):
             self._send_error(400, "INVALID_PARAMS", "JSON body must be an object")
             return
+        self._record_received(params)
+        if method == "download_history_data":
+            self._submit_download(params)
+            return
+        if method == "get_download_status":
+            self._send_download_status(params)
+            return
         self._submit(method, params)
 
     def log_message(self, format, *args):
@@ -298,8 +399,12 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
             "params": params,
         }
         job = RequestJob(request)
+        job.request_id = self.request_id
         try:
-            state.request_queue.put_nowait(job)
+            state.enqueue_request(job)
+        except FeedError as exc:
+            self._send_error(exc.status, exc.code, exc.message)
+            return
         except queue.Full:
             self._send_error(429, "QUEUE_FULL", "request queue is full")
             return
@@ -317,6 +422,60 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
             self._send_json(job.error_status, {"error": job.error})
             return
         self._send_json(200, job.result)
+
+    def _submit_download(self, params):
+        state = self.server.feed_state
+        if state.stop_event.is_set():
+            self._send_error(503, "FEED_STOPPING", "HTTP feed is stopping")
+            return
+
+        try:
+            normalized = normalize_download_history_params(params)
+            task = create_download_task(state, normalized)
+        except FeedError as exc:
+            self._send_error(exc.status, exc.code, exc.message)
+            return
+
+        job = RequestJob(
+            {
+                "method": "download_history_data",
+                "params": normalized,
+                "task_id": task["task_id"],
+            }
+        )
+        job.deadline = None
+        job.request_id = self.request_id
+        job.download_task_id = task["task_id"]
+        try:
+            state.enqueue_request(job)
+        except FeedError as exc:
+            remove_download_task(state, task["task_id"])
+            self._send_error(exc.status, exc.code, exc.message)
+            return
+        except queue.Full:
+            remove_download_task(state, task["task_id"])
+            self._send_error(429, "QUEUE_FULL", "request queue is full")
+            return
+
+        if state.stop_event.is_set():
+            mark_download_task_failed(
+                state,
+                task["task_id"],
+                "FEED_STOPPING",
+                "HTTP feed is stopping",
+            )
+
+        self._send_json(202, task)
+
+    def _send_download_status(self, params):
+        state = self.server.feed_state
+        try:
+            task_id = normalize_download_task_id(params)
+            task = get_download_task_snapshot(state, task_id)
+        except FeedError as exc:
+            self._send_error(exc.status, exc.code, exc.message)
+            return
+        self._send_json(200, task)
 
     def _method_from_path(self, path):
         parts = [unquote(part) for part in path.split("/") if part]
@@ -346,6 +505,7 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _send_json(self, status, payload):
+        self._record_received()
         body = json.dumps(
             payload,
             ensure_ascii=False,
@@ -360,7 +520,27 @@ class FeedRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            log_message("WARNING", "Client disconnected; response not delivered",
+                        request_id=self.request_id, method=self.request_method,
+                        status=status, elapsed_ms=round((time.perf_counter() - self.request_started) * 1000, 2))
+            return
+        fields = {
+            "request_id": self.request_id, "method": self.request_method,
+            "status": status, "response_bytes": len(body),
+            "elapsed_ms": round((time.perf_counter() - self.request_started) * 1000, 2),
+        }
+        if isinstance(payload, dict):
+            if "task_id" in payload:
+                fields["task_id"] = payload["task_id"]
+            error = payload.get("error")
+            if isinstance(error, dict):
+                fields["error_code"] = error.get("code")
+                fields["error_message"] = str(error.get("message", ""))[:512]
+        if status >= 400:
+            fields["queue_size"] = self.server.feed_state.request_queue.qsize()
+        level = ("WARNING" if status in (429, 503, 504) or 400 <= status < 500
+                 else "ERROR" if status >= 500 else self.request_log_level)
+        log_message(level, "Response sent", **fields)
 
 
 def account_to_dict(account):
@@ -426,6 +606,233 @@ def normalize_boolean(value, name, default):
         400,
         "INVALID_PARAMS",
         "{0} must be true or false".format(name),
+    )
+
+
+def normalize_download_history_time(value, name):
+    if value is None:
+        return "", None
+    if not isinstance(value, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a string".format(name),
+        )
+    value = value.strip()
+    if not value:
+        return "", None
+    if (
+        len(value) not in (8, 14)
+        or not all("0" <= char <= "9" for char in value)
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must use YYYYMMDD or YYYYMMDDHHMMSS".format(name),
+        )
+    date_format = "%Y%m%d" if len(value) == 8 else "%Y%m%d%H%M%S"
+    try:
+        parsed = dt.datetime.strptime(value, date_format)
+    except ValueError:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "{0} must be a valid date or datetime".format(name),
+        )
+    return value, parsed
+
+
+def normalize_download_history_params(params):
+    allowed_params = {
+        "stockcode",
+        "period",
+        "startTime",
+        "endTime",
+        "incrementally",
+    }
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported download history params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+
+    stockcode = normalize_stockcode(params.get("stockcode"))
+    if stockcode is None:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "stockcode must use stock.market format",
+        )
+
+    period = params.get("period")
+    if not isinstance(period, str):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "period must be tick, 1m, 5m, or 1d",
+        )
+    period = period.strip()
+    if period not in DOWNLOAD_HISTORY_PERIODS:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "period must be tick, 1m, 5m, or 1d",
+        )
+
+    start_time, start_value = normalize_download_history_time(
+        params.get("startTime"),
+        "startTime",
+    )
+    end_time, end_value = normalize_download_history_time(
+        params.get("endTime"),
+        "endTime",
+    )
+    if (
+        start_value is not None
+        and end_value is not None
+        and start_value > end_value
+    ):
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "startTime must not be after endTime",
+        )
+
+    normalized = {
+        "stockcode": stockcode,
+        "period": period,
+        "startTime": start_time,
+        "endTime": end_time,
+    }
+    if "incrementally" in params:
+        incrementally = params.get("incrementally")
+        if incrementally is not None:
+            incrementally = normalize_boolean(
+                incrementally,
+                "incrementally",
+                False,
+            )
+        normalized["incrementally"] = incrementally
+    return normalized
+
+
+def normalize_download_task_id(params):
+    allowed_params = {"task_id"}
+    unknown_params = set(params) - allowed_params
+    if unknown_params:
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "unsupported download status params: {0}".format(
+                ",".join(sorted(unknown_params))
+            ),
+        )
+    task_id = params.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise FeedError(
+            400,
+            "INVALID_PARAMS",
+            "task_id must be a non-empty string",
+        )
+    return task_id.strip()
+
+
+def download_task_public(task):
+    public = {
+        "task_id": task["task_id"],
+        "status": task["status"],
+        "stockcode": task["stockcode"],
+        "period": task["period"],
+        "startTime": task["startTime"],
+        "endTime": task["endTime"],
+        "created_at": task["created_at"],
+        "updated_at": task["updated_at"],
+        "message": task["message"],
+    }
+    if "incrementally" in task:
+        public["incrementally"] = task["incrementally"]
+    if task["error"] is not None:
+        public["error"] = dict(task["error"])
+    return public
+
+
+def create_download_task(state, params):
+    with state.download_tasks_lock:
+        while len(state.download_tasks) >= MAX_DOWNLOAD_TASKS:
+            evicted = False
+            for task_id, task in list(state.download_tasks.items()):
+                if task["status"] in ("completed", "failed"):
+                    del state.download_tasks[task_id]
+                    evicted = True
+                    break
+            if not evicted:
+                raise FeedError(
+                    429,
+                    "DOWNLOAD_TASKS_FULL",
+                    "download task cache is full",
+                )
+
+        task_id = "download-{0}".format(uuid.uuid4().hex)
+        now = time.time()
+        task = {
+            "task_id": task_id,
+            "status": "queued",
+            "stockcode": params["stockcode"],
+            "period": params["period"],
+            "startTime": params["startTime"],
+            "endTime": params["endTime"],
+            "created_at": now,
+            "updated_at": now,
+            "message": "queued",
+            "error": None,
+        }
+        if "incrementally" in params:
+            task["incrementally"] = params["incrementally"]
+        state.download_tasks[task_id] = task
+        return download_task_public(task)
+
+
+def remove_download_task(state, task_id):
+    with state.download_tasks_lock:
+        state.download_tasks.pop(task_id, None)
+
+
+def update_download_task(state, task_id, status, message, error=None):
+    with state.download_tasks_lock:
+        task = state.download_tasks.get(task_id)
+        if task is None:
+            return None
+        task["status"] = status
+        task["updated_at"] = time.time()
+        task["message"] = message
+        task["error"] = error
+        state.download_tasks.move_to_end(task_id)
+        return download_task_public(task)
+
+
+def get_download_task_snapshot(state, task_id):
+    with state.download_tasks_lock:
+        task = state.download_tasks.get(task_id)
+        if task is None:
+            raise FeedError(
+                404,
+                "DOWNLOAD_TASK_NOT_FOUND",
+                "download task was not found",
+            )
+        return download_task_public(task)
+
+
+def mark_download_task_failed(state, task_id, code, message):
+    return update_download_task(
+        state,
+        task_id,
+        "failed",
+        message,
+        {"code": code, "message": message},
     )
 
 
@@ -1988,6 +2395,53 @@ def handle_get_financial_data(ContextInfo, params):
     )
 
 
+def handle_download_history_data(state, request, request_id=None):
+    params = request.get("params")
+    task_id = request.get("task_id")
+    if task_id is None:
+        raise FeedError(500, "INVALID_REQUEST", "download task_id is required")
+    log_fields = dict(params, task_id=task_id, request_id=request_id)
+
+    update_download_task(
+        state,
+        task_id,
+        "running",
+        "download_history_data is running",
+    )
+    log_message("INFO", "Download started", **log_fields)
+    try:
+        kwargs = {}
+        if "incrementally" in params:
+            kwargs["incrementally"] = params["incrementally"]
+        download_history_data(
+            params["stockcode"],
+            params["period"],
+            params["startTime"],
+            params["endTime"],
+            **kwargs,
+        )
+    except FeedError as exc:
+        log_message("ERROR", "Download failed", error=str(exc), **log_fields)
+        raise
+    except Exception as exc:
+        log_message("ERROR", "Download failed", error=str(exc), **log_fields)
+        mark_download_task_failed(
+            state,
+            task_id,
+            "QMT_ERROR",
+            str(exc),
+        )
+        return
+
+    update_download_task(
+        state,
+        task_id,
+        "completed",
+        "download_history_data returned; data coverage was not verified",
+    )
+    log_message("INFO", "Download completed; QMT returned, coverage not verified", **log_fields)
+
+
 def dispatch_request(ContextInfo, request):
     method = request.get("method")
     params = request.get("params")
@@ -2062,7 +2516,9 @@ def process_http_requests(ContextInfo):
         dispatch_started_at = time.perf_counter()
         job_complete = True
         try:
-            if job.expired or time.time() >= job.deadline:
+            if job.request.get("method") == "download_history_data":
+                handle_download_history_data(state, job.request, job.request_id)
+            elif job.expired or time.time() >= job.deadline:
                 job.set_error(
                     504,
                     "REQUEST_EXPIRED",
@@ -2074,9 +2530,29 @@ def process_http_requests(ContextInfo):
                 job.result = dispatch_request(ContextInfo, job.request)
         except FeedError as exc:
             job.set_error(exc.status, exc.code, exc.message)
+            if job.download_task_id is not None:
+                mark_download_task_failed(
+                    state,
+                    job.download_task_id,
+                    exc.code,
+                    exc.message,
+                )
         except Exception as exc:
             job.set_error(500, "QMT_ERROR", str(exc))
+            if job.download_task_id is not None:
+                mark_download_task_failed(
+                    state,
+                    job.download_task_id,
+                    "QMT_ERROR",
+                    str(exc),
+                )
         finally:
+            if job.error is not None:
+                log_message("ERROR" if job.error_status == 500 else "WARNING",
+                            "QMT request failed", request_id=job.request_id,
+                            method=job.request.get("method"),
+                            error_code=job.error["code"],
+                            error_message=str(job.error["message"])[:512])
             dispatch_seconds = time.perf_counter() - dispatch_started_at
             state.last_dispatch_seconds = dispatch_seconds
             state.max_dispatch_seconds = max(
@@ -2154,7 +2630,8 @@ def init(ContextInfo):
         _FEED_TIMER_ID = None
         raise
 
-    print(
+    log_message(
+        "INFO",
         "QMT HTTP feed listening on http://{0}:{1}/{{method}}".format(
             HTTP_HOST,
             server.server_address[1],
@@ -2172,7 +2649,15 @@ def stop(ContextInfo):
 
     state = _FEED_STATE
     if state is not None:
-        state.stop_event.set()
+        with state.admission_lock:
+            state.stop_event.set()
+        with state.download_tasks_lock:
+            unfinished_downloads = sum(
+                task["status"] in ("queued", "running")
+                for task in state.download_tasks.values()
+            )
+        log_message("INFO", "Feed stopping", queued_requests=state.request_queue.qsize(),
+                    unfinished_downloads=unfinished_downloads)
 
     timer_id = _FEED_TIMER_ID
     if timer_id is not None:
@@ -2186,6 +2671,13 @@ def stop(ContextInfo):
         active_job = state.active_job
         state.active_job = None
     if active_job is not None:
+        if active_job.download_task_id is not None:
+            mark_download_task_failed(
+                state,
+                active_job.download_task_id,
+                "FEED_STOPPING",
+                "HTTP feed is stopping",
+            )
         active_job.set_error(
             503,
             "FEED_STOPPING",
@@ -2198,6 +2690,13 @@ def stop(ContextInfo):
             job = state.request_queue.get_nowait()
         except queue.Empty:
             break
+        if job.download_task_id is not None:
+            mark_download_task_failed(
+                state,
+                job.download_task_id,
+                "FEED_STOPPING",
+                "HTTP feed is stopping",
+            )
         job.set_error(503, "FEED_STOPPING", "HTTP feed is stopping")
         job.done.set()
         state.request_queue.task_done()
