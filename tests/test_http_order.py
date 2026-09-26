@@ -32,6 +32,13 @@ def ephemeral_listener(module):
                         side_effect=lambda address, handler: server_class((address[0], 0), handler))
 
 
+def stop_strategy(module, context):
+    state = module._ORDER_STATE
+    module.stop(context)
+    if state is not None and not state.cleanup_done.wait(3):
+        raise AssertionError('ORDER background cleanup did not complete')
+
+
 class OrderTests(unittest.TestCase):
     def setUp(self):
         self.m = load_strategy()
@@ -147,6 +154,9 @@ class OrderTests(unittest.TestCase):
         with ephemeral_listener(self.m):
             with self.assertRaises(RuntimeError):
                 self.m.init(context)
+        state = self.m._ORDER_STATE
+        if state is not None:
+            self.assertTrue(state.cleanup_done.wait(3))
         self.assertIsNone(self.m._ORDER_STATE)
         self.assertIsNone(self.m._ORDER_TIMER_ID)
 
@@ -163,8 +173,61 @@ class OrderTests(unittest.TestCase):
         self.m.process_http_requests(None)
         self.assertTrue(jobs[-1].done.is_set())
 
+    def test_budget_includes_runtime_and_next_tick_serves_waiting_query(self):
+        state = self.m._ORDER_STATE = self.m.OrderState()
+        state.settings = self.m.runtime_schedule_settings({'schedule_budget_ms': 50})
+        clock = [100.0]
+        class Runtime:
+            def tick(self, **kwargs):
+                clock[0] += 0.06  # 模拟不可打断的同步 QMT 调用超过本轮预算。
+                return 1
+        state.runtime = Runtime()
+        job = self.m.RequestJob({'method': 'positions', 'params': {}})
+        job.deadline = 200
+        state.request_queue.put(job)
+        self.m.get_trade_detail_data = Mock(return_value=[])
+        with patch.object(self.m.time, 'monotonic', side_effect=lambda: clock[0]):
+            self.m.process_http_requests(None)
+            self.assertFalse(job.done.is_set())
+            self.m.get_trade_detail_data.assert_not_called()
+            self.m.process_http_requests(None)
+        self.assertTrue(job.done.is_set())
+        self.m.get_trade_detail_data.assert_called_once()
+        self.assertGreaterEqual(state.scheduler_metrics['last_tick_ms'], 50)
+
 
 class RuntimeParameterTests(unittest.TestCase):
+    def test_batch_settings_defaults_priority_and_validation(self):
+        module = load_strategy()
+        defaults = {'submit_batch_size': 10, 'cancel_batch_size': 10,
+                    'reconcile_batch_size': 100, 'schedule_budget_ms': 50}
+        self.assertEqual(module.runtime_schedule_settings({}), defaults)
+        for name in defaults:
+            configured = module.runtime_schedule_settings({name.upper(): 8, name: 3.0})
+            self.assertEqual(configured[name], 3)
+            for invalid in (0, -1, True, 1.5, float('nan'), float('inf'), '', '3.5'):
+                with self.assertRaises(ValueError):
+                    module.runtime_schedule_settings({name: invalid, name.upper(): 8})
+
+    def test_batch_settings_panel_injection_is_frozen_at_startup(self):
+        for early in (True, False):
+            values = {'submit_batch_size': 2.0, 'cancel_batch_size': '3',
+                      'reconcile_batch_size': 4, 'schedule_budget_ms': 5}
+            module = load_strategy(values if early else None)
+            if not early:
+                module.__dict__.update(values)
+            context = Mock()
+            with patch.object(module, 'log_message'), ephemeral_listener(module):
+                module.init(context)
+                try:
+                    expected = {name: int(value) for name, value in values.items()}
+                    self.assertEqual(module._ORDER_STATE.settings, expected)
+                    module.__dict__.update({name: 99 for name in values})
+                    self.assertEqual(module._ORDER_STATE.settings, expected)
+                    self.assertEqual(module._ORDER_STATE.runtime.settings, expected)
+                finally:
+                    stop_strategy(module, context)
+
     def test_screenshot_lowercase_parameters_and_startup_log(self):
         for early in (True, False):
             with self.subTest(early=early):
@@ -182,12 +245,14 @@ class RuntimeParameterTests(unittest.TestCase):
                         context.set_account.assert_called_once_with('8890763409')
                         actual_port = module._ORDER_STATE.server.server_address[1]
                         log.assert_called_with('INFO', 'QMT HTTP order listening',
-                                               host='127.0.0.1', port=actual_port, account_id='8890763409')
+                                               host='127.0.0.1', port=actual_port, account_id='8890763409',
+                                               submit_batch_size=10, cancel_batch_size=10,
+                                               reconcile_batch_size=100, schedule_budget_ms=50)
                         module.get_trade_detail_data = Mock(return_value=[])
                         module.dispatch_request(None, {'method': 'positions', 'params': {}})
                         module.get_trade_detail_data.assert_called_with('8890763409', 'STOCK', 'position')
                     finally:
-                        module.stop(context)
+                        stop_strategy(module, context)
 
     def test_invalid_lowercase_does_not_fall_back(self):
         for values in ({'account_id': ''}, {'http_port': 0}):
@@ -239,7 +304,7 @@ class RuntimeParameterTests(unittest.TestCase):
             with ephemeral_listener(module) as factory:
                 module.init(context)
                 factory.assert_called_once_with(('127.0.0.1', int(port)), module.OrderRequestHandler)
-            self.addCleanup(module.stop, context)
+            self.addCleanup(stop_strategy, module, context)
             modules.append(module)
             expected = module.runtime_account_id(account)
             context.set_account.assert_called_once_with(expected)
@@ -270,7 +335,7 @@ class HttpOrderTests(unittest.TestCase):
         self.m.init(self.context)
         self.state = self.m._ORDER_STATE
         self.base = 'http://127.0.0.1:{0}'.format(self.state.server.server_address[1])
-        self.addCleanup(self.m.stop, self.context)
+        self.addCleanup(stop_strategy, self.m, self.context)
 
     def request(self, path, body=None, method=None):
         request = urllib.request.Request(self.base + path, data=body, method=method,
@@ -357,7 +422,40 @@ class HttpOrderTests(unittest.TestCase):
         worker.join(3)
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0][0], 503)
+        self.assertTrue(self.state.cleanup_done.wait(3))
         self.assertFalse(self.state.server_thread.is_alive())
+
+    def test_blocked_logger_does_not_block_qmt_or_hide_stopping_health(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        self.state.logger.request_stop()
+        self.assertTrue(self.state.logger.join(2))
+
+        def sink(record):
+            entered.set()
+            release.wait(3)
+
+        logger = self.m.AsyncOrderLogger('unused', sink=sink)
+        self.state.logger = self.state.runtime.logger = self.m._ORDER_LOGGER = logger
+        logger.start()
+        logger('INFO', 'hold sink')
+        self.assertTrue(entered.wait(1))
+        self.m.get_trade_detail_data = Mock(return_value=[])
+        began = time.monotonic()
+        self.assertEqual(self.scheduled_request('/positions'), (200, []))
+        self.assertLess(time.monotonic() - began, .5)
+        began = time.monotonic()
+        self.m.stop(self.context)
+        self.assertLess(time.monotonic() - began, .1)
+        self.assertFalse(self.state.cleanup_done.is_set())
+        status, health = self.request('/health')
+        self.assertEqual(status, 200)
+        self.assertEqual(health['http_lifecycle'], 'STOPPING')
+        self.assertTrue(health['http_running'])
+        self.assertFalse(health['accepting_orders'])
+        self.assertIs(self.m._ORDER_STATE, self.state)
+        release.set()
+        self.assertTrue(self.state.cleanup_done.wait(3))
 
 
 if __name__ == '__main__':

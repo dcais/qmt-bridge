@@ -5,14 +5,17 @@ import json
 import re
 import threading
 import uuid
+from datetime import timedelta
 
 from .common import (OrderError, copy_json, fingerprint, iso_datetime,
                      json_text, new_order_document, parse_timestamp, utc_now)
 from .state import (apply_cancel_request, apply_observation, cancel_response,
-                    is_order_active, observation_identifiers, recompute_order)
+                    is_order_active, observation_identifiers, pending_cancellations,
+                    reconcile_pending, recompute_order, mark_reconciled)
 
 
-repo_SCHEMA_VERSION = 1
+repo_SCHEMA_VERSION = 2
+repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
                      "qmt_orders": "qmt_orders", "fills": "fills"}
@@ -47,6 +50,7 @@ class PostgresRepository(object):
         self.repo_executor_instance = None
         self.repo_executor_lost = False
         self.repo_executor_mutex = threading.RLock()
+        self.repo_pending_cursor = 0
         # PostgreSQL advisory lock 本身已隔离数据库，不把可别名的连接参数混入锁键。
         lock_scope = [config.get("pg_schema", "qmt_order"),
                       self.account_type, self.account_id]
@@ -118,7 +122,9 @@ class PostgresRepository(object):
             required = {
                 "schema_version": ("version",),
                 "account_runtime": ("account_type", "account_id", "event_seq", "executor_host", "executor_instance", "executor_epoch"),
-                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document"),
+                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document",
+                           "submission_status", "cancel_ready", "reconcile_pending", "reconcile_priority", "reconcile_due_at",
+                           "last_reconcile_attempt_at", "last_reconciled_at", "fact_version", "created_at"),
                 "order_events": ("account_type", "account_id", "event_seq", "order_id", "event_type", "occurred_at", "document"),
                 "qmt_observations": ("observation_id", "account_type", "account_id", "kind", "source", "observed_at", "raw", "order_id", "applied", "observation_hash"),
             }
@@ -153,12 +159,14 @@ class PostgresRepository(object):
 
     def health(self):
         result = self.check_schema()
-        result["executor"] = self.check_executor() if self.repo_executor is not None else False
+        # 健康请求可能从 HTTP/DB 线程发起；专用 advisory 会话仅由后台所有者检查。
+        result["executor"] = self.repo_executor is not None and not self.repo_executor_lost
         def unknown_count(cur):
-            cur.execute("SELECT count(*) FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'submission_status'='UNKNOWN'", self.repo_scope)
-            return cur.fetchone()[0]
-        result["unknown_order_count"] = self.repo_run(unknown_count)
+            cur.execute("SELECT count(*) FILTER (WHERE submission_status='UNKNOWN'),"
+                        "count(*) FILTER (WHERE reconcile_pending) FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            return cur.fetchone()
+        result["unknown_order_count"], result["pending_count"] = self.repo_run(unknown_count)
         return result
 
     def acquire_executor(self, instance_id, host_id):
@@ -247,15 +255,39 @@ class PostgresRepository(object):
             raise OrderError(404, "ORDER_NOT_FOUND", "order not found")
         return doc
 
-    def repo_save(self, cur, doc, event_type, fresh=False):
+    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None):
+        doc.setdefault("fact_version", 0)
+        doc.setdefault("last_reconcile_attempt_at", None)
+        doc.setdefault("reconcile_due_at", repo_EPOCH)
+        doc.setdefault("reconcile_priority", False)
+        doc.setdefault("reconcile_requested", False)
+        doc["reconcile_pending"] = reconcile_pending(doc)
+        if event_type in ("QMT_OBSERVATION", "MANUAL_UNKNOWN_RESOLUTION", "RECONCILE_GAP"):
+            # fact_version 是外部异步事实代次；本轮 QMT 查询归并只改变普通文档版本。
+            if event_type != "QMT_OBSERVATION" or fact_source not in ("query", "history"):
+                doc["fact_version"] += 1
+            doc["reconcile_requested"] = True
+            doc["reconcile_pending"] = True
+            doc["reconcile_priority"] = True
+            doc["reconcile_due_at"] = repo_EPOCH
         if not fresh:
             doc["version"] = int(doc.get("version", 0)) + 1
         doc["updated_at"] = iso_datetime()
+        cancel_ready = bool(pending_cancellations(doc))
         cur.execute("INSERT INTO " + self.repo_s + ".orders(account_type,account_id,order_id,client_order_id,request_hash,"
-                    "remark,active,document) VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) "
-                    "ON CONFLICT(account_type,account_id,order_id) DO UPDATE SET active=EXCLUDED.active,document=EXCLUDED.document",
+                    "remark,active,document,submission_status,cancel_ready,reconcile_pending,reconcile_priority,reconcile_due_at,"
+                    "last_reconcile_attempt_at,last_reconciled_at,fact_version,created_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT(account_type,account_id,order_id) DO UPDATE SET active=EXCLUDED.active,document=EXCLUDED.document,"
+                    "submission_status=EXCLUDED.submission_status,cancel_ready=EXCLUDED.cancel_ready,"
+                    "reconcile_pending=EXCLUDED.reconcile_pending,reconcile_priority=EXCLUDED.reconcile_priority,"
+                    "reconcile_due_at=EXCLUDED.reconcile_due_at,last_reconcile_attempt_at=EXCLUDED.last_reconcile_attempt_at,"
+                    "last_reconciled_at=EXCLUDED.last_reconciled_at,fact_version=EXCLUDED.fact_version",
                     self.repo_scope + (doc["order_id"], doc["client_order_id"], doc["request_hash"], doc["remark"],
-                                       is_order_active(doc), json_text(doc)))
+                                       is_order_active(doc), json_text(doc), doc["submission_status"], cancel_ready,
+                                       bool(doc["reconcile_pending"]), bool(doc["reconcile_priority"]), doc["reconcile_due_at"],
+                                       doc["last_reconcile_attempt_at"], doc.get("last_reconciled_at"), doc["fact_version"],
+                                       doc["created_at"]))
         for table, field in repo_CHILD_TABLES.items():
             cur.execute("DELETE FROM " + self.repo_s + "." + table +
                         " WHERE account_type=%s AND account_id=%s AND order_id=%s", self.repo_scope + (doc["order_id"],))
@@ -304,13 +336,18 @@ class PostgresRepository(object):
             return self.repo_save(cur, doc, event_type) if json_text(doc) != before else doc
         return self.repo_run(update, mutation=True)
 
-    def claim_submission(self, order_id):
-        self.check_executor()
-        def claim(cur):
+    def claim_submission(self, order_id, authority=None):
+        if authority is None:
+            # 仅供后台执行权所有者沿用；跨线程必须显式传入冻结授权。
             self.check_executor()
+            authority = (self.repo_executor_instance, self.repo_executor_epoch)
+        elif isinstance(authority, dict):
+            authority = (authority.get("instance_id"), authority.get("epoch"))
+        authority = tuple(authority)
+        def claim(cur):
             cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
                         ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
-            if tuple(cur.fetchone()) != (self.repo_executor_instance, self.repo_executor_epoch):
+            if tuple(cur.fetchone()) != authority:
                 raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
             doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
             if doc["submission_status"] != "QUEUED" or doc.get("cancel_requested"):
@@ -321,8 +358,30 @@ class PostgresRepository(object):
             doc["submission_status"] = "SUBMITTING"
             doc["attempts"].append({"attempt_id": str(uuid.uuid4()), "kind": "SUBMIT", "remark": doc["remark"],
                                     "status": "CALLING", "created_at": iso_datetime(),
-                                    "executor_epoch": self.repo_executor_epoch})
+                                    "executor_epoch": authority[1]})
             return True, self.repo_save(cur, doc, "SUBMISSION_CLAIMED")
+        return self.repo_run(claim, mutation=True)
+
+    def claim_cancel(self, order_id, action, authority):
+        """持久化一次撤单调用意图，同时核验执行代次和仍可执行的目标。"""
+        if isinstance(authority, dict):
+            authority = (authority.get("instance_id"), authority.get("epoch"))
+        authority = tuple(authority)
+        def claim(cur):
+            cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
+                        ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            if tuple(cur.fetchone()) != authority:
+                raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
+            doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
+            keys = ("kind", "target_id", "cancel_request_id")
+            candidate = next((row for row in pending_cancellations(doc)
+                              if all(str(row.get(key)) == str(action.get(key)) for key in keys)), None)
+            if candidate is None:
+                return False, doc
+            attempt = dict(candidate, attempt_id=str(action.get("attempt_id") or uuid.uuid4()),
+                           status="CALLING", created_at=iso_datetime(), executor_epoch=authority[1])
+            doc["attempts"].append(attempt)
+            return True, self.repo_save(cur, doc, "CANCEL_CLAIMED")
         return self.repo_run(claim, mutation=True)
 
     def request_cancel(self, normalized):
@@ -384,34 +443,150 @@ class PostgresRepository(object):
     def work_orders(self, limit=100):
         return self.list_orders(active=True, limit=limit)["orders"]
 
-    def queued_orders(self, limit=10):
+    def queued_orders(self, limit=10, cursor=None):
         def listing(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'submission_status'='QUEUED' ORDER BY document->>'created_at',order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND submission_status='QUEUED'" + after + " ORDER BY order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
 
-    def cancellation_orders(self, limit=100):
+    def cancellation_orders(self, limit=100, cursor=None):
         def listing(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'cancel_requested'='true' AND document->>'cancel_status' "
-                        "NOT IN ('CONFIRMED','NOT_NEEDED','REJECTED') "
-                        "ORDER BY CASE document->>'cancel_status' WHEN 'REQUESTED' THEN 0 "
-                        "WHEN 'UNKNOWN' THEN 2 ELSE 1 END,"
-                        "COALESCE(document->>'last_reconciled_at',''),order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND cancel_ready=true" + after + " ORDER BY order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
 
-    def reconcile_orders(self, limit=1000):
-        # 历史终态也可能迟到成交；按最后核对时间轮转避免首页永久饥饿。
+    def reconcile_orders(self, limit=100, cursor=None, due_before=None):
+        """候选只读页；cursor 为 (优先标志,最近尝试时间,order_id)。"""
         def listing(cur):
+            params = self.repo_scope + (due_before or iso_datetime(),)
+            after = ""
+            if cursor:
+                after = " AND (NOT reconcile_priority,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id)>(%s,%s::timestamptz,%s)"
+                params += (not cursor[0], cursor[1] or repo_EPOCH, cursor[2])
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "ORDER BY COALESCE(document->>'last_reconciled_at',''),order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND reconcile_pending=true AND reconcile_due_at<=%s" + after +
+                        " ORDER BY reconcile_priority DESC,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
+
+    def reconcile_history_start(self):
+        def read(cur):
+            cur.execute("SELECT min(created_at) FROM " + self.repo_s + ".orders "
+                        "WHERE account_type=%s AND account_id=%s AND reconcile_pending=true", self.repo_scope)
+            value = cur.fetchone()[0]
+            return iso_datetime(value) if value else None
+        return self.repo_run(read)
+
+    def begin_reconcile_batch(self, limit=100, round_id=None, cursor=None):
+        """同一轮只选一次订单，逐单记录尝试；后续批次共用外部 QMT 快照。"""
+        if not round_id:
+            raise ValueError("round_id is required")
+        limit = max(1, min(int(limit), 1000))
+        def begin(cur):
+            params = self.repo_scope + (iso_datetime(), str(round_id))
+            after = ""
+            if cursor:
+                after = " AND (NOT reconcile_priority,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id)>(%s,%s::timestamptz,%s)"
+                params += (not cursor[0], cursor[1] or repo_EPOCH, cursor[2])
+            cur.execute("SELECT order_id,document,last_reconcile_attempt_at,reconcile_priority FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s AND reconcile_pending=true "
+                        "AND reconcile_due_at<=%s AND document->>'last_reconcile_round' IS DISTINCT FROM %s" + after +
+                        " ORDER BY reconcile_priority DESC,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id LIMIT %s FOR UPDATE",
+                        params + (limit + 1,))
+            rows = cur.fetchall()
+            selected = rows[:limit]
+            stamp = iso_datetime()
+            docs = []
+            for order_id, raw, unused, priority in selected:
+                doc = repo_json(raw)
+                doc["last_reconcile_round"] = str(round_id)
+                doc["reconcile_round_fact_version"] = int(doc.get("fact_version", 0))
+                doc["last_reconcile_attempt_at"] = stamp
+                # 选中的订单至少在本轮归并结束前不会再次进入首页。
+                doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+                doc["reconcile_priority"] = False
+                self.repo_save(cur, doc, "RECONCILE_ATTEMPT")
+                docs.append(doc)
+            next_cursor = None
+            if len(rows) > limit and selected:
+                last = selected[-1]
+                next_cursor = [last[3], iso_datetime(last[2]) if last[2] else None, last[0]]
+            return {"orders": docs, "next_cursor": next_cursor, "has_more": len(rows) > limit}
+        return self.repo_run(begin, mutation=True)
+
+    def reconcile_round_batch(self, round_id, limit=100, cursor=None):
+        """查询后按冻结轮次有界取单，携带查询前的逐单事实代次。"""
+        limit = max(1, min(int(limit), 1000))
+        def listing(cur):
+            params = self.repo_scope + (str(round_id),)
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
+            cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
+                        "AND document->>'last_reconcile_round'=%s" + after + " ORDER BY order_id LIMIT %s",
+                        params + (limit + 1,))
+            docs = [repo_json(row[0]) for row in cur.fetchall()]
+            return {"orders": docs[:limit], "next_cursor": docs[limit - 1]["order_id"] if len(docs) > limit else None,
+                    "has_more": len(docs) > limit}
+        return self.repo_run(listing)
+
+    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None):
+        """旧快照只能记录尝试，不能清除其后回报/缺口设下的门闩。"""
+        def finish(cur):
+            doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
+            if int(doc.get("fact_version", 0)) != int(expected_fact_version):
+                return False
+            mark_reconciled(doc, complete=complete, now=stamp)
+            doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+            doc["reconcile_priority"] = False
+            self.repo_save(cur, doc, "RECONCILE_FINISHED")
+            return True
+        return self.repo_run(finish, mutation=True)
+
+    def mark_reconcile_gap(self, since, limit=100, cursor=None):
+        """按 order_id 有界重开进入过 QMT 的记录，包括已退出的终态。"""
+        since = since if isinstance(since, str) else iso_datetime(since)
+        limit = max(1, min(int(limit), 1000))
+        def mark(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
+            cur.execute("SELECT order_id,document FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s "
+                        "AND (submission_status NOT IN ('QUEUED','CANCELLED_LOCAL','EXPIRED','REJECTED') "
+                        "OR document->'qmt_orders'<>'[]'::jsonb OR document->'qmt_tasks'<>'[]'::jsonb "
+                        "OR document->'fills'<>'[]'::jsonb)" + after + " ORDER BY order_id LIMIT %s FOR UPDATE",
+                        params + (limit + 1,))
+            rows = cur.fetchall()
+            for order_id, raw in rows[:limit]:
+                doc = repo_json(raw)
+                if doc.get("last_reconcile_gap_since") == since:
+                    continue
+                doc["last_reconcile_gap_since"] = since
+                doc["reconcile_requested"] = True
+                self.repo_save(cur, doc, "RECONCILE_GAP")
+            has_more = len(rows) > limit
+            return {"marked": len(rows[:limit]), "next_cursor": rows[limit - 1][0] if has_more else None,
+                    "has_more": has_more}
+        return self.repo_run(mark, mutation=True)
 
     def repo_match(self, cur, kind, raw):
         identifiers = observation_identifiers(kind, raw)
@@ -446,28 +621,35 @@ class PostgresRepository(object):
             return doc
         return None
 
-    def repo_apply_pending(self, cur):
+    def repo_apply_pending(self, cur, limit=100):
+        limit = max(1, min(int(limit), 1000))
         cur.execute("SELECT observation_id,kind,raw,source,observed_at FROM " + self.repo_s +
-                    ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false ORDER BY observation_id",
-                    self.repo_scope)
+                    ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false "
+                    "AND observation_id>%s ORDER BY observation_id LIMIT %s",
+                    self.repo_scope + (self.repo_pending_cursor, limit))
         rows = cur.fetchall()
-        # 新父记录可能建立关联，重复扫到固定点后停止。
-        while rows:
-            remaining = []
-            for row in rows:
-                doc = self.repo_match(cur, row[1], repo_json(row[2]))
-                if doc is None:
-                    remaining.append(row)
-                    continue
-                before = json_text(doc)
-                apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
-                if json_text(doc) != before:
-                    self.repo_save(cur, doc, "QMT_OBSERVATION")
-                cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
-                            (doc["order_id"], row[0]))
-            if len(remaining) == len(rows):
-                break
-            rows = remaining
+        if not rows and self.repo_pending_cursor:
+            self.repo_pending_cursor = 0
+            cur.execute("SELECT observation_id,kind,raw,source,observed_at FROM " + self.repo_s +
+                        ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false "
+                        "ORDER BY observation_id LIMIT %s", self.repo_scope + (limit,))
+            rows = cur.fetchall()
+        for row in rows:
+            doc = self.repo_match(cur, row[1], repo_json(row[2]))
+            if doc is None:
+                continue
+            before = json_text(doc)
+            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
+            if json_text(doc) != before:
+                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=row[3])
+            cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
+                        (doc["order_id"], row[0]))
+        if rows:
+            self.repo_pending_cursor = rows[-1][0]
+        return len(rows)
+
+    def replay_pending_observations(self, limit=100):
+        return self.repo_run(lambda cur: self.repo_apply_pending(cur, limit), mutation=True)
 
     def ingest_observation(self, kind, raw, source="callback"):
         def ingest(cur):
@@ -489,7 +671,7 @@ class PostgresRepository(object):
             identities_before = self.repo_qmt_identities(doc)
             apply_observation(doc, kind, raw, source, observed_at=stamp)
             if json_text(doc) != before:
-                self.repo_save(cur, doc, "QMT_OBSERVATION")
+                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
             cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
                         (doc["order_id"], obs_id))
             # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
@@ -503,16 +685,35 @@ class PostgresRepository(object):
                 for collection, field in (("qmt_orders", "qmt_order_id"), ("qmt_tasks", "qmt_task_id"))
                 for row in doc.get(collection, [])}
 
-    def recover(self):
-        self.check_executor()
+    def recover(self, limit=100, cursor=None, authority=None):
+        if authority is None:
+            self.check_executor()
+        limit = max(1, min(int(limit), 1000))
         def recovery(cur):
+            if authority is not None:
+                expected = (authority.get("instance_id"), authority.get("epoch")) if isinstance(authority, dict) else tuple(authority)
+                cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
+                            ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
+                if tuple(cur.fetchone()) != expected:
+                    raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "ORDER BY order_id FOR UPDATE", self.repo_scope)
+                        + after + " ORDER BY order_id LIMIT %s FOR UPDATE", params + (limit + 1,))
             docs = [repo_json(row[0]) for row in cur.fetchall()]
             count = 0
-            for doc in docs:
+            for doc in docs[:limit]:
                 before = json_text(doc)
                 submitting = doc["submission_status"] == "SUBMITTING"
+                if (doc["submission_status"] == "QUEUED" and doc.get("order_type") == "BASKET"
+                        and doc.get("resolved_request")):
+                    # 崩溃可能发生在 set_basket 成功与阶段落库之间；先读回，再决定是否需要设置。
+                    doc["preparation_stage"] = "BASKET_GET"
+                    doc["preparation_complete"] = False
+                    doc["basket_state"] = "PENDING"
                 if submitting:
                     doc["submission_status"] = "UNKNOWN"
                     doc["sync_status"] = "PENDING"
@@ -522,12 +723,14 @@ class PostgresRepository(object):
                         attempt["status"] = "UNKNOWN"
                         if is_cancel:
                             doc["cancel_status"] = "UNKNOWN"
+                recompute_order(doc)
                 if json_text(doc) != before:
-                    recompute_order(doc)
                     self.repo_save(cur, doc, "EXECUTOR_RECOVERY")
                     count += 1
             self.repo_apply_pending(cur)
-            return {"recovered": count}
+            has_more = len(docs) > limit
+            return {"recovered": count, "next_cursor": docs[limit - 1]["order_id"] if has_more else None,
+                    "has_more": has_more}
         return self.repo_run(recovery, mutation=True)
 
     def lookup_observations(self, order_id, include_unassociated=False):

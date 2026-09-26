@@ -23,6 +23,7 @@ DEFAULT_ACCOUNT_ID = "66027616"
 DEFAULT_HTTP_PORT = 8888
 from .common import OrderError
 from .runtime import OrderRuntime, read_pg_config
+from .async_log import AsyncOrderLogger
 
 try:
     ACCOUNT_ID
@@ -49,38 +50,17 @@ ACCOUNT_TYPES = frozenset((
 ))
 METHODS = frozenset(("account", "positions", "get_smart_algo_param"))
 
-_LOG_LOCK = threading.Lock()
+_ORDER_LOGGER = None
 _ORDER_STATE = None
 _ORDER_TIMER_ID = None
 
 
-# 日志使用上海时区，线程锁保护 console 和每日 UTF-8 文件的双写。
-# 日志失败不影响查询；只记录请求元信息，启动日志按需包含完整账户号。
+# 调度回调只把普通日志字段放入有界队列；格式化和双写由日志后台负责。
 def log_message(level, message, **fields):
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-    record = "{0} [{1}] {2}".format(
-        now.strftime("%Y-%m-%d %H:%M:%S"), level, message
-    )
-    if fields:
-        record += " " + json.dumps(fields, ensure_ascii=False, default=str)
-    record = record.replace("\r", "\\r").replace("\n", "\\n")
-    with _LOG_LOCK:
-        try:
-            print(record, flush=True)
-        except Exception:
-            pass
-        try:
-            os.makedirs(LOG_DIRECTORY, exist_ok=True)
-            path = os.path.join(LOG_DIRECTORY, "order-" + now.strftime("%Y-%m-%d") + ".log")
-            with open(path, "a", encoding="utf-8") as output:
-                output.write(record + "\n")
-        except OSError:
-            try:
-                print("{0} [ERROR] order log file write failed".format(
-                    now.strftime("%Y-%m-%d %H:%M:%S")
-                ), flush=True)
-            except Exception:
-                pass
+    logger = _ORDER_LOGGER
+    if logger is not None:
+        return logger(level, message, **fields)
+    return False
 
 
 # 可预期的接口错误，统一携带 HTTP 状态、业务错误码和说明。
@@ -127,6 +107,19 @@ class OrderState:
         self.account_id = None
         self.http_port = None
         self.runtime = None
+        self.settings = None
+        self.logger = None
+        self.cleanup_started = False
+        self.pending_released = 0
+        self.cleanup_done = threading.Event()
+        self.http_closed = threading.Event()
+        self.callback_idle = threading.Event()
+        self.callback_idle.set()
+        self.callback_guard = threading.Lock()
+        self.callback_running = False
+        self.scheduler_turn = 0
+        self.scheduler_metrics = {"sampled_at": None, "last_tick_ms": 0.0,
+                                  "max_tick_ms": 0.0, "last_query_ms": 0.0}
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -175,6 +168,26 @@ def runtime_http_port(value):
     if not isinstance(value, int) or not 1 <= value <= 65535:
         raise ValueError("HTTP_PORT must be an integer between 1 and 65535")
     return value
+
+
+def runtime_schedule_settings(values):
+    """面板整数浮点值可接受；小写优先，启动后复制冻结，不读取热修改。"""
+    defaults = {"submit_batch_size": 10, "cancel_batch_size": 10,
+                "reconcile_batch_size": 100, "schedule_budget_ms": SCHEDULE_BUDGET_MILLISECONDS}
+    result = {}
+    for name, default in defaults.items():
+        value = values.get(name, values.get(name.upper(), default))
+        if isinstance(value, str):
+            value = value.strip()
+            if not value or any(char < "0" or char > "9" for char in value):
+                raise ValueError(name + " must be a positive integer")
+            value = int(value)
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2147483647:
+            raise ValueError(name + " must be a positive integer")
+        result[name] = value
+    return result
 
 
 # HTTP accountId 显式值优先，否则使用启动时固定的账户号。
@@ -296,47 +309,68 @@ def dispatch_request(ContextInfo, request):
     return qmt_json_value(result)
 
 
-# schedule_run 入口：按本轮预算拉取队列，查询完成或异常都要释放等待方。
+# 预算从回调入口开始；交易阶段与旧查询交替，轮转位置跨 tick 保留。
 def process_http_requests(ContextInfo):
+    started_at = time.monotonic()
     state = _ORDER_STATE
     if state is None or state.stop_event.is_set():
         return
-    if state.runtime is not None:
-        state.runtime.tick()
-    started_at = time.monotonic()
-    processed = 0
-    while processed < MAX_JOBS_PER_TICK:
-        if (time.monotonic() - started_at) * 1000 >= SCHEDULE_BUDGET_MILLISECONDS:
-            break
-        try:
-            job = state.request_queue.get_nowait()
-        except queue.Empty:
-            break
-        try:
-            with state.lifecycle_lock:
-                if state.stop_event.is_set():
-                    job.set_error(503, "ORDER_STOPPING", "HTTP order is stopping")
-                elif not job.try_start():
-                    job.set_error(504, "REQUEST_EXPIRED", "request expired before QMT processing")
-            if job.error is None:
-                job.result = dispatch_request(ContextInfo, job.request)
-        except OrderError as exc:
-            job.set_error(exc.status, exc.code, exc.message)
-        except Exception:
-            job.set_error(500, "QMT_ERROR", "QMT request failed")
-        finally:
-            if job.error is not None:
-                log_message(
-                    "ERROR" if job.error_status >= 500 else "WARNING",
-                    "QMT request failed",
-                    request_id=job.request_id,
-                    method=job.request.get("method"),
-                    status=job.error_status,
-                    error_code=job.error["code"],
-                )
-            job.done.set()
-            state.request_queue.task_done()
-            processed += 1
+    # 短锁仅更新内存门闩；QMT I/O 期间不持有它。
+    with state.callback_guard:
+        if state.callback_running or state.stop_event.is_set():
+            return
+        state.callback_running = True
+        state.callback_idle.clear()
+    settings = state.settings or runtime_schedule_settings({})
+    deadline = started_at + settings["schedule_budget_ms"] / 1000.0
+    budget = {"submit": 0, "cancel": 0}
+    queries, idle_turns = 0, 0
+    try:
+        while time.monotonic() < deadline and not state.stop_event.is_set():
+            service = state.scheduler_turn
+            state.scheduler_turn = 1 - service
+            progressed = False
+            if service == 0 and state.runtime is not None:
+                progressed = bool(state.runtime.tick(deadline=deadline, budget=budget, max_actions=1))
+            elif service == 1 and queries < MAX_JOBS_PER_TICK:
+                try:
+                    job = state.request_queue.get_nowait()
+                except queue.Empty:
+                    job = None
+                if job is not None:
+                    query_started = time.monotonic()
+                    try:
+                        with state.lifecycle_lock:
+                            if state.stop_event.is_set():
+                                job.set_error(503, "ORDER_STOPPING", "HTTP order is stopping")
+                            elif not job.try_start():
+                                job.set_error(504, "REQUEST_EXPIRED", "request expired before QMT processing")
+                        if job.error is None:
+                            job.result = dispatch_request(ContextInfo, job.request)
+                    except OrderError as exc:
+                        job.set_error(exc.status, exc.code, exc.message)
+                    except Exception:
+                        job.set_error(500, "QMT_ERROR", "QMT request failed")
+                    finally:
+                        if job.error is not None:
+                            log_message("ERROR" if job.error_status >= 500 else "WARNING", "QMT request failed",
+                                        request_id=job.request_id, method=job.request.get("method"),
+                                        status=job.error_status, error_code=job.error["code"])
+                        job.done.set()
+                        state.request_queue.task_done()
+                        state.scheduler_metrics["last_query_ms"] = (time.monotonic() - query_started) * 1000
+                    queries += 1
+                    progressed = True
+            idle_turns = 0 if progressed else idle_turns + 1
+            if idle_turns >= 2:
+                break
+    finally:
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        state.scheduler_metrics.update(sampled_at=time.time(), last_tick_ms=elapsed_ms,
+                                       max_tick_ms=max(state.scheduler_metrics["max_tick_ms"], elapsed_ms))
+        with state.callback_guard:
+            state.callback_running = False
+            state.callback_idle.set()
 
 
 # HTTP 层仅做解析、校验、入队和返回 JSON；QMT 查询留给调度回调。
@@ -439,7 +473,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
     def _bridge_submit(self, params):
         state = self.server.order_state
-        if state.stop_event.is_set():
+        if state.stop_event.is_set() and self.request_method != "health":
             raise OrderError(503, "ORDER_STOPPING", "HTTP order is stopping")
         if state.runtime is None:
             raise OrderError(503, "EXECUTOR_NOT_READY", "order runtime is not initialized")
@@ -450,6 +484,13 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             raise OrderError(429, "COMMAND_CAPACITY_EXCEEDED", "command capacity reached; retry with the same id")
         try:
             status, result = state.runtime.handle(self.request_method, params, self.command)
+            if self.request_method == "health":
+                result = dict(result)
+                result["http_running"] = not state.http_closed.is_set()
+                result["http_lifecycle"] = "STOPPING" if state.stop_event.is_set() else "RUNNING"
+                result["schedule_settings"] = dict(state.settings or runtime_schedule_settings({}))
+                result["scheduler"] = dict(state.scheduler_metrics)
+                result["logging"] = state.logger.health() if state.logger is not None else None
         except OrderError:
             raise
         except Exception:
@@ -487,7 +528,10 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             fields.update({key: payload[key] for key in ("client_order_id", "order_id", "cancel_request_id") if key in payload})
         if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
             fields["error_code"] = payload["error"].get("code")
-        log_message("INFO" if status < 400 else "WARNING", "Response sent", **fields)
+        # 请求始终写入所属实例，旧 HTTP 线程不能把响应日志写到重启后的实例。
+        logger = self.server.order_state.logger
+        if logger is not None:
+            logger("INFO" if status < 400 else "WARNING", "Response sent", **fields)
 
     def log_message(self, format, *args):
         pass
@@ -495,7 +539,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
 def serve_http(state):
     try:
-        while not state.stop_event.is_set():
+        while not state.http_closed.is_set():
             state.server.handle_request()
     finally:
         if state.server is not None:
@@ -505,18 +549,23 @@ def serve_http(state):
 # QMT 启动入口：先校验参数，再绑定账户、监听端口并注册定时任务。
 # 有效配置固定在 OrderState 中，运行期间修改面板不会热切换账户或端口。
 def init(ContextInfo):
-    global _ORDER_STATE, _ORDER_TIMER_ID
+    global _ORDER_STATE, _ORDER_TIMER_ID, _ORDER_LOGGER
     if _ORDER_STATE is not None:
         raise RuntimeError("HTTP order is already initialized")
     # 显式的小写参数优先；小写值非法时直接失败，不静默回退到其他账户。
     account_id = runtime_account_id(globals().get("account_id", ACCOUNT_ID))
     http_port = runtime_http_port(globals().get("http_port", HTTP_PORT))
+    settings = runtime_schedule_settings(globals())
+    pg_config = read_pg_config(globals())
     ContextInfo.set_account(account_id)
     state = OrderState()
     state.account_id = account_id
     state.http_port = http_port
-    pg_config = read_pg_config(globals())
-    state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config, logger=log_message)
+    state.settings = dict(settings)
+    state.logger = AsyncOrderLogger(LOG_DIRECTORY)
+    state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config,
+                                 logger=state.logger, settings=settings)
+    state.runtime.external_idle = state.callback_idle
     server = ThreadingHTTPServer((HTTP_HOST, http_port), OrderRequestHandler)
     server.timeout = 0.2
     server.order_state = state
@@ -525,16 +574,19 @@ def init(ContextInfo):
         target=serve_http, args=(state,), name="qmt-http-order", daemon=True
     )
     _ORDER_STATE = state
+    _ORDER_LOGGER = state.logger
     try:
-        state.runtime.initialize()
         _ORDER_TIMER_ID = ContextInfo.schedule_run(
             process_http_requests, "20200101000000", -1,
             SCHEDULE_INTERVAL, "http_order_timer",
         )
+        state.logger.start()
+        state.runtime.initialize()
         state.server_thread.start()
     except Exception:
         # 启动中途失败时撤销定时器并关闭端口，便于修正配置后重新启动。
         state.stop_event.set()
+        state.http_closed.set()
         timer_id = _ORDER_TIMER_ID
         _ORDER_TIMER_ID = None
         if timer_id is not None:
@@ -544,11 +596,11 @@ def init(ContextInfo):
                 pass
         server.server_close()
         state.runtime.stop()
-        _ORDER_STATE = None
+        _start_order_cleanup(state)
         raise
     log_message(
         "INFO", "QMT HTTP order listening",
-        host=HTTP_HOST, port=server.server_address[1], account_id=state.account_id,
+        host=HTTP_HOST, port=server.server_address[1], account_id=state.account_id, **settings
     )
     if pg_config:
         log_message("INFO", "ORDER persistence configured", account_id=account_id,
@@ -561,8 +613,41 @@ def handlebar(ContextInfo):
     pass
 
 
-# QMT 停止入口：阻止新请求、撤销定时器、以 503 唤醒排队请求，再关闭服务。
-# 即使取消定时器抛出异常，finally 仍会完成队列和端口清理。
+# 后台清理等待在途 QMT、数据库和日志退出；QMT stop 回调只发信号。
+def _finish_order_cleanup(state):
+    global _ORDER_STATE, _ORDER_LOGGER
+    try:
+        state.callback_idle.wait()
+        if state.runtime is not None:
+            state.runtime.stopped_event.wait()
+        # 慢日志收尾期间仍开放 /health，客户端可以看到 STOPPING。
+        if state.logger is not None:
+            state.logger("INFO", "HTTP order stopped", pending_released=state.pending_released)
+            state.logger.request_stop()
+            state.logger.join()
+        state.http_closed.set()
+        if state.server_thread is not None and state.server_thread.is_alive():
+            state.server_thread.join()
+        if state.server is not None:
+            state.server.server_close()
+    finally:
+        state.cleanup_done.set()
+        if _ORDER_STATE is state:
+            _ORDER_STATE = None
+            _ORDER_LOGGER = None
+
+
+def _start_order_cleanup(state):
+    with state.lifecycle_lock:
+        if state.cleanup_started:
+            return
+        state.cleanup_started = True
+    worker = threading.Thread(target=_finish_order_cleanup, args=(state,),
+                              name="qmt-order-cleanup", daemon=True)
+    worker.start()
+
+
+# QMT 停止入口：不等待后台线程，清理完成前仍保留 STOPPING 状态。
 def stop(ContextInfo):
     global _ORDER_STATE, _ORDER_TIMER_ID
     state = _ORDER_STATE
@@ -593,15 +678,12 @@ def stop(ContextInfo):
             job.done.set()
             state.request_queue.task_done()
             count += 1
-        if state.server_thread is not None and state.server_thread.is_alive():
-            state.server_thread.join(timeout=1.0)
-        if state.server is not None:
-            state.server.server_close()
-        _ORDER_STATE = None
-        log_message("INFO", "HTTP order stopped", pending_released=count)
+        state.pending_released = count
+        log_message("INFO", "HTTP order stopping", pending_released=count)
+        _start_order_cleanup(state)
 
 
-# QMT 回报只把当前上下文中的对象转为普通字典；数据库更新交给调度器。
+# QMT 回报只把当前上下文中的对象转为普通字典；数据库更新交给后台工作线程。
 def order_callback(ContextInfo, orderInfo):
     state = _ORDER_STATE
     if state is not None and state.runtime is not None:

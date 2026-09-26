@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import copy
+import json
 import unittest
 
 from order_bridge.common import OrderError
@@ -43,6 +44,113 @@ class QmtAdapterTests(unittest.TestCase):
             value.pop("quantity", None)
             value["sizing_type"] = "AMOUNT"
         return normalize_order(value, "123")
+
+    def phase_order(self, request, remark="rb123"):
+        basket = request["order_type"] == "BASKET"
+        return {"account_id": "123", "order_type": request["order_type"],
+                "remark": remark, "basket_name": remark if basket else None,
+                "items": request.get("items", []), "request": request}
+
+    def phase(self, order, stage="RESOLVE"):
+        before = len(self.calls)
+        result = self.adapter.prepare_step(order, stage)
+        self.assertLessEqual(len(self.calls) - before, 1)
+        self.assertEqual(set(("stage", "updates")), set(result))
+        json.dumps(result)
+        order.update(result["updates"])
+        return result["stage"]
+
+    def test_prepare_direct_and_sliced_are_pure_and_frozen(self):
+        direct = self.direct_request()
+        order = self.phase_order(direct)
+        self.assertIsNone(self.phase(order))
+        self.assertEqual([], self.calls)
+        self.assertEqual(self.adapter.resolve(direct, "rb123"), order["resolved_request"])
+        self.adapter.submit(order)
+        self.assertEqual("passorder", self.calls[-1][0])
+        params = {key: 0 for key in capabilities()["executions"]["SLICED"]["required_params"]}
+        params.update({"MaxOrderCount": 20, "PlaceOrderInterval": 5,
+                       "VolumeType": 10, "VolumeRate": 0.2, "ValidTimeElapse": 60})
+        sliced = self.direct_request(execution={"type": "SLICED", "mode": "RANDOM", "params": params})
+        order = self.phase_order(sliced, "s1")
+        self.calls[:] = []
+        self.assertIsNone(self.phase(order))
+        self.assertEqual([], self.calls)
+        self.assertEqual(self.adapter.resolve(sliced, "s1"), order["resolved_request"])
+        self.adapter.submit(order)
+        self.assertEqual("algo_passorder", self.calls[-1][0])
+
+    def test_prepare_smart_uses_one_metadata_call_and_frozen_values(self):
+        def smart_metadata(names):
+            self.calls.append(("get_smart_algo_param", names))
+            return {"VWAP": [{"key": "m_dLimitOverRate", "dataType": "浮点数",
+                              "valueRange": "0.00-100.00", "defaultValue": "20.00", "unit": "%"}]}
+        self.apis["get_smart_algo_param"] = smart_metadata
+        request = self.direct_request(price_type="MARKET", execution={
+            "type": "SMART", "algorithm": "VWAP", "start_at": "2026-09-28T10:00:00+08:00",
+            "end_at": "2026-09-28T14:00:00+08:00", "params": {}})
+        order = self.phase_order(request)
+        self.assertEqual("SMART", self.phase(order))
+        self.assertEqual([], self.calls)
+        self.assertNotIn("resolved_request", order)
+        self.assertIsNone(self.phase(order, "SMART"))
+        self.assertEqual(["get_smart_algo_param"], [call[0] for call in self.calls])
+        self.assertEqual(0.2, order["resolved_request"]["algoParam"]["m_dLimitOverRate"])
+        self.assertEqual("rb123", order["resolved_request"]["algoParam"]["m_strCmdRemark"])
+        self.adapter.submit(order)
+        self.assertEqual("smart_algo_passorder", self.calls[-1][0])
+
+    def test_prepare_basket_created_reused_and_conflict(self):
+        request = normalize_order({"client_order_id": "b1", "account_id": "123",
+                                   "sizing_type": "QUANTITY", "order_type": "BASKET",
+                                   "items": [{"item_id": "x", "symbol": "600000.SH",
+                                              "side": "BUY", "quantity": 100}],
+                                   "price_type": "QUOTE", "quote_type": "LATEST",
+                                   "execution": {"type": "DIRECT"}}, "123")
+        store = {}
+        def get_basket(name):
+            self.calls.append(("get_basket", name))
+            return copy.deepcopy(store.get(name))
+        def set_basket(basket):
+            self.calls.append(("set_basket", basket))
+            store[basket["name"]] = copy.deepcopy(basket)
+        self.apis.update({"get_basket": get_basket, "set_basket": set_basket})
+        order = self.phase_order(request)
+        stage = self.phase(order)
+        self.assertEqual("BASKET_GET", stage)
+        stage = self.phase(order, stage)
+        self.assertEqual("BASKET_SET", stage)
+        stage = self.phase(order, stage)
+        self.assertEqual("BASKET_VERIFY", stage)
+        self.assertIsNone(self.phase(order, stage))
+        self.assertEqual(["get_basket", "set_basket", "get_basket"], [call[0] for call in self.calls])
+        self.calls[:] = []
+        restarted = self.phase_order(request)
+        self.assertEqual("BASKET_GET", self.phase(restarted))
+        self.assertIsNone(self.phase(restarted, "BASKET_GET"))
+        self.assertEqual(["get_basket"], [call[0] for call in self.calls])
+        self.assertEqual(order["resolved_request"], restarted["resolved_request"])
+        store["rb123"]["stocks"][0]["quantity"] = 999
+        self.calls[:] = []
+        wrong = self.phase_order(request)
+        self.assertEqual("BASKET_GET", self.phase(wrong))
+        with self.assertRaises(OrderError) as caught:
+            self.adapter.prepare_step(wrong, "BASKET_GET")
+        self.assertEqual("BASKET_READBACK_MISMATCH", caught.exception.code)
+        self.assertEqual(["get_basket"], [call[0] for call in self.calls])
+
+    def test_prepare_basket_verify_rejects_wrong_readback(self):
+        request = normalize_order({"client_order_id": "b1", "account_id": "123",
+                                   "sizing_type": "QUANTITY", "order_type": "BASKET",
+                                   "items": [{"item_id": "x", "symbol": "600000.SH",
+                                              "side": "BUY", "quantity": 100}],
+                                   "price_type": "QUOTE", "quote_type": "LATEST",
+                                   "execution": {"type": "DIRECT"}}, "123")
+        order = self.phase_order(request)
+        self.phase(order)
+        self.apis["get_basket"] = lambda name: {"name": name, "stocks": []}
+        with self.assertRaises(OrderError):
+            self.adapter.prepare_step(order, "BASKET_VERIFY")
 
     def test_direct_frozen_arguments(self):
         request = self.direct_request()

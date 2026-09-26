@@ -116,6 +116,14 @@ class QmtAdapter(object):
         return function
 
     def resolve(self, request, remark):
+        result = self._resolve_base(request, remark)
+        if request["execution"]["type"] == "SMART":
+            smart = request["execution"]
+            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            self._resolve_smart(result, smart, remark, data)
+        return result
+
+    def _resolve_base(self, request, remark):
         if not isinstance(request, dict):
             _qmt_error("INVALID_ORDER", "normalized request must be an object", 400)
         account = request.get("account_id")
@@ -153,50 +161,88 @@ class QmtAdapter(object):
             params["OrderType"] = 1 if request["execution"]["mode"] == "ALGO" else 2
             params["PriceType"] = pr_type
             result["userOrderParam"] = params
-        elif execution == "SMART":
-            smart = request["execution"]
-            data = self._require("get_smart_algo_param")([smart["algorithm"]])
-            if not isinstance(data, dict) or smart["algorithm"] not in data or not isinstance(data[smart["algorithm"]], list):
-                _qmt_error("SMART_ALGORITHM_UNAVAILABLE", "QMT did not return algorithm metadata")
-            definitions = data[smart["algorithm"]]
-            lookup = {}
-            for item in definitions:
-                if not isinstance(item, dict) or not isinstance(item.get("key"), str) or item["key"] in lookup:
-                    _qmt_error("INVALID_SMART_METADATA", "QMT returned invalid parameter definition")
-                lookup[item["key"]] = item
-            custom = smart["params"]
-            unknown = set(custom) - set(lookup)
-            if unknown or "m_strCmdRemark" in custom:
-                _qmt_error("INVALID_SMART_PARAM", "unknown or reserved fields: " + ", ".join(sorted(unknown | ({"m_strCmdRemark"} & set(custom)))))
-            expanded = {}
-            for key, item in lookup.items():
-                if key == "m_strCmdRemark":
-                    continue
-                is_default = key not in custom
-                expanded[key] = _qmt_smart_field(item, _qmt_smart_default(item) if is_default else custom[key], is_default)
-            expanded["m_strCmdRemark"] = remark
-            qmt_zone = dt.timezone(dt.timedelta(hours=8))
-            start = parse_timestamp(smart["start_at"]).astimezone(qmt_zone)
-            end = parse_timestamp(smart["end_at"]).astimezone(qmt_zone)
-            if start.date() != end.date():
-                _qmt_error("INVALID_SMART_TIME", "smart interval crosses Shanghai calendar day")
-            result.update({"smartAlgoType": smart["algorithm"],
-                           "startTime": start.strftime("%H:%M:%S"),
-                           "endTime": end.strftime("%H:%M:%S"), "algoParam": expanded})
         return result
+
+    def _resolve_smart(self, result, smart, remark, data):
+        if not isinstance(data, dict) or smart["algorithm"] not in data or not isinstance(data[smart["algorithm"]], list):
+            _qmt_error("SMART_ALGORITHM_UNAVAILABLE", "QMT did not return algorithm metadata")
+        definitions = data[smart["algorithm"]]
+        lookup = {}
+        for item in definitions:
+            if not isinstance(item, dict) or not isinstance(item.get("key"), str) or item["key"] in lookup:
+                _qmt_error("INVALID_SMART_METADATA", "QMT returned invalid parameter definition")
+            lookup[item["key"]] = item
+        custom = smart["params"]
+        unknown = set(custom) - set(lookup)
+        if unknown or "m_strCmdRemark" in custom:
+            _qmt_error("INVALID_SMART_PARAM", "unknown or reserved fields: " + ", ".join(sorted(unknown | ({"m_strCmdRemark"} & set(custom)))))
+        expanded = {}
+        for key, item in lookup.items():
+            if key == "m_strCmdRemark":
+                continue
+            is_default = key not in custom
+            expanded[key] = _qmt_smart_field(item, _qmt_smart_default(item) if is_default else custom[key], is_default)
+        expanded["m_strCmdRemark"] = remark
+        qmt_zone = dt.timezone(dt.timedelta(hours=8))
+        start = parse_timestamp(smart["start_at"]).astimezone(qmt_zone)
+        end = parse_timestamp(smart["end_at"]).astimezone(qmt_zone)
+        if start.date() != end.date():
+            _qmt_error("INVALID_SMART_TIME", "smart interval crosses Shanghai calendar day")
+        result.update({"smartAlgoType": smart["algorithm"],
+                       "startTime": start.strftime("%H:%M:%S"),
+                       "endTime": end.strftime("%H:%M:%S"), "algoParam": expanded})
+
+    def prepare_step(self, order, stage="RESOLVE", payload=None):
+        """一次阶段最多调用一个 QMT API；调用方持久化 updates 和后续 stage。"""
+        if not isinstance(order, dict):
+            _qmt_error("INVALID_ORDER", "order must be an object", 400)
+        if stage == "RESOLVE":
+            request = order.get("request")
+            result = self._resolve_base(request, order.get("remark"))
+            if request["execution"]["type"] == "SMART":
+                return {"stage": "SMART", "updates": {}}
+            return {"stage": "BASKET_GET" if order.get("order_type") == "BASKET" else None,
+                    "updates": {"resolved_request": result}}
+        if stage == "SMART":
+            request = order.get("request")
+            if not isinstance(request, dict) or request.get("execution", {}).get("type") != "SMART":
+                _qmt_error("INVALID_PREPARE_STAGE", "SMART stage needs SMART request", 400)
+            result = self._resolve_base(request, order.get("remark"))
+            smart = request["execution"]
+            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            self._resolve_smart(result, smart, order.get("remark"), data)
+            return {"stage": "BASKET_GET" if order.get("order_type") == "BASKET" else None,
+                    "updates": {"resolved_request": result}}
+        if stage not in ("BASKET_GET", "BASKET_SET", "BASKET_VERIFY"):
+            _qmt_error("INVALID_PREPARE_STAGE", "unknown preparation stage", 400)
+        expected = self._expected_basket(order)
+        if stage == "BASKET_SET":
+            self._require("set_basket")(copy_json(expected))
+            return {"stage": "BASKET_VERIFY", "updates": {}}
+        actual = self.snapshot(self._require("get_basket")(expected["name"]))
+        if stage == "BASKET_GET" and not actual:
+            return {"stage": "BASKET_SET", "updates": {}}
+        self._check_basket(actual, expected)
+        return {"stage": None, "updates": {}}
+
+    def _expected_basket(self, order):
+        if order.get("order_type") != "BASKET":
+            _qmt_error("INVALID_PREPARE_STAGE", "basket stage needs basket order", 400)
+        name = order.get("basket_name")
+        if not name or order.get("resolved_request", {}).get("orderCode") != name:
+            _qmt_error("BASKET_NAME_MISMATCH", "basket name differs from frozen request")
+        return {"name": name, "stocks": [
+            {"stock": item["symbol"], "weight": 0, "quantity": item["quantity"],
+             "optType": 23 if item["side"] == "BUY" else 24}
+            for item in order["items"]]}
 
     def prepare_basket(self, order):
         if order["order_type"] != "BASKET":
             return False
-        name = order["basket_name"]
-        if not name or order.get("resolved_request", {}).get("orderCode") != name:
-            _qmt_error("BASKET_NAME_MISMATCH", "basket name differs from frozen request")
+        expected = self._expected_basket(order)
+        name = expected["name"]
         get_basket = self._require("get_basket")
         set_basket = self._require("set_basket")
-        expected = {"name": name, "stocks": [
-            {"stock": item["symbol"], "weight": 0, "quantity": item["quantity"],
-             "optType": 23 if item["side"] == "BUY" else 24}
-            for item in order["items"]]}
         existing = get_basket(name)
         if existing:
             self._check_basket(existing, expected)

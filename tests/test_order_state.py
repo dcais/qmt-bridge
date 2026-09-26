@@ -3,7 +3,7 @@ import unittest
 from order_bridge.common import OrderError, new_order_document
 from order_bridge.state import (apply_observation, apply_cancel_request, cancel_response,
                                 pending_cancellations, mark_reconciled, recompute_order,
-                                is_order_active, observation_identifiers)
+                                is_order_active, observation_identifiers, reconcile_pending)
 
 
 def document(algo=False, basket=False):
@@ -33,6 +33,31 @@ def observe(doc, kind, raw):
 
 
 class StateTests(unittest.TestCase):
+    def test_reconcile_pending_enters_exits_and_reopens_on_late_fact(self):
+        doc = document()
+        self.assertFalse(reconcile_pending(doc))
+        doc['submission_status'] = 'SUBMITTING'
+        recompute_order(doc)
+        self.assertTrue(doc['reconcile_pending'])
+        observe(doc, 'order', order(status=56, filled=100))
+        self.assertTrue(doc['reconcile_pending'])
+        observe(doc, 'deal', deal(quantity=100, amount='1000'))
+        mark_reconciled(doc, complete=True)
+        self.assertEqual(doc['execution_status'], 'FILLED')
+        self.assertFalse(doc['reconcile_pending'])
+        observe(doc, 'order', order(oid='o2', status=50))
+        self.assertTrue(doc['reconcile_pending'])
+        self.assertTrue(doc['reconciliation_complete'] is False)
+        observe(doc, 'order', order(oid='o2', status=50))
+        self.assertTrue(doc['reconcile_pending'])
+
+    def test_incomplete_reconcile_does_not_stamp_success(self):
+        doc = document()
+        doc['submission_status'] = 'UNKNOWN'
+        mark_reconciled(doc, complete=False)
+        self.assertIsNone(doc['last_reconciled_at'])
+        self.assertTrue(doc['reconcile_pending'])
+
     def test_queued_cancel_is_local_and_never_dispatches(self):
         doc = document()
         record, status = apply_cancel_request(doc, {'cancel_request_id': 'c1'})

@@ -183,7 +183,24 @@ def state_execution_finished(doc):
         return False
     if any(not row.get('terminal') for row in tasks + orders):
         return False
+    if doc.get('cancel_requested') and doc.get('cancel_status') in state_CANCEL_ACTIVE:
+        return False
     return doc['execution_status'] in state_TERMINAL or doc['execution_status'] == 'INCOMPLETE'
+
+
+def reconcile_pending(doc):
+    """持久对账门闩：仅完整证据能使已进入 QMT 的订单退出。"""
+    if doc.get('reconcile_requested') or doc.get('unassociated_evidence'):
+        return True
+    status = doc.get('submission_status')
+    if status == 'QUEUED':
+        return False
+    entered = bool(doc.get('qmt_orders') or doc.get('qmt_tasks') or doc.get('fills'))
+    if status in ('CANCELLED_LOCAL', 'EXPIRED', 'REJECTED') and not entered:
+        return False
+    if status in ('SUBMITTING', 'UNKNOWN'):
+        return True
+    return not state_execution_finished(doc)
 
 
 def recompute_order(doc, now=None, reconciled=False):
@@ -309,6 +326,7 @@ def recompute_order(doc, now=None, reconciled=False):
                 request['status'] = cancel
     doc['sync_status'] = 'COMPLETE' if complete else ('PENDING' if doc['submission_status'] == 'QUEUED' and not doc.get('unassociated_evidence') else 'INCOMPLETE')
     doc['basket_cleanup_eligible'] = doc['order_type'] != 'SINGLE' and state_execution_finished(doc)
+    doc['reconcile_pending'] = reconcile_pending(doc)
     return before != doc
 
 
@@ -381,7 +399,8 @@ def is_order_active(doc):
 def mark_reconciled(doc, complete=True, now=None):
     before = copy_json(doc)
     doc['reconciliation_complete'] = bool(complete)
-    doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
-    doc['reconcile_requested'] = False
+    if complete:
+        doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
+        doc['reconcile_requested'] = False
     recompute_order(doc, now=now)
     return before != doc

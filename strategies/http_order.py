@@ -1,11 +1,16 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-26 09:50:50
+# Last modified (Asia/Shanghai): 2026-09-26 11:32:46
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
 # 参数名       默认值           用途
 # account_id   "66027616"       绑定的股票账户；建议使用字符串，保留账户号前导零。
 # http_port    8888             HTTP 监听端口，整数 1..65535；模拟盘和实盘可用不同端口。
+# submit_batch_size    10       每轮实际派发业务订单上限；篮子算一笔。
+# cancel_batch_size    10       每轮实际 QMT 撤单动作上限；任务和子委托分别计数。
+# reconcile_batch_size 100      每批对账业务订单数；同一轮快照复用，剩余批次跨 tick 推进。
+# schedule_budget_ms  50        整个调度回调的毫秒预算；已开始的同步 QMT 调用不可强制中断。
+# 以上批量和预算参数均为正整数，支持面板整数浮点值；与账户、端口一起在启动时冻结。
 # pg_host      "127.0.0.1"      PostgreSQL 服务器地址。
 # pg_port      5432             PostgreSQL 端口，整数 1..65535。
 # pg_database  未配置           数据库名称；启用交易必填，模拟盘/实盘分别连接不同数据库。
@@ -14,7 +19,7 @@
 # 上述参数均优先读取小写名称，也兼容同名全大写参数；小写值非法时不回退。
 # pg_database、pg_user、pg_password 全部未配置或为空时，仅开放查询模式；启用交易须完整填写。
 # 每个数据库内部固定使用 qmt_order schema，不接受 pg_schema 运行参数。
-# DDL 独立存放在 sql/order_v1.sql；tools/order_admin.py schema init 显式读取并安装。
+# DDL 独立存放在 sql/order_v2.sql；旧库须显式 schema migrate，不在策略中自动升级。
 # 策略启动检查关键表、字段和版本，再按 account_id 自动补齐账户运行记录；已有记录不重置。
 # 不自动建表或升级，无需在部署前手工注册账户。
 # 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
@@ -701,7 +706,24 @@ def state_execution_finished(doc):
         return False
     if any(not row.get('terminal') for row in tasks + orders):
         return False
+    if doc.get('cancel_requested') and doc.get('cancel_status') in state_CANCEL_ACTIVE:
+        return False
     return doc['execution_status'] in state_TERMINAL or doc['execution_status'] == 'INCOMPLETE'
+
+
+def reconcile_pending(doc):
+    """持久对账门闩：仅完整证据能使已进入 QMT 的订单退出。"""
+    if doc.get('reconcile_requested') or doc.get('unassociated_evidence'):
+        return True
+    status = doc.get('submission_status')
+    if status == 'QUEUED':
+        return False
+    entered = bool(doc.get('qmt_orders') or doc.get('qmt_tasks') or doc.get('fills'))
+    if status in ('CANCELLED_LOCAL', 'EXPIRED', 'REJECTED') and not entered:
+        return False
+    if status in ('SUBMITTING', 'UNKNOWN'):
+        return True
+    return not state_execution_finished(doc)
 
 
 def recompute_order(doc, now=None, reconciled=False):
@@ -827,6 +849,7 @@ def recompute_order(doc, now=None, reconciled=False):
                 request['status'] = cancel
     doc['sync_status'] = 'COMPLETE' if complete else ('PENDING' if doc['submission_status'] == 'QUEUED' and not doc.get('unassociated_evidence') else 'INCOMPLETE')
     doc['basket_cleanup_eligible'] = doc['order_type'] != 'SINGLE' and state_execution_finished(doc)
+    doc['reconcile_pending'] = reconcile_pending(doc)
     return before != doc
 
 
@@ -899,8 +922,9 @@ def is_order_active(doc):
 def mark_reconciled(doc, complete=True, now=None):
     before = copy_json(doc)
     doc['reconciliation_complete'] = bool(complete)
-    doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
-    doc['reconcile_requested'] = False
+    if complete:
+        doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
+        doc['reconcile_requested'] = False
     recompute_order(doc, now=now)
     return before != doc
 
@@ -911,10 +935,12 @@ import json
 import re
 import threading
 import uuid
+from datetime import timedelta
 
 
 
-repo_SCHEMA_VERSION = 1
+repo_SCHEMA_VERSION = 2
+repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
                      "qmt_orders": "qmt_orders", "fills": "fills"}
@@ -949,6 +975,7 @@ class PostgresRepository(object):
         self.repo_executor_instance = None
         self.repo_executor_lost = False
         self.repo_executor_mutex = threading.RLock()
+        self.repo_pending_cursor = 0
         # PostgreSQL advisory lock 本身已隔离数据库，不把可别名的连接参数混入锁键。
         lock_scope = [config.get("pg_schema", "qmt_order"),
                       self.account_type, self.account_id]
@@ -1020,7 +1047,9 @@ class PostgresRepository(object):
             required = {
                 "schema_version": ("version",),
                 "account_runtime": ("account_type", "account_id", "event_seq", "executor_host", "executor_instance", "executor_epoch"),
-                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document"),
+                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document",
+                           "submission_status", "cancel_ready", "reconcile_pending", "reconcile_priority", "reconcile_due_at",
+                           "last_reconcile_attempt_at", "last_reconciled_at", "fact_version", "created_at"),
                 "order_events": ("account_type", "account_id", "event_seq", "order_id", "event_type", "occurred_at", "document"),
                 "qmt_observations": ("observation_id", "account_type", "account_id", "kind", "source", "observed_at", "raw", "order_id", "applied", "observation_hash"),
             }
@@ -1055,12 +1084,14 @@ class PostgresRepository(object):
 
     def health(self):
         result = self.check_schema()
-        result["executor"] = self.check_executor() if self.repo_executor is not None else False
+        # 健康请求可能从 HTTP/DB 线程发起；专用 advisory 会话仅由后台所有者检查。
+        result["executor"] = self.repo_executor is not None and not self.repo_executor_lost
         def unknown_count(cur):
-            cur.execute("SELECT count(*) FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'submission_status'='UNKNOWN'", self.repo_scope)
-            return cur.fetchone()[0]
-        result["unknown_order_count"] = self.repo_run(unknown_count)
+            cur.execute("SELECT count(*) FILTER (WHERE submission_status='UNKNOWN'),"
+                        "count(*) FILTER (WHERE reconcile_pending) FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            return cur.fetchone()
+        result["unknown_order_count"], result["pending_count"] = self.repo_run(unknown_count)
         return result
 
     def acquire_executor(self, instance_id, host_id):
@@ -1149,15 +1180,39 @@ class PostgresRepository(object):
             raise OrderError(404, "ORDER_NOT_FOUND", "order not found")
         return doc
 
-    def repo_save(self, cur, doc, event_type, fresh=False):
+    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None):
+        doc.setdefault("fact_version", 0)
+        doc.setdefault("last_reconcile_attempt_at", None)
+        doc.setdefault("reconcile_due_at", repo_EPOCH)
+        doc.setdefault("reconcile_priority", False)
+        doc.setdefault("reconcile_requested", False)
+        doc["reconcile_pending"] = reconcile_pending(doc)
+        if event_type in ("QMT_OBSERVATION", "MANUAL_UNKNOWN_RESOLUTION", "RECONCILE_GAP"):
+            # fact_version 是外部异步事实代次；本轮 QMT 查询归并只改变普通文档版本。
+            if event_type != "QMT_OBSERVATION" or fact_source not in ("query", "history"):
+                doc["fact_version"] += 1
+            doc["reconcile_requested"] = True
+            doc["reconcile_pending"] = True
+            doc["reconcile_priority"] = True
+            doc["reconcile_due_at"] = repo_EPOCH
         if not fresh:
             doc["version"] = int(doc.get("version", 0)) + 1
         doc["updated_at"] = iso_datetime()
+        cancel_ready = bool(pending_cancellations(doc))
         cur.execute("INSERT INTO " + self.repo_s + ".orders(account_type,account_id,order_id,client_order_id,request_hash,"
-                    "remark,active,document) VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb) "
-                    "ON CONFLICT(account_type,account_id,order_id) DO UPDATE SET active=EXCLUDED.active,document=EXCLUDED.document",
+                    "remark,active,document,submission_status,cancel_ready,reconcile_pending,reconcile_priority,reconcile_due_at,"
+                    "last_reconcile_attempt_at,last_reconciled_at,fact_version,created_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT(account_type,account_id,order_id) DO UPDATE SET active=EXCLUDED.active,document=EXCLUDED.document,"
+                    "submission_status=EXCLUDED.submission_status,cancel_ready=EXCLUDED.cancel_ready,"
+                    "reconcile_pending=EXCLUDED.reconcile_pending,reconcile_priority=EXCLUDED.reconcile_priority,"
+                    "reconcile_due_at=EXCLUDED.reconcile_due_at,last_reconcile_attempt_at=EXCLUDED.last_reconcile_attempt_at,"
+                    "last_reconciled_at=EXCLUDED.last_reconciled_at,fact_version=EXCLUDED.fact_version",
                     self.repo_scope + (doc["order_id"], doc["client_order_id"], doc["request_hash"], doc["remark"],
-                                       is_order_active(doc), json_text(doc)))
+                                       is_order_active(doc), json_text(doc), doc["submission_status"], cancel_ready,
+                                       bool(doc["reconcile_pending"]), bool(doc["reconcile_priority"]), doc["reconcile_due_at"],
+                                       doc["last_reconcile_attempt_at"], doc.get("last_reconciled_at"), doc["fact_version"],
+                                       doc["created_at"]))
         for table, field in repo_CHILD_TABLES.items():
             cur.execute("DELETE FROM " + self.repo_s + "." + table +
                         " WHERE account_type=%s AND account_id=%s AND order_id=%s", self.repo_scope + (doc["order_id"],))
@@ -1206,13 +1261,18 @@ class PostgresRepository(object):
             return self.repo_save(cur, doc, event_type) if json_text(doc) != before else doc
         return self.repo_run(update, mutation=True)
 
-    def claim_submission(self, order_id):
-        self.check_executor()
-        def claim(cur):
+    def claim_submission(self, order_id, authority=None):
+        if authority is None:
+            # 仅供后台执行权所有者沿用；跨线程必须显式传入冻结授权。
             self.check_executor()
+            authority = (self.repo_executor_instance, self.repo_executor_epoch)
+        elif isinstance(authority, dict):
+            authority = (authority.get("instance_id"), authority.get("epoch"))
+        authority = tuple(authority)
+        def claim(cur):
             cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
                         ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
-            if tuple(cur.fetchone()) != (self.repo_executor_instance, self.repo_executor_epoch):
+            if tuple(cur.fetchone()) != authority:
                 raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
             doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
             if doc["submission_status"] != "QUEUED" or doc.get("cancel_requested"):
@@ -1223,8 +1283,30 @@ class PostgresRepository(object):
             doc["submission_status"] = "SUBMITTING"
             doc["attempts"].append({"attempt_id": str(uuid.uuid4()), "kind": "SUBMIT", "remark": doc["remark"],
                                     "status": "CALLING", "created_at": iso_datetime(),
-                                    "executor_epoch": self.repo_executor_epoch})
+                                    "executor_epoch": authority[1]})
             return True, self.repo_save(cur, doc, "SUBMISSION_CLAIMED")
+        return self.repo_run(claim, mutation=True)
+
+    def claim_cancel(self, order_id, action, authority):
+        """持久化一次撤单调用意图，同时核验执行代次和仍可执行的目标。"""
+        if isinstance(authority, dict):
+            authority = (authority.get("instance_id"), authority.get("epoch"))
+        authority = tuple(authority)
+        def claim(cur):
+            cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
+                        ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            if tuple(cur.fetchone()) != authority:
+                raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
+            doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
+            keys = ("kind", "target_id", "cancel_request_id")
+            candidate = next((row for row in pending_cancellations(doc)
+                              if all(str(row.get(key)) == str(action.get(key)) for key in keys)), None)
+            if candidate is None:
+                return False, doc
+            attempt = dict(candidate, attempt_id=str(action.get("attempt_id") or uuid.uuid4()),
+                           status="CALLING", created_at=iso_datetime(), executor_epoch=authority[1])
+            doc["attempts"].append(attempt)
+            return True, self.repo_save(cur, doc, "CANCEL_CLAIMED")
         return self.repo_run(claim, mutation=True)
 
     def request_cancel(self, normalized):
@@ -1286,34 +1368,150 @@ class PostgresRepository(object):
     def work_orders(self, limit=100):
         return self.list_orders(active=True, limit=limit)["orders"]
 
-    def queued_orders(self, limit=10):
+    def queued_orders(self, limit=10, cursor=None):
         def listing(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'submission_status'='QUEUED' ORDER BY document->>'created_at',order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND submission_status='QUEUED'" + after + " ORDER BY order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
 
-    def cancellation_orders(self, limit=100):
+    def cancellation_orders(self, limit=100, cursor=None):
         def listing(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "AND document->>'cancel_requested'='true' AND document->>'cancel_status' "
-                        "NOT IN ('CONFIRMED','NOT_NEEDED','REJECTED') "
-                        "ORDER BY CASE document->>'cancel_status' WHEN 'REQUESTED' THEN 0 "
-                        "WHEN 'UNKNOWN' THEN 2 ELSE 1 END,"
-                        "COALESCE(document->>'last_reconciled_at',''),order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND cancel_ready=true" + after + " ORDER BY order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
 
-    def reconcile_orders(self, limit=1000):
-        # 历史终态也可能迟到成交；按最后核对时间轮转避免首页永久饥饿。
+    def reconcile_orders(self, limit=100, cursor=None, due_before=None):
+        """候选只读页；cursor 为 (优先标志,最近尝试时间,order_id)。"""
         def listing(cur):
+            params = self.repo_scope + (due_before or iso_datetime(),)
+            after = ""
+            if cursor:
+                after = " AND (NOT reconcile_priority,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id)>(%s,%s::timestamptz,%s)"
+                params += (not cursor[0], cursor[1] or repo_EPOCH, cursor[2])
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "ORDER BY COALESCE(document->>'last_reconciled_at',''),order_id LIMIT %s",
-                        self.repo_scope + (max(1, int(limit)),))
+                        "AND reconcile_pending=true AND reconcile_due_at<=%s" + after +
+                        " ORDER BY reconcile_priority DESC,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id LIMIT %s",
+                        params + (max(1, min(int(limit), 1000)),))
             return [repo_json(row[0]) for row in cur.fetchall()]
         return self.repo_run(listing)
+
+    def reconcile_history_start(self):
+        def read(cur):
+            cur.execute("SELECT min(created_at) FROM " + self.repo_s + ".orders "
+                        "WHERE account_type=%s AND account_id=%s AND reconcile_pending=true", self.repo_scope)
+            value = cur.fetchone()[0]
+            return iso_datetime(value) if value else None
+        return self.repo_run(read)
+
+    def begin_reconcile_batch(self, limit=100, round_id=None, cursor=None):
+        """同一轮只选一次订单，逐单记录尝试；后续批次共用外部 QMT 快照。"""
+        if not round_id:
+            raise ValueError("round_id is required")
+        limit = max(1, min(int(limit), 1000))
+        def begin(cur):
+            params = self.repo_scope + (iso_datetime(), str(round_id))
+            after = ""
+            if cursor:
+                after = " AND (NOT reconcile_priority,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id)>(%s,%s::timestamptz,%s)"
+                params += (not cursor[0], cursor[1] or repo_EPOCH, cursor[2])
+            cur.execute("SELECT order_id,document,last_reconcile_attempt_at,reconcile_priority FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s AND reconcile_pending=true "
+                        "AND reconcile_due_at<=%s AND document->>'last_reconcile_round' IS DISTINCT FROM %s" + after +
+                        " ORDER BY reconcile_priority DESC,COALESCE(last_reconcile_attempt_at,'epoch'::timestamptz),order_id LIMIT %s FOR UPDATE",
+                        params + (limit + 1,))
+            rows = cur.fetchall()
+            selected = rows[:limit]
+            stamp = iso_datetime()
+            docs = []
+            for order_id, raw, unused, priority in selected:
+                doc = repo_json(raw)
+                doc["last_reconcile_round"] = str(round_id)
+                doc["reconcile_round_fact_version"] = int(doc.get("fact_version", 0))
+                doc["last_reconcile_attempt_at"] = stamp
+                # 选中的订单至少在本轮归并结束前不会再次进入首页。
+                doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+                doc["reconcile_priority"] = False
+                self.repo_save(cur, doc, "RECONCILE_ATTEMPT")
+                docs.append(doc)
+            next_cursor = None
+            if len(rows) > limit and selected:
+                last = selected[-1]
+                next_cursor = [last[3], iso_datetime(last[2]) if last[2] else None, last[0]]
+            return {"orders": docs, "next_cursor": next_cursor, "has_more": len(rows) > limit}
+        return self.repo_run(begin, mutation=True)
+
+    def reconcile_round_batch(self, round_id, limit=100, cursor=None):
+        """查询后按冻结轮次有界取单，携带查询前的逐单事实代次。"""
+        limit = max(1, min(int(limit), 1000))
+        def listing(cur):
+            params = self.repo_scope + (str(round_id),)
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
+            cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
+                        "AND document->>'last_reconcile_round'=%s" + after + " ORDER BY order_id LIMIT %s",
+                        params + (limit + 1,))
+            docs = [repo_json(row[0]) for row in cur.fetchall()]
+            return {"orders": docs[:limit], "next_cursor": docs[limit - 1]["order_id"] if len(docs) > limit else None,
+                    "has_more": len(docs) > limit}
+        return self.repo_run(listing)
+
+    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None):
+        """旧快照只能记录尝试，不能清除其后回报/缺口设下的门闩。"""
+        def finish(cur):
+            doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
+            if int(doc.get("fact_version", 0)) != int(expected_fact_version):
+                return False
+            mark_reconciled(doc, complete=complete, now=stamp)
+            doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=30))
+            doc["reconcile_priority"] = False
+            self.repo_save(cur, doc, "RECONCILE_FINISHED")
+            return True
+        return self.repo_run(finish, mutation=True)
+
+    def mark_reconcile_gap(self, since, limit=100, cursor=None):
+        """按 order_id 有界重开进入过 QMT 的记录，包括已退出的终态。"""
+        since = since if isinstance(since, str) else iso_datetime(since)
+        limit = max(1, min(int(limit), 1000))
+        def mark(cur):
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
+            cur.execute("SELECT order_id,document FROM " + self.repo_s +
+                        ".orders WHERE account_type=%s AND account_id=%s "
+                        "AND (submission_status NOT IN ('QUEUED','CANCELLED_LOCAL','EXPIRED','REJECTED') "
+                        "OR document->'qmt_orders'<>'[]'::jsonb OR document->'qmt_tasks'<>'[]'::jsonb "
+                        "OR document->'fills'<>'[]'::jsonb)" + after + " ORDER BY order_id LIMIT %s FOR UPDATE",
+                        params + (limit + 1,))
+            rows = cur.fetchall()
+            for order_id, raw in rows[:limit]:
+                doc = repo_json(raw)
+                if doc.get("last_reconcile_gap_since") == since:
+                    continue
+                doc["last_reconcile_gap_since"] = since
+                doc["reconcile_requested"] = True
+                self.repo_save(cur, doc, "RECONCILE_GAP")
+            has_more = len(rows) > limit
+            return {"marked": len(rows[:limit]), "next_cursor": rows[limit - 1][0] if has_more else None,
+                    "has_more": has_more}
+        return self.repo_run(mark, mutation=True)
 
     def repo_match(self, cur, kind, raw):
         identifiers = observation_identifiers(kind, raw)
@@ -1348,28 +1546,35 @@ class PostgresRepository(object):
             return doc
         return None
 
-    def repo_apply_pending(self, cur):
+    def repo_apply_pending(self, cur, limit=100):
+        limit = max(1, min(int(limit), 1000))
         cur.execute("SELECT observation_id,kind,raw,source,observed_at FROM " + self.repo_s +
-                    ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false ORDER BY observation_id",
-                    self.repo_scope)
+                    ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false "
+                    "AND observation_id>%s ORDER BY observation_id LIMIT %s",
+                    self.repo_scope + (self.repo_pending_cursor, limit))
         rows = cur.fetchall()
-        # 新父记录可能建立关联，重复扫到固定点后停止。
-        while rows:
-            remaining = []
-            for row in rows:
-                doc = self.repo_match(cur, row[1], repo_json(row[2]))
-                if doc is None:
-                    remaining.append(row)
-                    continue
-                before = json_text(doc)
-                apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
-                if json_text(doc) != before:
-                    self.repo_save(cur, doc, "QMT_OBSERVATION")
-                cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
-                            (doc["order_id"], row[0]))
-            if len(remaining) == len(rows):
-                break
-            rows = remaining
+        if not rows and self.repo_pending_cursor:
+            self.repo_pending_cursor = 0
+            cur.execute("SELECT observation_id,kind,raw,source,observed_at FROM " + self.repo_s +
+                        ".qmt_observations WHERE account_type=%s AND account_id=%s AND applied=false "
+                        "ORDER BY observation_id LIMIT %s", self.repo_scope + (limit,))
+            rows = cur.fetchall()
+        for row in rows:
+            doc = self.repo_match(cur, row[1], repo_json(row[2]))
+            if doc is None:
+                continue
+            before = json_text(doc)
+            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
+            if json_text(doc) != before:
+                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=row[3])
+            cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
+                        (doc["order_id"], row[0]))
+        if rows:
+            self.repo_pending_cursor = rows[-1][0]
+        return len(rows)
+
+    def replay_pending_observations(self, limit=100):
+        return self.repo_run(lambda cur: self.repo_apply_pending(cur, limit), mutation=True)
 
     def ingest_observation(self, kind, raw, source="callback"):
         def ingest(cur):
@@ -1391,7 +1596,7 @@ class PostgresRepository(object):
             identities_before = self.repo_qmt_identities(doc)
             apply_observation(doc, kind, raw, source, observed_at=stamp)
             if json_text(doc) != before:
-                self.repo_save(cur, doc, "QMT_OBSERVATION")
+                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
             cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
                         (doc["order_id"], obs_id))
             # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
@@ -1405,16 +1610,35 @@ class PostgresRepository(object):
                 for collection, field in (("qmt_orders", "qmt_order_id"), ("qmt_tasks", "qmt_task_id"))
                 for row in doc.get(collection, [])}
 
-    def recover(self):
-        self.check_executor()
+    def recover(self, limit=100, cursor=None, authority=None):
+        if authority is None:
+            self.check_executor()
+        limit = max(1, min(int(limit), 1000))
         def recovery(cur):
+            if authority is not None:
+                expected = (authority.get("instance_id"), authority.get("epoch")) if isinstance(authority, dict) else tuple(authority)
+                cur.execute("SELECT executor_instance,executor_epoch FROM " + self.repo_s +
+                            ".account_runtime WHERE account_type=%s AND account_id=%s", self.repo_scope)
+                if tuple(cur.fetchone()) != expected:
+                    raise OrderError(503, "EXECUTOR_LOCK_LOST", "executor epoch changed")
+            params = self.repo_scope
+            after = ""
+            if cursor:
+                after = " AND order_id>%s"
+                params += (str(cursor),)
             cur.execute("SELECT document FROM " + self.repo_s + ".orders WHERE account_type=%s AND account_id=%s "
-                        "ORDER BY order_id FOR UPDATE", self.repo_scope)
+                        + after + " ORDER BY order_id LIMIT %s FOR UPDATE", params + (limit + 1,))
             docs = [repo_json(row[0]) for row in cur.fetchall()]
             count = 0
-            for doc in docs:
+            for doc in docs[:limit]:
                 before = json_text(doc)
                 submitting = doc["submission_status"] == "SUBMITTING"
+                if (doc["submission_status"] == "QUEUED" and doc.get("order_type") == "BASKET"
+                        and doc.get("resolved_request")):
+                    # 崩溃可能发生在 set_basket 成功与阶段落库之间；先读回，再决定是否需要设置。
+                    doc["preparation_stage"] = "BASKET_GET"
+                    doc["preparation_complete"] = False
+                    doc["basket_state"] = "PENDING"
                 if submitting:
                     doc["submission_status"] = "UNKNOWN"
                     doc["sync_status"] = "PENDING"
@@ -1424,12 +1648,14 @@ class PostgresRepository(object):
                         attempt["status"] = "UNKNOWN"
                         if is_cancel:
                             doc["cancel_status"] = "UNKNOWN"
+                recompute_order(doc)
                 if json_text(doc) != before:
-                    recompute_order(doc)
                     self.repo_save(cur, doc, "EXECUTOR_RECOVERY")
                     count += 1
             self.repo_apply_pending(cur)
-            return {"recovered": count}
+            has_more = len(docs) > limit
+            return {"recovered": count, "next_cursor": docs[limit - 1]["order_id"] if has_more else None,
+                    "has_more": has_more}
         return self.repo_run(recovery, mutation=True)
 
     def lookup_observations(self, order_id, include_unassociated=False):
@@ -1660,6 +1886,14 @@ class QmtAdapter(object):
         return function
 
     def resolve(self, request, remark):
+        result = self._resolve_base(request, remark)
+        if request["execution"]["type"] == "SMART":
+            smart = request["execution"]
+            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            self._resolve_smart(result, smart, remark, data)
+        return result
+
+    def _resolve_base(self, request, remark):
         if not isinstance(request, dict):
             _qmt_error("INVALID_ORDER", "normalized request must be an object", 400)
         account = request.get("account_id")
@@ -1697,50 +1931,88 @@ class QmtAdapter(object):
             params["OrderType"] = 1 if request["execution"]["mode"] == "ALGO" else 2
             params["PriceType"] = pr_type
             result["userOrderParam"] = params
-        elif execution == "SMART":
-            smart = request["execution"]
-            data = self._require("get_smart_algo_param")([smart["algorithm"]])
-            if not isinstance(data, dict) or smart["algorithm"] not in data or not isinstance(data[smart["algorithm"]], list):
-                _qmt_error("SMART_ALGORITHM_UNAVAILABLE", "QMT did not return algorithm metadata")
-            definitions = data[smart["algorithm"]]
-            lookup = {}
-            for item in definitions:
-                if not isinstance(item, dict) or not isinstance(item.get("key"), str) or item["key"] in lookup:
-                    _qmt_error("INVALID_SMART_METADATA", "QMT returned invalid parameter definition")
-                lookup[item["key"]] = item
-            custom = smart["params"]
-            unknown = set(custom) - set(lookup)
-            if unknown or "m_strCmdRemark" in custom:
-                _qmt_error("INVALID_SMART_PARAM", "unknown or reserved fields: " + ", ".join(sorted(unknown | ({"m_strCmdRemark"} & set(custom)))))
-            expanded = {}
-            for key, item in lookup.items():
-                if key == "m_strCmdRemark":
-                    continue
-                is_default = key not in custom
-                expanded[key] = _qmt_smart_field(item, _qmt_smart_default(item) if is_default else custom[key], is_default)
-            expanded["m_strCmdRemark"] = remark
-            qmt_zone = dt.timezone(dt.timedelta(hours=8))
-            start = parse_timestamp(smart["start_at"]).astimezone(qmt_zone)
-            end = parse_timestamp(smart["end_at"]).astimezone(qmt_zone)
-            if start.date() != end.date():
-                _qmt_error("INVALID_SMART_TIME", "smart interval crosses Shanghai calendar day")
-            result.update({"smartAlgoType": smart["algorithm"],
-                           "startTime": start.strftime("%H:%M:%S"),
-                           "endTime": end.strftime("%H:%M:%S"), "algoParam": expanded})
         return result
+
+    def _resolve_smart(self, result, smart, remark, data):
+        if not isinstance(data, dict) or smart["algorithm"] not in data or not isinstance(data[smart["algorithm"]], list):
+            _qmt_error("SMART_ALGORITHM_UNAVAILABLE", "QMT did not return algorithm metadata")
+        definitions = data[smart["algorithm"]]
+        lookup = {}
+        for item in definitions:
+            if not isinstance(item, dict) or not isinstance(item.get("key"), str) or item["key"] in lookup:
+                _qmt_error("INVALID_SMART_METADATA", "QMT returned invalid parameter definition")
+            lookup[item["key"]] = item
+        custom = smart["params"]
+        unknown = set(custom) - set(lookup)
+        if unknown or "m_strCmdRemark" in custom:
+            _qmt_error("INVALID_SMART_PARAM", "unknown or reserved fields: " + ", ".join(sorted(unknown | ({"m_strCmdRemark"} & set(custom)))))
+        expanded = {}
+        for key, item in lookup.items():
+            if key == "m_strCmdRemark":
+                continue
+            is_default = key not in custom
+            expanded[key] = _qmt_smart_field(item, _qmt_smart_default(item) if is_default else custom[key], is_default)
+        expanded["m_strCmdRemark"] = remark
+        qmt_zone = dt.timezone(dt.timedelta(hours=8))
+        start = parse_timestamp(smart["start_at"]).astimezone(qmt_zone)
+        end = parse_timestamp(smart["end_at"]).astimezone(qmt_zone)
+        if start.date() != end.date():
+            _qmt_error("INVALID_SMART_TIME", "smart interval crosses Shanghai calendar day")
+        result.update({"smartAlgoType": smart["algorithm"],
+                       "startTime": start.strftime("%H:%M:%S"),
+                       "endTime": end.strftime("%H:%M:%S"), "algoParam": expanded})
+
+    def prepare_step(self, order, stage="RESOLVE", payload=None):
+        """一次阶段最多调用一个 QMT API；调用方持久化 updates 和后续 stage。"""
+        if not isinstance(order, dict):
+            _qmt_error("INVALID_ORDER", "order must be an object", 400)
+        if stage == "RESOLVE":
+            request = order.get("request")
+            result = self._resolve_base(request, order.get("remark"))
+            if request["execution"]["type"] == "SMART":
+                return {"stage": "SMART", "updates": {}}
+            return {"stage": "BASKET_GET" if order.get("order_type") == "BASKET" else None,
+                    "updates": {"resolved_request": result}}
+        if stage == "SMART":
+            request = order.get("request")
+            if not isinstance(request, dict) or request.get("execution", {}).get("type") != "SMART":
+                _qmt_error("INVALID_PREPARE_STAGE", "SMART stage needs SMART request", 400)
+            result = self._resolve_base(request, order.get("remark"))
+            smart = request["execution"]
+            data = self.snapshot(self._require("get_smart_algo_param")([smart["algorithm"]]))
+            self._resolve_smart(result, smart, order.get("remark"), data)
+            return {"stage": "BASKET_GET" if order.get("order_type") == "BASKET" else None,
+                    "updates": {"resolved_request": result}}
+        if stage not in ("BASKET_GET", "BASKET_SET", "BASKET_VERIFY"):
+            _qmt_error("INVALID_PREPARE_STAGE", "unknown preparation stage", 400)
+        expected = self._expected_basket(order)
+        if stage == "BASKET_SET":
+            self._require("set_basket")(copy_json(expected))
+            return {"stage": "BASKET_VERIFY", "updates": {}}
+        actual = self.snapshot(self._require("get_basket")(expected["name"]))
+        if stage == "BASKET_GET" and not actual:
+            return {"stage": "BASKET_SET", "updates": {}}
+        self._check_basket(actual, expected)
+        return {"stage": None, "updates": {}}
+
+    def _expected_basket(self, order):
+        if order.get("order_type") != "BASKET":
+            _qmt_error("INVALID_PREPARE_STAGE", "basket stage needs basket order", 400)
+        name = order.get("basket_name")
+        if not name or order.get("resolved_request", {}).get("orderCode") != name:
+            _qmt_error("BASKET_NAME_MISMATCH", "basket name differs from frozen request")
+        return {"name": name, "stocks": [
+            {"stock": item["symbol"], "weight": 0, "quantity": item["quantity"],
+             "optType": 23 if item["side"] == "BUY" else 24}
+            for item in order["items"]]}
 
     def prepare_basket(self, order):
         if order["order_type"] != "BASKET":
             return False
-        name = order["basket_name"]
-        if not name or order.get("resolved_request", {}).get("orderCode") != name:
-            _qmt_error("BASKET_NAME_MISMATCH", "basket name differs from frozen request")
+        expected = self._expected_basket(order)
+        name = expected["name"]
         get_basket = self._require("get_basket")
         set_basket = self._require("set_basket")
-        expected = {"name": name, "stocks": [
-            {"stock": item["symbol"], "weight": 0, "quantity": item["quantity"],
-             "optType": 23 if item["side"] == "BUY" else 24}
-            for item in order["items"]]}
         existing = get_basket(name)
         if existing:
             self._check_basket(existing, expected)
@@ -1855,8 +2127,717 @@ class QmtAdapter(object):
             return _qmt_passorder_snapshot(raw)
         return raw
 
+# ---- order_bridge/async_log.py ----
+"""ORDER 有界异步日志；调用线程只提交普通数据快照。"""
+import datetime as order_log_datetime
+import json as order_log_json
+import os as order_log_os
+import queue as order_log_queue
+import threading as order_log_threading
+import time as order_log_time
+
+
+class AsyncOrderLogger(object):
+    """后台写日志。sink(record) 仅在工作线程调用，并替代默认双写。"""
+
+    _ZONE = order_log_datetime.timezone(order_log_datetime.timedelta(hours=8))
+    _MAX_FIELDS = 32
+    _MAX_TEXT = 1024
+
+    def __init__(self, log_directory, capacity=2048, sink=None):
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError("log capacity must be a positive integer")
+        self.log_directory = log_directory
+        self._queue = order_log_queue.Queue(maxsize=capacity)
+        self._sink = sink
+        self._state_lock = order_log_threading.Lock()
+        self._stop_event = order_log_threading.Event()
+        self._thread = None
+        self._running = False
+        self._stopped = False
+        self._dropped = 0
+        self._write_errors = 0
+        self._sampled_at = None
+
+    @classmethod
+    def _plain(cls, value):
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:cls._MAX_TEXT]
+        return "<unsupported>"
+
+    def __call__(self, level, message, **fields):
+        # 不在 QMT 调用线程格式化、打印、写文件或遍历原生对象。
+        snapshot = {}
+        for index, (key, value) in enumerate(fields.items()):
+            if index >= self._MAX_FIELDS:
+                break
+            snapshot[key[:64]] = self._plain(value)
+        record = (order_log_time.time(), self._plain(level), self._plain(message), snapshot)
+        with self._state_lock:
+            if self._stop_event.is_set():
+                self._dropped += 1
+                return False
+            try:
+                self._queue.put_nowait(record)
+            except order_log_queue.Full:
+                self._dropped += 1
+                return False
+        return True
+
+    def start(self):
+        with self._state_lock:
+            if self._stop_event.is_set():
+                return False
+            if self._thread is not None:
+                return True
+            thread = order_log_threading.Thread(target=self._run, name="order-log-writer")
+            thread.daemon = True
+            self._thread = thread
+            self._running = True
+            try:
+                thread.start()
+            except Exception:
+                self._thread = None
+                self._running = False
+                raise
+        return True
+
+    def request_stop(self):
+        # stop 回调不等待写入；队列在后台自然排空。
+        with self._state_lock:
+            self._stop_event.set()
+            if self._thread is None:
+                self._stopped = True
+
+    def join(self, timeout=None):
+        with self._state_lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        with self._state_lock:
+            return self._stopped
+
+    def health(self):
+        with self._state_lock:
+            return {"running": self._running, "queue_size": self._queue.qsize(),
+                    "dropped": self._dropped, "write_errors": self._write_errors,
+                    "stopping": self._stop_event.is_set(), "stopped": self._stopped,
+                    "sampled_at": self._sampled_at}
+
+    def _sample(self):
+        now = order_log_datetime.datetime.now(self._ZONE).isoformat()
+        with self._state_lock:
+            self._sampled_at = now
+
+    def _write_default(self, record):
+        line = "{0} [{1}] {2}".format(record["timestamp"], record["level"], record["message"])
+        if record["fields"]:
+            line += " " + order_log_json.dumps(record["fields"], ensure_ascii=False, default=str)
+        line = line.replace("\r", "\\r").replace("\n", "\\n")
+        try:
+            print(line, flush=True)
+        except Exception:
+            self._write_failed()
+        try:
+            order_log_os.makedirs(self.log_directory, exist_ok=True)
+            path = order_log_os.path.join(self.log_directory, "order-" + record["day"] + ".log")
+            with open(path, "a", encoding="utf-8") as output:
+                output.write(line + "\n")
+        except Exception:
+            self._write_failed()
+
+    def _write_failed(self):
+        with self._state_lock:
+            self._write_errors += 1
+
+    def _run(self):
+        try:
+            while True:
+                try:
+                    item = self._queue.get(timeout=0.1)
+                except order_log_queue.Empty:
+                    self._sample()
+                    if self._stop_event.is_set():
+                        break
+                    continue
+                try:
+                    when = order_log_datetime.datetime.fromtimestamp(item[0], self._ZONE)
+                    record = {"timestamp": when.strftime("%Y-%m-%d %H:%M:%S"),
+                              "day": when.strftime("%Y-%m-%d"), "level": item[1],
+                              "message": item[2], "fields": item[3]}
+                    if self._sink is None:
+                        self._write_default(record)
+                    else:
+                        try:
+                            self._sink(record)
+                        except Exception:
+                            self._write_failed()
+                except Exception:
+                    self._write_failed()
+                finally:
+                    self._queue.task_done()
+                    self._sample()
+        finally:
+            with self._state_lock:
+                self._running = False
+                self._stopped = True
+                self._sampled_at = order_log_datetime.datetime.now(self._ZONE).isoformat()
+
+# ---- order_bridge/background.py ----
+"""ORDER 后台事务与短期授权；Last modified: 2026-09-26。
+
+队列只承载普通快照。容量令牌覆盖排队、QMT 在途和待持久结果整个生命期。
+"""
+import datetime as dt
+import queue
+import threading
+import time
+import uuid
+
+
+
+class OrderBackground(object):
+    def __init__(self, runtime):
+        self.r = runtime
+        self.queues = {kind: queue.Queue(128) for kind in ('cancel', 'submit', 'prepare', 'query')}
+        self.results = queue.Queue(128)
+        self.capacity = threading.BoundedSemaphore(128)
+        self.grant = None
+        self.db_ready = False
+        self.schema_ready = threading.Event()
+        self.authority_stop = threading.Event()
+        self.authority_done = threading.Event()
+        self.started = False
+        self.stopped = False
+        self.pending = set()
+        self.consumed = set()
+        self.fact_generation = 0
+        self.overflows = 0
+        self.rotation = 0
+        self.sample = {}
+        self.sampled_at = None
+        self.tick_ms = 0
+        self.qmt_ms = 0
+        self.round = None
+        self.next_round = 0
+        self.cursors = {'submit': None, 'cancel': None}
+        self.last_sample = 0
+        self.gap_cursor = None
+        self.gap_stamp = None
+        self.gap_generation = -1
+        self.handled_gap_generation = 0
+        self.db_thread = None
+        self.idle = threading.Event()
+        self.idle.set()
+        self.logged_versions = {}
+        self.busy = False
+
+    def _log(self, level, message, **fields):
+        try:
+            self.r.logger(level, message, **fields)
+        except Exception:
+            pass
+
+    def start(self):
+        if self.started or self.r.repo is None:
+            if self.r.stop_event.is_set() and self.r.repo is None:
+                self.stopped = self.r.stopped = True
+                self.r.stopped_event.set()
+            return
+        self.started = True
+        self.r.stopped = False
+        self.db_thread = threading.Thread(target=self._work, name='order-database', daemon=True)
+        self.db_thread.start()
+
+    def authorized(self, directive=None, require_database=True):
+        grant = self.grant
+        return bool(grant and (not require_database or (self.db_ready and self.sample.get('ready', True))) and not self.r.stop_event.is_set()
+                    and self.r.clock() < grant[2]
+                    and (directive is None or directive.get('authority') == grant[:2]))
+
+    def _authority(self):
+        r = self.r
+        try:
+            while not self.authority_stop.is_set():
+                if not self.schema_ready.wait(.05):
+                    continue
+                try:
+                    if self.grant is None:
+                        result = r.repo.acquire_executor(r.instance_id, r.host_id)
+                        identity = (r.instance_id, result['epoch'])
+                    # 发放期限从检查开始算；阻塞 SQL 不得延长旧授权。
+                    began = r.clock()
+                    r.repo.check_executor()
+                    self.grant = identity + (began + .75,)
+                except Exception as exc:
+                    self.grant = None
+                    r.last_error = getattr(exc, 'code', 'EXECUTOR_LOCK_LOST')
+                    self._log('ERROR', 'Order authority lost', error_code=r.last_error)
+                    break
+                self.authority_stop.wait(.15)
+        finally:
+            self.grant = None
+            try:
+                r.repo.close()
+            except Exception:
+                r.last_error = 'PERSISTENCE_CLOSE_ERROR'
+            finally:
+                self.authority_done.set()
+
+    def _enqueue(self, kind, **data):
+        if not self.capacity.acquire(False):
+            return False
+        data.update(kind=kind, token=uuid.uuid4().hex,
+                    authority=self.grant[:2] if self.grant else None)
+        try:
+            self.queues[kind].put_nowait(data)
+            return True
+        except queue.Full:
+            self.capacity.release()
+            return False
+
+    def tick(self, deadline=None, budget=None, max_actions=None):
+        r = self.r
+        began = r.clock()
+        r.last_tick = began
+        if r.repo is None or r.stop_event.is_set() or not r.tick_lock.acquire(False):
+            return 0
+        try:
+            if self.busy or r.stop_event.is_set():
+                return 0
+            self.busy = True
+            self.idle.clear()
+        finally:
+            r.tick_lock.release()
+        if deadline is None:
+            deadline = began + r.settings['schedule_budget_ms'] / 1000.0
+        budget = budget if budget is not None else {'submit': 0, 'cancel': 0}
+        count = 0
+        try:
+            empty = 0
+            kinds = ('cancel', 'submit', 'prepare', 'query')
+            while r.clock() < deadline and (max_actions is None or count < max_actions):
+                kind = kinds[self.rotation]
+                self.rotation = (self.rotation + 1) % len(kinds)
+                if kind != 'query' and not self.db_ready:
+                    empty += 1
+                    if empty >= 4:
+                        break
+                    continue
+                if kind in ('cancel', 'submit') and budget.get(kind, 0) >= r.settings[kind + '_batch_size']:
+                    empty += 1
+                    if empty >= 4:
+                        break
+                    continue
+                try:
+                    directive = self.queues[kind].get_nowait()
+                except queue.Empty:
+                    empty += 1
+                    if empty >= 4:
+                        break
+                    continue
+                empty = 0
+                result = dict(directive, status='ABORTED_NO_CALL')
+                token = directive['token']
+                if token in self.consumed:
+                    # 指令去重由 attempt 生命周期控制；重复令牌不产生第二个结果。
+                    continue
+                self.consumed.add(token)
+                call_start = r.clock()
+                try:
+                    if not r.stop_event.is_set() and (kind == 'query' or self.authorized(directive, require_database=False)):
+                        if kind != 'query' and not self.db_ready:
+                            self.consumed.discard(token)
+                            self.queues[kind].put_nowait(directive)
+                            break
+                        if kind == 'submit':
+                            document = directive['document']
+                            expired = False
+                            try:
+                                if document.get('request'):
+                                    r._runtime_smart_window(document['request'])
+                                expired = bool(document.get('submit_before') and utc_now() >= parse_timestamp(document['submit_before']))
+                            except Exception:
+                                expired = True
+                            if expired:
+                                result.update(status='ABORTED_NO_CALL', error={'code': 'ORDER_EXPIRED', 'message': 'Order expired before QMT call'})
+                                self.results.put_nowait(result)
+                                count += 1
+                                continue
+                            budget[kind] = budget.get(kind, 0) + 1
+                            result['value'] = r.adapter.snapshot(r.adapter.submit(directive['document']))
+                        elif kind == 'cancel':
+                            budget[kind] = budget.get(kind, 0) + 1
+                            result['value'] = r.adapter.cancel_action(directive['action'])
+                        elif kind == 'prepare':
+                            result['value'] = r.adapter.prepare_step(directive['document'], directive['stage'])
+                        else:
+                            result['value'] = r.adapter.query(directive['query_kind'], *directive.get('dates', ()))
+                        result['status'] = 'RETURNED'
+                except Exception as exc:
+                    result.update(status='UNKNOWN', error={'code': getattr(exc, 'code', 'QMT_ERROR'),
+                                  'message': str(exc)[:4096], 'type': type(exc).__name__})
+                self.qmt_ms = (r.clock() - call_start) * 1000
+                # 预留令牌保证队列不会满，QMT 线程从不等待消费者。
+                self.results.put_nowait(result)
+                count += 1
+            return count
+        finally:
+            self.tick_ms = (r.clock() - began) * 1000
+            self.busy = False
+            self.idle.set()
+
+    def _work(self):
+        r = self.r
+        authority = threading.Thread(target=self._authority, name='order-authority', daemon=True)
+        authority.start()
+        retained = None
+        initialized = False
+        recovery_cursor = None
+        setup_done = False
+        recovery_done = False
+        startup_gap_cursor = None
+        startup_stamp = iso_datetime()
+        try:
+            while True:
+                if r.stop_event.is_set():
+                    # 仅后台等待已进入的 QMT 调用；本机锁继续持有。
+                    with r.admission_lock:
+                        pass
+                    self.idle.wait()
+                    external = getattr(r, 'external_idle', None)
+                    if external is not None:
+                        external.wait()
+                    for source in self.queues.values():
+                        while True:
+                            try:
+                                self.results.put_nowait(dict(source.get_nowait(), status='ABORTED_NO_CALL'))
+                            except queue.Empty:
+                                break
+                    if retained is None and self.results.empty() and r.observations.empty():
+                        break
+                try:
+                    if not initialized and not r.stop_event.is_set():
+                        if not setup_done:
+                            if r.local_lock:
+                                r.local_lock.acquire()
+                            self.sample = r.repo.check_schema()
+                            r.repo.ensure_account_runtime()
+                            self.schema_ready.set()
+                            setup_done = True
+                        if self.grant is None:
+                            r.stop_event.wait(.02)
+                            continue
+                        if not recovery_done:
+                            page = r.repo.recover(limit=r.settings['reconcile_batch_size'],
+                                                  cursor=recovery_cursor, authority=self.grant[:2])
+                            recovery_cursor = page['next_cursor']
+                            if page['has_more']:
+                                continue
+                            recovery_done = True
+                        gap = r.repo.mark_reconcile_gap(startup_stamp, limit=r.settings['reconcile_batch_size'],
+                                                        cursor=startup_gap_cursor)
+                        startup_gap_cursor = gap['next_cursor']
+                        if gap['has_more']:
+                            continue
+                        initialized = r.initialized = True
+                        self.db_ready = True
+                        self._log('INFO', 'Order executor recovering', account_id=r.account_id, schema_version=self.sample.get('schema_version'))
+                    if retained is None:
+                        try:
+                            retained = ('result', self.results.get_nowait())
+                        except queue.Empty:
+                            try:
+                                retained = ('observation', r.observations.get_nowait())
+                            except queue.Empty:
+                                pass
+                    if retained:
+                        if retained[0] == 'result':
+                            self.db_ready = False
+                            self._merge(retained[1])
+                            self.capacity.release()
+                            self.consumed.discard(retained[1]['token'])
+                        else:
+                            self.db_ready = False
+                            document = r.repo.ingest_observation(retained[1][0], retained[1][1], 'callback')
+                            if document and self.logged_versions.get(document['order_id']) != document.get('version'):
+                                self.logged_versions[document['order_id']] = document.get('version')
+                                if len(self.logged_versions) > 1024:
+                                    self.logged_versions.pop(next(iter(self.logged_versions)))
+                                identifiers = observation_identifiers(retained[1][0], retained[1][1])
+                                self._log('INFO', 'QMT callback recorded', order_id=document['order_id'],
+                                          client_order_id=document.get('client_order_id'), order_version=document.get('version'),
+                                          qmt_order_id=identifiers.get('qmt_order_id'), qmt_task_id=identifiers.get('qmt_task_id'))
+                        was_result = retained[0] == 'result'
+                        retained = None
+                        self.db_ready = initialized
+                        if was_result:
+                            continue
+                    if not r.stop_event.is_set() and initialized:
+                        self._service()
+                    r.stop_event.wait(.005)
+                except _ContinueMerge:
+                    self.db_ready = True
+                    if not r.stop_event.is_set():
+                        try:
+                            self._service()
+                        except Exception as exc:
+                            self.db_ready = False
+                            r.last_error = getattr(exc, 'code', 'PERSISTENCE_UNAVAILABLE')
+                    continue
+                except Exception as exc:
+                    self.db_ready = False
+                    code = getattr(exc, 'code', 'PERSISTENCE_UNAVAILABLE')
+                    if r.last_error != code:
+                        self._log('ERROR', 'Order persistence suspended', error_code=code)
+                    r.last_error = code
+                    # retained 不移除；提交结果不明可幂等重写结果，认领异常则没有指令。
+                    time.sleep(.05)
+        finally:
+            self.db_ready = False
+            self.authority_stop.set()
+            self.authority_done.wait()
+            if r.local_lock:
+                r.local_lock.release()
+            r.initialized = r.recovery_complete = False
+            self.stopped = r.stopped = True
+            r.stopped_event.set()
+
+    def _service(self):
+        """每个有界归并批次后提供一次后台派发/对账服务机会。"""
+        r = self.r
+        r.repo.replay_pending_observations(limit=r.settings['reconcile_batch_size'])
+        if (r.observation_gap or self.fact_generation != self.handled_gap_generation) and self.gap_stamp is None:
+            self.gap_stamp = iso_datetime()
+            self.gap_generation = self.fact_generation
+        if self.gap_stamp is not None:
+            gap = r.repo.mark_reconcile_gap(self.gap_stamp, limit=r.settings['reconcile_batch_size'], cursor=self.gap_cursor)
+            self.gap_cursor = gap['next_cursor']
+            if not gap['has_more']:
+                self.gap_stamp = None
+                self.handled_gap_generation = self.gap_generation
+                r.observation_gap = self.handled_gap_generation != self.fact_generation
+            else:
+                return
+        self._reconcile_step()
+        if r.recovery_complete and self.authorized():
+            self._dispatch()
+        if r.clock() - self.last_sample >= 1:
+            self.sample = r.repo.health()
+            self.db_ready = True
+            self.sampled_at = iso_datetime()
+            self.last_sample = r.clock()
+
+    def _dispatch(self):
+        r = self.r
+        # 同时只认领一笔提交；预取/准备不把整批订单变成 SUBMITTING。
+        if not any(key[0] == 'submit' for key in self.pending):
+            rows = r.repo.queued_orders(limit=r.settings['submit_batch_size'], cursor=self.cursors['submit'])
+            self.cursors['submit'] = rows[-1]['order_id'] if rows else None
+            for document in rows:
+                key = ('submit', document['order_id'])
+                if key in self.pending:
+                    continue
+                try:
+                    r._runtime_smart_window(document['request'])
+                except Exception as exc:
+                    def reject(row):
+                        if row['submission_status'] == 'QUEUED':
+                            row.update(submission_status='EXPIRED', error={'code': exc.code, 'message': exc.message})
+                            recompute_order(row)
+                    r.repo.update_order(document['order_id'], 'ORDER_EXPIRED', reject)
+                    continue
+                stage = document.get('preparation_stage', 'RESOLVE')
+                if not document.get('preparation_complete'):
+                    if self._enqueue('prepare', document=document, stage=stage, pending_key=key):
+                        self.pending.add(key)
+                    break
+                if not self.capacity.acquire(False):
+                    break
+                try:
+                    grant = self.grant
+                    claimed, prepared = r.repo.claim_submission(document['order_id'], authority=grant[:2])
+                    if claimed:
+                        self.pending.add(key)
+                        attempt = prepared['attempts'][-1]
+                        self.queues['submit'].put_nowait(dict(kind='submit', token=attempt['attempt_id'],
+                            authority=grant[:2], document=prepared, pending_key=key))
+                    else:
+                        self.capacity.release()
+                except Exception:
+                    self.capacity.release()
+                    raise
+                break
+        rows = r.repo.cancellation_orders(limit=r.settings['cancel_batch_size'], cursor=self.cursors['cancel'])
+        self.cursors['cancel'] = rows[-1]['order_id'] if rows else None
+        for document in rows:
+            key = ('cancel', document['order_id'])
+            if key in self.pending:
+                continue
+            actions = pending_cancellations(document)
+            if not actions or not self.capacity.acquire(False):
+                continue
+            try:
+                grant = self.grant
+                action = dict(actions[0], cancel_request_id=document['active_cancel_request_id'])
+                claimed, prepared = r.repo.claim_cancel(document['order_id'], action, authority=grant[:2])
+                if claimed:
+                    action = prepared['attempts'][-1]
+                    self.pending.add(key)
+                    self.queues['cancel'].put_nowait(dict(kind='cancel', token=action['attempt_id'],
+                        authority=grant[:2], document=prepared, action=action, pending_key=key))
+                else:
+                    self.capacity.release()
+            except Exception:
+                self.capacity.release()
+                raise
+
+    def _merge(self, result):
+        r = self.r
+        kind = result['kind']
+        if kind == 'query':
+            if result['status'] == 'RETURNED':
+                # 每条原始事实独立事务，游标保留于结果上以便故障重试。
+                index = result.get('merge_index', 0)
+                values = result['value']
+                for raw in values[index:index + r.settings['reconcile_batch_size']]:
+                    r.repo.ingest_observation(result['query_kind'], raw, 'history' if result.get('dates') else 'query')
+                    index += 1
+                    result['merge_index'] = index
+                if index < len(values):
+                    raise _ContinueMerge()
+            else:
+                self.round['complete'] = False
+                self._log('WARNING', 'QMT reconciliation incomplete', kind=result['query_kind'], error_code=(result.get('error') or {}).get('code', result['status']))
+                if not result.get('dates'):
+                    self.round['live_complete'] = False
+            self.round['waiting'] = False
+            self.round['stage'] += 1
+            return
+        doc = result['document']
+        status = result['status']
+        def update(row):
+            if kind == 'prepare':
+                if row['submission_status'] != 'QUEUED':
+                    return
+                if status == 'RETURNED':
+                    value = result['value']
+                    row.update(copy_json(value['updates']))
+                    row['preparation_stage'] = value['stage']
+                    row['preparation_complete'] = value['stage'] is None
+                    if value['stage'] is None and row.get('order_type') == 'BASKET':
+                        row['basket_state'] = 'VERIFIED'
+                elif status == 'UNKNOWN':
+                    row.update(submission_status='REJECTED', error=result.get('error'))
+                    recompute_order(row)
+                return
+            for attempt in row['attempts']:
+                if attempt.get('attempt_id') == result['token']:
+                    attempt.update(status=status, returned_at=iso_datetime(), return_value=result.get('value'), error=result.get('error'))
+            if kind == 'submit' and status != 'RETURNED':
+                # 认领后不回 QUEUED；无调用证明也保守留给恢复/对账。
+                if row['submission_status'] == 'SUBMITTING':
+                    if status == 'ABORTED_NO_CALL' and (result.get('error') or {}).get('code') == 'ORDER_EXPIRED':
+                        row.update(submission_status='EXPIRED', error=result['error'])
+                    else:
+                        row.update(submission_status='UNKNOWN', execution_status='UNKNOWN')
+            if kind == 'cancel' and status == 'RETURNED' and result.get('value') is not True:
+                for attempt in row['attempts']:
+                    if attempt.get('attempt_id') == result['token']:
+                        attempt['status'] = 'REJECTED'
+            recompute_order(row)
+        r.repo.update_order(doc['order_id'], kind.upper() + '_CALL_' + status, update)
+        self.pending.discard(result['pending_key'])
+        self._log('INFO' if status == 'RETURNED' else 'WARNING', 'QMT execution stage persisted',
+                  stage=kind, outcome=status, order_id=doc['order_id'], client_order_id=doc.get('client_order_id'),
+                  attempt_id=result['token'], cancel_request_id=(result.get('action') or {}).get('cancel_request_id'),
+                  error_code=(result.get('error') or {}).get('code'))
+
+    def _reconcile_step(self):
+        r = self.r
+        if self.round is None:
+            if r.clock() < self.next_round:
+                return
+            self.round = dict(id=uuid.uuid4().hex, stage=0, waiting=False, complete=True,
+                              generation=self.fact_generation, cursor=None, frozen=False, live_complete=True)
+        current = self.round
+        if not current['frozen']:
+            batch = r.repo.begin_reconcile_batch(limit=r.settings['reconcile_batch_size'],
+                                                 round_id=current['id'], cursor=current['cursor'])
+            current['cursor'] = batch['next_cursor']
+            if batch['has_more']:
+                return
+            current['frozen'] = True
+            current['cursor'] = None
+            today = utc_now().astimezone(dt.timezone(dt.timedelta(hours=8))).date()
+            earliest = r.repo.reconcile_history_start()
+            dates = ()
+            if earliest:
+                start = parse_timestamp(earliest).astimezone(dt.timezone(dt.timedelta(hours=8))).date()
+                if start < today:
+                    dates = (start.strftime('%Y%m%d'), (today - dt.timedelta(days=1)).strftime('%Y%m%d'))
+            self.round['queries'] = [('task', ()), ('order', ()), ('deal', ())]
+            if dates:
+                self.round['queries'].extend([('order', dates), ('deal', dates)])
+        if current['waiting']:
+            return
+        if current['stage'] < len(current['queries']):
+            kind, dates = current['queries'][current['stage']]
+            if self._enqueue('query', query_kind=kind, dates=dates):
+                current['waiting'] = True
+            return
+        batch = r.repo.reconcile_round_batch(current['id'], limit=r.settings['reconcile_batch_size'],
+                                             cursor=current['cursor'])
+        complete = current['complete'] and current['generation'] == self.fact_generation
+        stamp = iso_datetime()
+        for document in batch['orders']:
+            if document['submission_status'] == 'SUBMITTING':
+                attempts = [a for a in document['attempts'] if a.get('kind') == 'SUBMIT']
+                started = attempts[-1].get('created_at', document['updated_at']) if attempts else document['updated_at']
+                if (parse_timestamp(stamp) - parse_timestamp(started)).total_seconds() >= r.confirmation_timeout:
+                    def unknown(row):
+                        if row['submission_status'] == 'SUBMITTING':
+                            row.update(submission_status='UNKNOWN', execution_status='UNKNOWN',
+                                       error={'code': 'SUBMISSION_OUTCOME_UNKNOWN', 'message': 'QMT acknowledgement is not yet associated'})
+                    document = r.repo.update_order(document['order_id'], 'SUBMISSION_UNKNOWN', unknown)
+            r.repo.finish_reconcile(document['order_id'], document.get('reconcile_round_fact_version', -1), complete, stamp)
+        current['cursor'] = batch['next_cursor']
+        if batch['has_more']:
+            return
+        if current['live_complete']:
+            r.recovery_complete = True
+        if complete:
+            r.last_reconciled_at = stamp
+        r.history_coverage_complete = current['complete']
+        self.round = None
+        self.next_round = r.clock() + 1
+
+    def health(self):
+        r = self.r
+        grant = self.grant
+        alive = r.last_tick is not None and r.clock() - r.last_tick < 5
+        return dict(http_running=not r.stop_event.is_set(), database_available=self.db_ready and self.sample.get('ready', True),
+                    trading_configured=r.repo is not None, scheduler_alive=alive,
+                    recovery_complete=r.recovery_complete, history_coverage_complete=r.history_coverage_complete,
+                    accepting_orders=bool(self.authorized() and r.recovery_complete and alive),
+                    executor_owned=bool(grant and r.clock() < grant[2]), schema_version=self.sample.get('schema_version'),
+                    unknown_order_count=self.sample.get('unknown_order_count'), pending_count=self.sample.get('pending_count'),
+                    account_id=r.account_id, last_reconciled_at=r.last_reconciled_at, error_code=r.last_error,
+                    observation_gap=r.observation_gap, sampled_at=self.sampled_at,
+                    lifecycle=('STOPPED' if self.stopped else 'STOPPING' if r.stop_event.is_set() else 'RUNNING' if r.recovery_complete else 'RECOVERING' if r.initialized else 'STARTING'),
+                    state='STOPPED' if self.stopped else ('STOPPING' if r.stop_event.is_set() else 'RUNNING'),
+                    queues=dict([(k, v.qsize()) for k, v in self.queues.items()] + [('results', self.results.qsize()), ('observations', r.observations.qsize())]),
+                    overflow_count=self.overflows, tick_ms=self.tick_ms, qmt_ms=self.qmt_ms,
+                    authority_remaining_ms=max(0, (grant[2] - r.clock()) * 1000) if grant else 0)
+
+
+class _ContinueMerge(Exception):
+    """保留快照游标并向其他后台工作让出，不丢弃未合并记录。"""
+
 # ---- order_bridge/runtime.py ----
-"""持久命令与 QMT 调度器；HTTP 路径不会调用 QMT。"""
+"""持久命令与 QMT 调度器；Last modified: 2026-09-26。"""
 import datetime as dt
 import os
 import queue
@@ -1949,7 +2930,7 @@ class LocalExecutorLock:
 
 class OrderRuntime:
     def __init__(self, apis, context, account_id, pg_config=None, logger=None,
-                 repository=None, local_lock=None, clock=None):
+                 repository=None, local_lock=None, clock=None, settings=None):
         self.apis = apis
         self.account_id = account_id
         self.config = pg_config
@@ -1961,6 +2942,8 @@ class OrderRuntime:
         self.instance_id = uuid.uuid4().hex
         self.host_id = socket.gethostname().lower()
         self.stop_event = threading.Event()
+        self.stopped_event = threading.Event()
+        self.stopped = False
         self.tick_lock = threading.Lock()
         self.admission_lock = threading.RLock()
         self.observations = queue.Queue(maxsize=4096)
@@ -1974,34 +2957,13 @@ class OrderRuntime:
         self.next_reconcile = 0
         self.next_initialize = 0
         self.confirmation_timeout = 30
+        self.settings = dict(submit_batch_size=10, cancel_batch_size=10, reconcile_batch_size=100, schedule_budget_ms=50)
+        self.settings.update(settings or {})
+        self.background = OrderBackground(self)
 
     def initialize(self):
-        if self.repo is None or self.stop_event.is_set():
-            return
-        try:
-            if self.local_lock:
-                self.local_lock.acquire()
-            schema = self.repo.check_schema()
-            self.repo.ensure_account_runtime()  # 使用启动参数账户；已有运行状态不重置。
-            self.repo.acquire_executor(self.instance_id, self.host_id)
-            self.repo.recover()
-            self.initialized = True
-            self.recovery_complete = False
-            self.last_error = None
-            self.logger("INFO", "Order executor recovering", account_id=self.account_id,
-                        database=(self.config or {}).get("pg_database"), schema=(self.config or {}).get("pg_schema"),
-                        schema_version=schema.get("schema_version"))
-        except Exception as exc:
-            self.initialized = False
-            self.recovery_complete = False
-            self.last_error = getattr(exc, "code", "PERSISTENCE_UNAVAILABLE")
-            self.next_initialize = self.clock() + 5
-            try:
-                self.repo.release_executor()
-            except Exception:
-                pass
-            # 错误仅记录稳定代码；PG 异常文本可能包含连接参数。
-            self.logger("ERROR", "Order executor unavailable", error_code=self.last_error)
+        """仅启动后台；连接、恢复和执行权检查不占用 QMT 回调。"""
+        self.background.start()
 
     def _runtime_require_store(self):
         if self.repo is None:
@@ -2013,7 +2975,8 @@ class OrderRuntime:
             raise OrderError(503, "ORDER_STOPPING", "order executor is stopping")
         if not self.initialized or not self.recovery_complete:
             raise OrderError(503, "EXECUTOR_NOT_READY", "executor has not completed recovery")
-        self.repo.check_executor()
+        if not self.background.authorized():
+            raise OrderError(503, "EXECUTOR_NOT_READY", "executor authority is unavailable")
 
     def handle(self, method, params, verb):
         writes = ("submit_order", "cancel_order")
@@ -2123,151 +3086,21 @@ class OrderRuntime:
         return self._runtime_integer(value, "limit", 1, 1000)
 
     def health(self):
-        database = False
-        executor = False
-        unknown_count = None
-        schema_version = None
-        if self.repo:
-            try:
-                health = self.repo.health()
-                database = bool(health.get("ready"))
-                executor = bool(health.get("executor"))
-                unknown_count = health.get("unknown_order_count")
-                schema_version = health.get("schema_version")
-            except Exception:
-                pass
-        alive = self.last_tick is not None and self.clock() - self.last_tick < 5
-        return {"http_running": not self.stop_event.is_set(), "database_available": database,
-                "trading_configured": self.repo is not None, "scheduler_alive": alive,
-                "recovery_complete": self.recovery_complete,
-                "history_coverage_complete": self.history_coverage_complete,
-                "accepting_orders": bool(database and executor and alive and self.initialized and self.recovery_complete and not self.stop_event.is_set()),
-                "executor_owned": executor, "schema_version": schema_version,
-                "unknown_order_count": unknown_count,
-                "account_id": self.account_id, "last_reconciled_at": self.last_reconciled_at,
-                "error_code": self.last_error, "observation_gap": self.observation_gap}
+        return self.background.health()
 
     def observe(self, kind, value):
-        """只在 QMT 回报上下文展开对象；队列满标记缺口，随后靠完整查询补齐。"""
         if self.repo is None:
             return
         try:
-            raw = self.adapter.snapshot(value)
-            self.observations.put_nowait((kind, raw))
+            self.observations.put_nowait((kind, self.adapter.snapshot(value)))
         except Exception:
             self.observation_gap = True
-            self.next_reconcile = 0
-            self.logger("ERROR", "QMT observation could not be buffered", kind=kind)
+            self.background.overflows += 1
+            self.background.fact_generation += 1
 
-    def tick(self):
-        self.last_tick = self.clock()
-        if self.repo is None or self.stop_event.is_set() or not self.tick_lock.acquire(False):
-            return
-        try:
-            if not self.initialized:
-                if self.clock() >= self.next_initialize:
-                    self.initialize()
-                if not self.initialized:
-                    return
-            self.repo.check_executor()
-            for unused in range(100):
-                try:
-                    kind, raw = self.observations.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    document = self.repo.ingest_observation(kind, raw, "callback")
-                    identifiers = observation_identifiers(kind, raw)
-                    self.logger("INFO", "QMT callback recorded", kind=kind,
-                                order_id=document.get("order_id") if document else None,
-                                client_order_id=document.get("client_order_id") if document else None,
-                                order_version=document.get("version") if document else None,
-                                qmt_order_id=identifiers.get("qmt_order_id"), qmt_task_id=identifiers.get("qmt_task_id"))
-                except Exception:
-                    self.observation_gap = True
-                    raise
-                finally:
-                    self.observations.task_done()
-            if self.recovery_complete and self._runtime_dispatch_cancel():
-                return
-            if self.clock() >= self.next_reconcile or not self.recovery_complete:
-                self._runtime_reconcile()
-            if not self.recovery_complete or self.stop_event.is_set():
-                return
-            # 每轮最多一种交易副作用；撤单优先。DB 中的等待意图不会占住新单队列。
-            if self._runtime_dispatch_cancel():
-                return
-            queued = self.repo.queued_orders(limit=1)
-            if queued:
-                self._runtime_submit(queued[0])
-        except Exception as exc:
-            self.initialized = False
-            self.recovery_complete = False
-            self.last_error = getattr(exc, "code", "EXECUTOR_ERROR")
-            self.next_initialize = self.clock() + 5
-            try:
-                self.repo.release_executor()
-            except Exception:
-                pass
-            self.logger("ERROR", "Order executor suspended", error_code=self.last_error)
-        finally:
-            self.tick_lock.release()
-
-    def _runtime_dispatch_cancel(self):
-        for document in self.repo.cancellation_orders(limit=100):
-            actions = pending_cancellations(document)
-            if actions:
-                self._runtime_cancel(document, actions[0])
-                return True
-        return False
-
-    def _runtime_reconcile(self):
-        self.next_reconcile = self.clock() + 1
-        documents = self.repo.reconcile_orders(limit=1000)
-        # 任务先查，再查委托和成交，防止把任务结束前的一次子单快照当终态。
-        complete = True
-        for kind in ("task", "order", "deal"):
-            try:
-                for raw in self.adapter.query(kind):
-                    self.repo.ingest_observation(kind, raw, "query")
-            except OrderError as exc:
-                complete = False
-                self.logger("WARNING", "QMT reconciliation incomplete", kind=kind, error_code=exc.code)
-        today = utc_now().astimezone(dt.timezone(dt.timedelta(hours=8))).date()
-        past = [parse_timestamp(row["created_at"]).astimezone(dt.timezone(dt.timedelta(hours=8))).date()
-                for row in documents]
-        earliest = min(past) if past else today
-        history_complete = True
-        if earliest < today:
-            for kind in ("order", "deal"):
-                try:
-                    for raw in self.adapter.query(kind, earliest.strftime("%Y%m%d"), (today - dt.timedelta(days=1)).strftime("%Y%m%d")):
-                        self.repo.ingest_observation(kind, raw, "history")
-                except OrderError as exc:
-                    history_complete = False
-                    self.logger("WARNING", "Historical reconciliation incomplete", kind=kind, error_code=exc.code)
-        stamp = iso_datetime()
-        for old in documents:
-            def reconcile(document):
-                is_past = parse_timestamp(document["created_at"]).astimezone(dt.timezone(dt.timedelta(hours=8))).date() < today
-                mark_reconciled(document, complete=complete and (not is_past or history_complete), now=stamp)
-                document["reconcile_requested"] = False
-                if document["submission_status"] == "SUBMITTING":
-                    attempts = [row for row in document["attempts"] if row.get("kind") == "SUBMIT"]
-                    started = attempts[-1].get("created_at", document["updated_at"]) if attempts else document["updated_at"]
-                    if (parse_timestamp(stamp) - parse_timestamp(started)).total_seconds() >= self.confirmation_timeout:
-                        document["submission_status"] = "UNKNOWN"
-                        document["execution_status"] = "UNKNOWN"
-                        document["error"] = {"code": "SUBMISSION_OUTCOME_UNKNOWN", "message": "QMT acknowledgement is not yet associated"}
-            self.repo.update_order(old["order_id"], "RECONCILED", reconcile)
-        self.history_coverage_complete = history_complete
-        # 历史缺口只冻结相关订单的终态判断；旧 SUBMITTING 已在恢复时转 UNKNOWN。
-        # 不因一笔历史 UNKNOWN 阻塞其他确定未提交的 QUEUED。
-        if complete:
-            self.recovery_complete = True
-            self.last_reconciled_at = stamp
-            self.last_error = None
-            self.observation_gap = False
+    def tick(self, deadline=None, budget=None, max_actions=None):
+        """只消费内存指令；budget 可在一个外层回调的多次单步间共享。"""
+        return self.background.tick(deadline, budget, max_actions)
 
     @staticmethod
     def _runtime_smart_window(request):
@@ -2283,128 +3116,10 @@ class OrderRuntime:
         if start.date() != now.date() or end.date() != now.date():
             raise OrderError(422, "SMART_DATE_UNSUPPORTED", "SMART times must use the current Shanghai calendar day")
 
-    def _runtime_submit(self, document):
-        order_id = document["order_id"]
-        try:
-            # 冻结的 QMT 参数只有时分秒，重启后必须重新核验原始带日期窗口。
-            self._runtime_smart_window(document["request"])
-            if document.get("submit_before") and utc_now() >= parse_timestamp(document["submit_before"]):
-                self.repo.update_order(order_id, "ORDER_EXPIRED", lambda row: recompute_order(row))
-                return
-            if document.get("resolved_request") is None:
-                resolved = self.adapter.resolve(document["request"], document["remark"])
-                def freeze(row):
-                    if row["submission_status"] == "QUEUED" and row.get("resolved_request") is None:
-                        row["resolved_request"] = copy_json(resolved)
-                document = self.repo.update_order(order_id, "PARAMETERS_RESOLVED", freeze)
-            if document["submission_status"] != "QUEUED" or self.stop_event.is_set():
-                return
-            if document["order_type"] == "BASKET":
-                self.repo.check_executor()
-                self.adapter.prepare_basket(document)
-                document = self.repo.update_order(order_id, "BASKET_VERIFIED", lambda row: row.update(basket_state="VERIFIED"))
-        except OrderError as exc:
-            if exc.status >= 500 and exc.code.startswith(("PERSISTENCE", "EXECUTOR", "DATABASE")):
-                raise
-            def reject(row):
-                if row["submission_status"] == "QUEUED":
-                    row["submission_status"] = "EXPIRED" if exc.code == "SMART_WINDOW_EXPIRED" else "REJECTED"
-                    row["error"] = {"code": exc.code, "message": exc.message}
-                    recompute_order(row)
-            self.repo.update_order(order_id, "ORDER_REJECTED", reject)
-            return
-        claimed, document = self.repo.claim_submission(order_id)
-        if not claimed:
-            return
-        if self.stop_event.is_set():
-            def abort(row):
-                row["submission_status"] = "CANCELLED_LOCAL" if row.get("cancel_requested") else "QUEUED"
-                for attempt in row["attempts"]:
-                    if attempt.get("kind") == "SUBMIT" and attempt.get("status") == "CALLING":
-                        attempt["status"] = "ABORTED_NO_CALL"
-                recompute_order(row)
-            self.repo.update_order(order_id, "DISPATCH_STOPPED_BEFORE_CALL", abort)
-            return
-        try:
-            self.repo.check_executor()
-            call_result = self.adapter.snapshot(self.adapter.submit(document))
-        except Exception as exc:
-            # 进入调用路径后异常一律按可能产生副作用处理，绝不自动回 QUEUED。
-            def unknown(row):
-                if row["submission_status"] in ("SUBMITTING", "UNKNOWN"):
-                    row["submission_status"] = "UNKNOWN"
-                    row["execution_status"] = "UNKNOWN"
-                    row["error"] = {"code": "SUBMISSION_OUTCOME_UNKNOWN", "message": "QMT submission requires reconciliation"}
-                for attempt in row["attempts"]:
-                    if attempt.get("kind") == "SUBMIT" and attempt.get("status") == "CALLING":
-                        attempt["status"] = "UNKNOWN"
-                        attempt["error"] = {"code": getattr(exc, "code", "QMT_ERROR"),
-                                            "type": type(exc).__name__, "message": str(exc)[:4096]}
-            self.repo.update_order(order_id, "SUBMISSION_UNKNOWN", unknown)
-            self.logger("ERROR", "QMT submit outcome unknown", order_id=order_id,
-                        client_order_id=document["client_order_id"], error_code=getattr(exc, "code", "QMT_ERROR"))
-            return
-        def returned(row):
-            for attempt in row["attempts"]:
-                if attempt.get("kind") == "SUBMIT" and attempt.get("status") == "CALLING":
-                    attempt.update(status="RETURNED", returned_at=iso_datetime(), return_value=copy_json(call_result))
-        self.repo.update_order(order_id, "SUBMIT_CALL_RETURNED", returned)
-        self.logger("INFO", "QMT submit call returned", order_id=order_id, client_order_id=document["client_order_id"],
-                    attempt_id=document["attempts"][-1]["attempt_id"])
-
-    def _runtime_cancel(self, document, action):
-        attempt_id = str(uuid.uuid4())
-        chosen = dict(action, attempt_id=attempt_id, status="CALLING", created_at=iso_datetime(),
-                      cancel_request_id=document["active_cancel_request_id"])
-        claimed = [False]
-        def claim(row):
-            candidates = pending_cancellations(row)
-            if any(item["kind"] == action["kind"] and str(item["target_id"]) == str(action["target_id"]) for item in candidates):
-                row["attempts"].append(copy_json(chosen))
-                row["cancel_status"] = "PENDING"
-                claimed[0] = True
-        document = self.repo.update_order(document["order_id"], "CANCEL_DISPATCHING", claim)
-        if not claimed[0]:
-            return
-        outcome = "UNKNOWN"
-        call_error = None
-        emitted = None
-        try:
-            if not self.stop_event.is_set():
-                self.repo.check_executor()
-                emitted = self.adapter.cancel_action(chosen)
-                outcome = "RETURNED" if emitted is True else "REJECTED"
-            else:
-                outcome = "ABORTED_NO_CALL"
-        except Exception as exc:
-            call_error = {"code": getattr(exc, "code", "QMT_ERROR"),
-                          "type": type(exc).__name__, "message": str(exc)[:4096]}
-        def finish(row):
-            for attempt in row["attempts"]:
-                if attempt["attempt_id"] == attempt_id:
-                    attempt.update(status=outcome, returned_at=iso_datetime(), return_value=emitted, error=call_error)
-            recompute_order(row)
-        self.repo.update_order(document["order_id"], "CANCEL_CALL_" + outcome, finish)
-        self.logger("INFO" if outcome == "RETURNED" else "WARNING", "QMT cancel call finished",
-                    order_id=document["order_id"], cancel_request_id=chosen["cancel_request_id"],
-                    attempt_id=attempt_id, outcome=outcome)
-
     def stop(self):
-        with self.admission_lock:
-            self.stop_event.set()
-        # 等待正在执行的 QMT 调用退出后才释放本机锁；不自动撤单。
-        with self.tick_lock:
-            try:
-                if self.repo:
-                    try:
-                        self.repo.release_executor()
-                    finally:
-                        self.repo.close()
-            finally:
-                if self.local_lock:
-                    self.local_lock.release()
-                self.initialized = False
-                self.recovery_complete = False
+        """停止受理立即返回；后台在 QMT 调用及结果收尾后释放本机锁。"""
+        self.stop_event.set()
+        self.background.start()
 
 # ---- order_bridge/http.py ----
 import datetime as dt
@@ -2453,38 +3168,17 @@ ACCOUNT_TYPES = frozenset((
 ))
 METHODS = frozenset(("account", "positions", "get_smart_algo_param"))
 
-_LOG_LOCK = threading.Lock()
+_ORDER_LOGGER = None
 _ORDER_STATE = None
 _ORDER_TIMER_ID = None
 
 
-# 日志使用上海时区，线程锁保护 console 和每日 UTF-8 文件的双写。
-# 日志失败不影响查询；只记录请求元信息，启动日志按需包含完整账户号。
+# 调度回调只把普通日志字段放入有界队列；格式化和双写由日志后台负责。
 def log_message(level, message, **fields):
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-    record = "{0} [{1}] {2}".format(
-        now.strftime("%Y-%m-%d %H:%M:%S"), level, message
-    )
-    if fields:
-        record += " " + json.dumps(fields, ensure_ascii=False, default=str)
-    record = record.replace("\r", "\\r").replace("\n", "\\n")
-    with _LOG_LOCK:
-        try:
-            print(record, flush=True)
-        except Exception:
-            pass
-        try:
-            os.makedirs(LOG_DIRECTORY, exist_ok=True)
-            path = os.path.join(LOG_DIRECTORY, "order-" + now.strftime("%Y-%m-%d") + ".log")
-            with open(path, "a", encoding="utf-8") as output:
-                output.write(record + "\n")
-        except OSError:
-            try:
-                print("{0} [ERROR] order log file write failed".format(
-                    now.strftime("%Y-%m-%d %H:%M:%S")
-                ), flush=True)
-            except Exception:
-                pass
+    logger = _ORDER_LOGGER
+    if logger is not None:
+        return logger(level, message, **fields)
+    return False
 
 
 # 可预期的接口错误，统一携带 HTTP 状态、业务错误码和说明。
@@ -2531,6 +3225,19 @@ class OrderState:
         self.account_id = None
         self.http_port = None
         self.runtime = None
+        self.settings = None
+        self.logger = None
+        self.cleanup_started = False
+        self.pending_released = 0
+        self.cleanup_done = threading.Event()
+        self.http_closed = threading.Event()
+        self.callback_idle = threading.Event()
+        self.callback_idle.set()
+        self.callback_guard = threading.Lock()
+        self.callback_running = False
+        self.scheduler_turn = 0
+        self.scheduler_metrics = {"sampled_at": None, "last_tick_ms": 0.0,
+                                  "max_tick_ms": 0.0, "last_query_ms": 0.0}
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -2579,6 +3286,26 @@ def runtime_http_port(value):
     if not isinstance(value, int) or not 1 <= value <= 65535:
         raise ValueError("HTTP_PORT must be an integer between 1 and 65535")
     return value
+
+
+def runtime_schedule_settings(values):
+    """面板整数浮点值可接受；小写优先，启动后复制冻结，不读取热修改。"""
+    defaults = {"submit_batch_size": 10, "cancel_batch_size": 10,
+                "reconcile_batch_size": 100, "schedule_budget_ms": SCHEDULE_BUDGET_MILLISECONDS}
+    result = {}
+    for name, default in defaults.items():
+        value = values.get(name, values.get(name.upper(), default))
+        if isinstance(value, str):
+            value = value.strip()
+            if not value or any(char < "0" or char > "9" for char in value):
+                raise ValueError(name + " must be a positive integer")
+            value = int(value)
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2147483647:
+            raise ValueError(name + " must be a positive integer")
+        result[name] = value
+    return result
 
 
 # HTTP accountId 显式值优先，否则使用启动时固定的账户号。
@@ -2700,47 +3427,68 @@ def dispatch_request(ContextInfo, request):
     return qmt_json_value(result)
 
 
-# schedule_run 入口：按本轮预算拉取队列，查询完成或异常都要释放等待方。
+# 预算从回调入口开始；交易阶段与旧查询交替，轮转位置跨 tick 保留。
 def process_http_requests(ContextInfo):
+    started_at = time.monotonic()
     state = _ORDER_STATE
     if state is None or state.stop_event.is_set():
         return
-    if state.runtime is not None:
-        state.runtime.tick()
-    started_at = time.monotonic()
-    processed = 0
-    while processed < MAX_JOBS_PER_TICK:
-        if (time.monotonic() - started_at) * 1000 >= SCHEDULE_BUDGET_MILLISECONDS:
-            break
-        try:
-            job = state.request_queue.get_nowait()
-        except queue.Empty:
-            break
-        try:
-            with state.lifecycle_lock:
-                if state.stop_event.is_set():
-                    job.set_error(503, "ORDER_STOPPING", "HTTP order is stopping")
-                elif not job.try_start():
-                    job.set_error(504, "REQUEST_EXPIRED", "request expired before QMT processing")
-            if job.error is None:
-                job.result = dispatch_request(ContextInfo, job.request)
-        except OrderError as exc:
-            job.set_error(exc.status, exc.code, exc.message)
-        except Exception:
-            job.set_error(500, "QMT_ERROR", "QMT request failed")
-        finally:
-            if job.error is not None:
-                log_message(
-                    "ERROR" if job.error_status >= 500 else "WARNING",
-                    "QMT request failed",
-                    request_id=job.request_id,
-                    method=job.request.get("method"),
-                    status=job.error_status,
-                    error_code=job.error["code"],
-                )
-            job.done.set()
-            state.request_queue.task_done()
-            processed += 1
+    # 短锁仅更新内存门闩；QMT I/O 期间不持有它。
+    with state.callback_guard:
+        if state.callback_running or state.stop_event.is_set():
+            return
+        state.callback_running = True
+        state.callback_idle.clear()
+    settings = state.settings or runtime_schedule_settings({})
+    deadline = started_at + settings["schedule_budget_ms"] / 1000.0
+    budget = {"submit": 0, "cancel": 0}
+    queries, idle_turns = 0, 0
+    try:
+        while time.monotonic() < deadline and not state.stop_event.is_set():
+            service = state.scheduler_turn
+            state.scheduler_turn = 1 - service
+            progressed = False
+            if service == 0 and state.runtime is not None:
+                progressed = bool(state.runtime.tick(deadline=deadline, budget=budget, max_actions=1))
+            elif service == 1 and queries < MAX_JOBS_PER_TICK:
+                try:
+                    job = state.request_queue.get_nowait()
+                except queue.Empty:
+                    job = None
+                if job is not None:
+                    query_started = time.monotonic()
+                    try:
+                        with state.lifecycle_lock:
+                            if state.stop_event.is_set():
+                                job.set_error(503, "ORDER_STOPPING", "HTTP order is stopping")
+                            elif not job.try_start():
+                                job.set_error(504, "REQUEST_EXPIRED", "request expired before QMT processing")
+                        if job.error is None:
+                            job.result = dispatch_request(ContextInfo, job.request)
+                    except OrderError as exc:
+                        job.set_error(exc.status, exc.code, exc.message)
+                    except Exception:
+                        job.set_error(500, "QMT_ERROR", "QMT request failed")
+                    finally:
+                        if job.error is not None:
+                            log_message("ERROR" if job.error_status >= 500 else "WARNING", "QMT request failed",
+                                        request_id=job.request_id, method=job.request.get("method"),
+                                        status=job.error_status, error_code=job.error["code"])
+                        job.done.set()
+                        state.request_queue.task_done()
+                        state.scheduler_metrics["last_query_ms"] = (time.monotonic() - query_started) * 1000
+                    queries += 1
+                    progressed = True
+            idle_turns = 0 if progressed else idle_turns + 1
+            if idle_turns >= 2:
+                break
+    finally:
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        state.scheduler_metrics.update(sampled_at=time.time(), last_tick_ms=elapsed_ms,
+                                       max_tick_ms=max(state.scheduler_metrics["max_tick_ms"], elapsed_ms))
+        with state.callback_guard:
+            state.callback_running = False
+            state.callback_idle.set()
 
 
 # HTTP 层仅做解析、校验、入队和返回 JSON；QMT 查询留给调度回调。
@@ -2843,7 +3591,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
     def _bridge_submit(self, params):
         state = self.server.order_state
-        if state.stop_event.is_set():
+        if state.stop_event.is_set() and self.request_method != "health":
             raise OrderError(503, "ORDER_STOPPING", "HTTP order is stopping")
         if state.runtime is None:
             raise OrderError(503, "EXECUTOR_NOT_READY", "order runtime is not initialized")
@@ -2854,6 +3602,13 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             raise OrderError(429, "COMMAND_CAPACITY_EXCEEDED", "command capacity reached; retry with the same id")
         try:
             status, result = state.runtime.handle(self.request_method, params, self.command)
+            if self.request_method == "health":
+                result = dict(result)
+                result["http_running"] = not state.http_closed.is_set()
+                result["http_lifecycle"] = "STOPPING" if state.stop_event.is_set() else "RUNNING"
+                result["schedule_settings"] = dict(state.settings or runtime_schedule_settings({}))
+                result["scheduler"] = dict(state.scheduler_metrics)
+                result["logging"] = state.logger.health() if state.logger is not None else None
         except OrderError:
             raise
         except Exception:
@@ -2891,7 +3646,10 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             fields.update({key: payload[key] for key in ("client_order_id", "order_id", "cancel_request_id") if key in payload})
         if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
             fields["error_code"] = payload["error"].get("code")
-        log_message("INFO" if status < 400 else "WARNING", "Response sent", **fields)
+        # 请求始终写入所属实例，旧 HTTP 线程不能把响应日志写到重启后的实例。
+        logger = self.server.order_state.logger
+        if logger is not None:
+            logger("INFO" if status < 400 else "WARNING", "Response sent", **fields)
 
     def log_message(self, format, *args):
         pass
@@ -2899,7 +3657,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
 def serve_http(state):
     try:
-        while not state.stop_event.is_set():
+        while not state.http_closed.is_set():
             state.server.handle_request()
     finally:
         if state.server is not None:
@@ -2909,18 +3667,23 @@ def serve_http(state):
 # QMT 启动入口：先校验参数，再绑定账户、监听端口并注册定时任务。
 # 有效配置固定在 OrderState 中，运行期间修改面板不会热切换账户或端口。
 def init(ContextInfo):
-    global _ORDER_STATE, _ORDER_TIMER_ID
+    global _ORDER_STATE, _ORDER_TIMER_ID, _ORDER_LOGGER
     if _ORDER_STATE is not None:
         raise RuntimeError("HTTP order is already initialized")
     # 显式的小写参数优先；小写值非法时直接失败，不静默回退到其他账户。
     account_id = runtime_account_id(globals().get("account_id", ACCOUNT_ID))
     http_port = runtime_http_port(globals().get("http_port", HTTP_PORT))
+    settings = runtime_schedule_settings(globals())
+    pg_config = read_pg_config(globals())
     ContextInfo.set_account(account_id)
     state = OrderState()
     state.account_id = account_id
     state.http_port = http_port
-    pg_config = read_pg_config(globals())
-    state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config, logger=log_message)
+    state.settings = dict(settings)
+    state.logger = AsyncOrderLogger(LOG_DIRECTORY)
+    state.runtime = OrderRuntime(globals(), ContextInfo, account_id, pg_config=pg_config,
+                                 logger=state.logger, settings=settings)
+    state.runtime.external_idle = state.callback_idle
     server = ThreadingHTTPServer((HTTP_HOST, http_port), OrderRequestHandler)
     server.timeout = 0.2
     server.order_state = state
@@ -2929,16 +3692,19 @@ def init(ContextInfo):
         target=serve_http, args=(state,), name="qmt-http-order", daemon=True
     )
     _ORDER_STATE = state
+    _ORDER_LOGGER = state.logger
     try:
-        state.runtime.initialize()
         _ORDER_TIMER_ID = ContextInfo.schedule_run(
             process_http_requests, "20200101000000", -1,
             SCHEDULE_INTERVAL, "http_order_timer",
         )
+        state.logger.start()
+        state.runtime.initialize()
         state.server_thread.start()
     except Exception:
         # 启动中途失败时撤销定时器并关闭端口，便于修正配置后重新启动。
         state.stop_event.set()
+        state.http_closed.set()
         timer_id = _ORDER_TIMER_ID
         _ORDER_TIMER_ID = None
         if timer_id is not None:
@@ -2948,11 +3714,11 @@ def init(ContextInfo):
                 pass
         server.server_close()
         state.runtime.stop()
-        _ORDER_STATE = None
+        _start_order_cleanup(state)
         raise
     log_message(
         "INFO", "QMT HTTP order listening",
-        host=HTTP_HOST, port=server.server_address[1], account_id=state.account_id,
+        host=HTTP_HOST, port=server.server_address[1], account_id=state.account_id, **settings
     )
     if pg_config:
         log_message("INFO", "ORDER persistence configured", account_id=account_id,
@@ -2965,8 +3731,41 @@ def handlebar(ContextInfo):
     pass
 
 
-# QMT 停止入口：阻止新请求、撤销定时器、以 503 唤醒排队请求，再关闭服务。
-# 即使取消定时器抛出异常，finally 仍会完成队列和端口清理。
+# 后台清理等待在途 QMT、数据库和日志退出；QMT stop 回调只发信号。
+def _finish_order_cleanup(state):
+    global _ORDER_STATE, _ORDER_LOGGER
+    try:
+        state.callback_idle.wait()
+        if state.runtime is not None:
+            state.runtime.stopped_event.wait()
+        # 慢日志收尾期间仍开放 /health，客户端可以看到 STOPPING。
+        if state.logger is not None:
+            state.logger("INFO", "HTTP order stopped", pending_released=state.pending_released)
+            state.logger.request_stop()
+            state.logger.join()
+        state.http_closed.set()
+        if state.server_thread is not None and state.server_thread.is_alive():
+            state.server_thread.join()
+        if state.server is not None:
+            state.server.server_close()
+    finally:
+        state.cleanup_done.set()
+        if _ORDER_STATE is state:
+            _ORDER_STATE = None
+            _ORDER_LOGGER = None
+
+
+def _start_order_cleanup(state):
+    with state.lifecycle_lock:
+        if state.cleanup_started:
+            return
+        state.cleanup_started = True
+    worker = threading.Thread(target=_finish_order_cleanup, args=(state,),
+                              name="qmt-order-cleanup", daemon=True)
+    worker.start()
+
+
+# QMT 停止入口：不等待后台线程，清理完成前仍保留 STOPPING 状态。
 def stop(ContextInfo):
     global _ORDER_STATE, _ORDER_TIMER_ID
     state = _ORDER_STATE
@@ -2997,15 +3796,12 @@ def stop(ContextInfo):
             job.done.set()
             state.request_queue.task_done()
             count += 1
-        if state.server_thread is not None and state.server_thread.is_alive():
-            state.server_thread.join(timeout=1.0)
-        if state.server is not None:
-            state.server.server_close()
-        _ORDER_STATE = None
-        log_message("INFO", "HTTP order stopped", pending_released=count)
+        state.pending_released = count
+        log_message("INFO", "HTTP order stopping", pending_released=count)
+        _start_order_cleanup(state)
 
 
-# QMT 回报只把当前上下文中的对象转为普通字典；数据库更新交给调度器。
+# QMT 回报只把当前上下文中的对象转为普通字典；数据库更新交给后台工作线程。
 def order_callback(ContextInfo, orderInfo):
     state = _ORDER_STATE
     if state is not None and state.runtime is not None:

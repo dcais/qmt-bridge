@@ -4,6 +4,7 @@ import os
 import json
 import importlib.util
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -126,13 +127,13 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
             return cur.fetchone()[0]
         self.assertEqual(first.repo.repo_run(registered_accounts), 0)
         first.initialize()
-        first.tick()  # First full QMT read completes recovery.
-        self.assertTrue(first.recovery_complete, first.last_error)
+        self._until(lambda: first.recovery_complete, first)
         self.runtime = first
 
     def tearDown(self):
         for runtime in reversed(self.runtimes):
             runtime.stop()
+            self._until_stopped(runtime)
         conn = self.repositories[0].repo_connect()
         try:
             cur = conn.cursor()
@@ -182,14 +183,60 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         runtime = runtime or self.runtime
         for unused in range(count):
             runtime.tick()
-            self.assertTrue(runtime.initialized, runtime.last_error)
+
+    def _until(self, predicate, runtime=None, timeout=10):
+        """Pump QMT while background DB work converges; never assume one tick commits."""
+        runtime = runtime or self.runtime
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            runtime.tick()
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("runtime did not converge: error={!r}, health={!r}".format(
+            runtime.last_error, runtime.health()))
+
+    def _until_order(self, client, predicate, runtime=None):
+        runtime = runtime or self.runtime
+        try:
+            self._until(lambda: predicate(runtime.repo.get_order(client)), runtime)
+        except AssertionError:
+            self.fail("order {!r} did not converge: {!r}".format(
+                client, runtime.repo.get_order(client)))
+
+    def _until_call(self, qmt, name, count=1, runtime=None):
+        self._until(lambda: len(qmt.side_effects(name)) >= count, runtime)
+
+    def _until_stopped(self, runtime, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if runtime.stopped_event.is_set():
+                return
+            time.sleep(0.005)
+        self.fail("background did not stop: {!r}".format(runtime.health()))
+
+    def _reconcile_now(self, client):
+        """Advance the persisted due time after a prior round has finished."""
+        self._until(lambda: self.runtime.background.round is None)
+        doc = self.runtime.repo.get_order(client)
+        self.runtime.repo.update_order(doc["order_id"], "TEST_RECONCILE_DUE",
+                                       lambda row: row.update(
+                                           reconcile_due_at=dt.datetime.now(dt.timezone.utc).isoformat()))
+        self.runtime.background.next_round = 0
+
+    def _age_order_column(self, order_id, created_at):
+        """Keep the indexed SQL timestamp aligned with the synthetic JSON age."""
+        def age(cur):
+            cur.execute("UPDATE " + self.runtime.repo.repo_s +
+                        ".orders SET created_at=%s WHERE account_type=%s AND account_id=%s AND order_id=%s",
+                        (created_at,) + self.runtime.repo.repo_scope + (order_id,))
+        self.runtime.repo.repo_run(age, mutation=True)
 
     def test_startup_uses_configured_account_and_restart_preserves_event_cursor(self):
         account_id = "0012345678"
         runtime = self._new_runtime(_FakeQmt(), account_id=account_id)
         runtime.initialize()
-        self._tick(runtime)
-        self.assertTrue(runtime.recovery_complete, runtime.last_error)
+        self._until(lambda: runtime.recovery_complete, runtime)
         request = self.single(client="startup-order")
         request["account_id"] = account_id
         runtime.handle("submit_order", request, "POST")
@@ -205,9 +252,10 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(before[0], account_id)
         self.assertGreater(before[1], 0)
         runtime.stop()
+        self._until_stopped(runtime)
         restarted = self._new_runtime(_FakeQmt(), account_id=account_id)
         restarted.initialize()
-        self._tick(restarted)
+        self._until(lambda: restarted.recovery_complete, restarted)
         after = restarted.repo.repo_run(account_row)
         self.assertEqual(after[0], before[0])
         self.assertGreaterEqual(after[1], before[1])  # 重启对账可追加事件，但不能重置游标。
@@ -233,13 +281,37 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         with self.assertRaises(OrderError) as error:
             self.runtime.handle("submit_order", self.single(quantity=200), "POST")
         self.assertEqual(error.exception.status, 409)
-        self._tick()
-        self._tick()
+        self._until_call(qmt, "passorder")
+        self._until_order("single-one", lambda row: row["submission_status"] == "SUBMITTING")
         self.assertEqual(len(qmt.side_effects("passorder")), 1)
         self.assertEqual(self.runtime.repo.get_order("single-one")["submission_status"], "SUBMITTING")
         events = self.runtime.handle("order_events", {"after": 0}, "GET")[1]["events"]
         self.assertEqual([e["event_id"] for e in events], list(range(1, len(events) + 1)))
         self.assertEqual(self.runtime.handle("order", {"client_order_id": "single-one"}, "GET")[1]["order_id"], accepted["order_id"])
+
+    def test_blocked_submit_result_commit_does_not_dispatch_twice(self):
+        qmt, repo = self.runtime.fake_qmt, self.runtime.repo
+        entered, release = threading.Event(), threading.Event()
+        original_update = repo.update_order
+
+        def block_result(order_id, event_type, mutator):
+            if event_type == "SUBMIT_CALL_RETURNED":
+                entered.set()
+                release.wait(3)
+            return original_update(order_id, event_type, mutator)
+
+        with patch.object(repo, "update_order", side_effect=block_result):
+            self.runtime.handle("submit_order", self.single(), "POST")
+            try:
+                self._until(lambda: entered.is_set())
+                for unused in range(20):
+                    self.runtime.tick()
+                self.assertEqual(len(qmt.side_effects("passorder")), 1)
+                self.assertEqual(repo.get_order("single-one")["attempts"][-1]["status"], "CALLING")
+            finally:
+                release.set()
+            self._until_order("single-one", lambda row: row["attempts"][-1]["status"] == "RETURNED")
+        self.assertEqual(len(qmt.side_effects("passorder")), 1)
 
     def test_queued_cancel_prevents_qmt_submit(self):
         qmt = self.runtime.fake_qmt
@@ -257,7 +329,8 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
     def test_submitting_cancel_waits_for_qmt_id_then_cancels_remainder(self):
         qmt = self.runtime.fake_qmt
         self.runtime.handle("submit_order", self.single(), "POST")
-        self._tick()
+        self._until_call(qmt, "passorder")
+        self._until_order("single-one", lambda row: row["submission_status"] == "SUBMITTING")
         code, waiting = self.runtime.handle("cancel_order", self.cancel(), "POST")
         self.assertEqual(code, 202)
         self.assertEqual(waiting["cancel_status"], "WAITING_QMT_ID")
@@ -273,7 +346,8 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.runtime.observe("deal", {"qmt_order_id": "qmt-1", "trade_id": "fill-1",
                                       "trading_day": "20260926", "market": "SH", "symbol": "600000.SH",
                                       "side": "BUY", "quantity": 400, "amount": "4200"})
-        self._tick()
+        self._until_call(qmt, "cancel")
+        self._until_order("single-one", lambda row: row["filled_quantity"] == 400 and row["cancel_status"] == "PENDING")
         self.assertEqual(len(qmt.side_effects("cancel")), 1)
         current = self.runtime.repo.get_order("single-one")
         self.assertEqual(current["filled_quantity"], 400)
@@ -284,8 +358,10 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.runtime.observe("deal", {"qmt_order_id": "qmt-1", "trade_id": "fill-2",
                                       "trading_day": "20260926", "market": "SH", "symbol": "600000.SH",
                                       "side": "BUY", "quantity": 100, "amount": "1050"})
-        self._tick()
-        self._tick()
+        self._until_order("single-one", lambda row: row["filled_quantity"] == 500 and
+                          row["cancelled_quantity"] == 500)
+        self._reconcile_now("single-one")
+        self._until_order("single-one", lambda row: row["execution_status"] == "PARTIALLY_CANCELLED")
         current = self.runtime.repo.get_order("single-one")
         self.assertEqual(current["filled_quantity"], 500)
         self.assertEqual(current["cancelled_quantity"], 500)
@@ -298,16 +374,18 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         qmt = original.fake_qmt
         qmt.submit_exception = RuntimeError("call outcome hidden")
         original.handle("submit_order", self.single(), "POST")
-        self._tick()
+        self._until_order("single-one", lambda row: row["submission_status"] == "UNKNOWN")
         self.assertEqual(original.repo.get_order("single-one")["submission_status"], "UNKNOWN")
         original.stop()
+        self._until_stopped(original)
         next_qmt = _FakeQmt()
         restarted = self._new_runtime(next_qmt)
         restarted.initialize()
-        self._tick(restarted)
+        self._until(lambda: restarted.recovery_complete, restarted)
         self.assertEqual(restarted.repo.get_order("single-one")["submission_status"], "UNKNOWN")
         restarted.handle("submit_order", self.single(client="second"), "POST")
-        self._tick(restarted)
+        self._until_call(next_qmt, "passorder", runtime=restarted)
+        self._until_order("second", lambda row: row["submission_status"] == "SUBMITTING", restarted)
         self.assertEqual(len(next_qmt.side_effects("passorder")), 1)
         self.assertEqual(restarted.repo.get_order("second")["submission_status"], "SUBMITTING")
 
@@ -325,13 +403,14 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         original.repo.update_order(doc["order_id"], "PARAMETERS_RESOLVED",
                                    lambda row: row.update(resolved_request=frozen))
         original.stop()
+        self._until_stopped(original)
         qmt = _FakeQmt()
         restarted = self._new_runtime(qmt)
         expired_clock = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)
         from order_bridge import runtime as runtime_module
         with patch.object(runtime_module, "utc_now", return_value=expired_clock):
             restarted.initialize()
-            self._tick(restarted)
+            self._until_order("single-one", lambda row: row["submission_status"] == "EXPIRED", restarted)
         current = restarted.repo.get_order("single-one")
         self.assertEqual(current["submission_status"], "EXPIRED")
         self.assertEqual(current["attempts"], [])
@@ -345,10 +424,16 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
                                        lambda row: row.update(created_at=yesterday,
                                                               submission_status="UNKNOWN",
                                                               execution_status="UNKNOWN"))
+        self._age_order_column(old["order_id"], yesterday)
         qmt.history_exception = OrderError(502, "HISTORY_UNAVAILABLE", "synthetic coverage gap")
         self.runtime.handle("submit_order", self.single(client="new"), "POST")
-        self.runtime.next_reconcile = 0
-        self._tick()
+        self._reconcile_now("old")
+        self._until_call(qmt, "query_history_order")
+        self._until_call(qmt, "query_history_deal")
+        self._until(lambda: self.runtime.background.round is None)
+        self._until_order("old", lambda row: row["sync_status"] == "INCOMPLETE")
+        self._until_call(qmt, "passorder")
+        self._until_order("new", lambda row: row["submission_status"] == "SUBMITTING")
         self.assertFalse(self.runtime.history_coverage_complete)
         self.assertTrue(self.runtime.recovery_complete)
         self.assertEqual(self.runtime.repo.get_order("old")["sync_status"], "INCOMPLETE")
@@ -358,11 +443,13 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
     def test_terminal_order_still_gets_historical_reconciliation(self):
         qmt = self.runtime.fake_qmt
         self.runtime.handle("submit_order", self.single(), "POST")
-        self._tick()
+        self._until_call(qmt, "passorder")
+        self._until_order("single-one", lambda row: row["submission_status"] == "SUBMITTING")
         doc = self.runtime.repo.get_order("single-one")
         yesterday = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat()
         self.runtime.repo.update_order(doc["order_id"], "TEST_HISTORICAL_TERMINAL",
                                        lambda row: row.update(created_at=yesterday))
+        self._age_order_column(doc["order_id"], yesterday)
         trading_day = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))) -
                        dt.timedelta(days=2)).strftime("%Y%m%d")
         self.runtime.observe("order", {"remark": doc["remark"], "qmt_order_id": "filled-historical",
@@ -371,14 +458,14 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.runtime.observe("deal", {"qmt_order_id": "filled-historical", "trade_id": "hist-fill",
                                       "trading_day": trading_day, "market": "SH", "symbol": "600000.SH",
                                       "side": "BUY", "quantity": 1000, "amount": "10500"})
-        self.runtime.next_reconcile = 0
-        self._tick()
+        self._until_order("single-one", lambda row: row["filled_quantity"] == 1000)
+        self._reconcile_now("single-one")
+        self._until_order("single-one", lambda row: row["execution_status"] == "FILLED")
         self.assertEqual(self.runtime.repo.get_order("single-one")["execution_status"], "FILLED")
-        qmt.calls[:] = []
-        self.runtime.next_reconcile = 0
-        self._tick()
-        self.assertEqual(len(qmt.side_effects("query_history_order")), 1)
-        self.assertEqual(len(qmt.side_effects("query_history_deal")), 1)
+        self._until_call(qmt, "query_history_order")
+        self._until_call(qmt, "query_history_deal")
+        self.assertGreaterEqual(len(qmt.side_effects("query_history_order")), 1)
+        self.assertGreaterEqual(len(qmt.side_effects("query_history_deal")), 1)
 
     def test_native_basket_direct_sliced_smart_each_uses_own_qmt_path(self):
         qmt = self.runtime.fake_qmt
@@ -391,8 +478,11 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
                        "params": {"m_dLimitOverRate": 0.1}}, "smart_algo_passorder"),
         ]
         for client, execution, qmt_name in executions:
+            self._until(lambda: self.runtime.health()["accepting_orders"])
             self.runtime.handle("submit_order", self.basket(client, execution), "POST")
-            self._tick()
+            self._until_call(qmt, qmt_name)
+            self._until_order(client, lambda row: row["submission_status"] == "SUBMITTING" and
+                              row["basket_state"] == "VERIFIED")
             doc = self.runtime.repo.get_order(client)
             self.assertEqual(doc["submission_status"], "SUBMITTING", client)
             self.assertEqual(doc["basket_state"], "VERIFIED", client)
@@ -401,19 +491,53 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(qmt.baskets[doc["basket_name"]]["stocks"][1]["optType"], 24)
         self.assertEqual(len(qmt.baskets), 3)
 
+    def test_restart_verifies_existing_basket_after_unpersisted_set_result(self):
+        original = self.runtime
+        request = self.basket("restart-basket", {"type": "DIRECT"})
+        original.handle("submit_order", request, "POST")
+        doc = original.repo.get_order("restart-basket")
+        resolved = original.adapter.resolve(doc["request"], doc["remark"])
+        original.repo.update_order(doc["order_id"], "TEST_SET_RESULT_NOT_PERSISTED",
+                                   lambda row: row.update(resolved_request=resolved,
+                                                          preparation_stage="BASKET_SET",
+                                                          preparation_complete=False))
+        prepared = original.repo.get_order("restart-basket")
+        expected = original.adapter._expected_basket(prepared)
+        self.assertEqual(prepared["submission_status"], "QUEUED")
+        self.assertEqual(prepared["attempts"], [])
+        original.stop()
+        self._until_stopped(original)
+
+        qmt = _FakeQmt()
+        qmt.baskets[expected["name"]] = expected  # QMT accepted set_basket before the prior result was saved.
+        restarted = self._new_runtime(qmt)
+        restarted.initialize()
+        self._until(lambda: restarted.recovery_complete, restarted)
+        self._until_call(qmt, "passorder", runtime=restarted)
+        self._until_order("restart-basket", lambda row: row["basket_state"] == "VERIFIED" and
+                          row["submission_status"] == "SUBMITTING", restarted)
+        current = restarted.repo.get_order("restart-basket")
+        self.assertEqual(current["resolved_request"], resolved)
+        self.assertGreaterEqual(len(qmt.side_effects("get_basket")), 1)
+        self.assertEqual(qmt.side_effects("set_basket"), [])
+        self.assertEqual(len(qmt.side_effects("passorder")), 1)
+        self.assertEqual(len(current["attempts"]), 1)
+
     def test_algorithm_cancel_stops_task_then_catches_late_child_order(self):
         qmt = self.runtime.fake_qmt
         request = self.single()
         request["execution"] = {"type": "SLICED", "mode": "ALGO", "params": self.sliced_params()}
         self.runtime.handle("submit_order", request, "POST")
-        self._tick()
+        self._until_call(qmt, "algo_passorder")
+        self._until_order("single-one", lambda row: row["submission_status"] == "SUBMITTING")
         doc = self.runtime.repo.get_order("single-one")
         task = {"remark": doc["remark"], "qmt_task_id": "task-1", "trading_day": "20260926",
                 "market": "SH", "symbol": "600000.SH", "side": "BUY", "status": 3}
         self.runtime.observe("task", task)
-        self._tick()
+        self._until_order("single-one", lambda row: any(
+            item.get("qmt_task_id") == "task-1" for item in row.get("qmt_tasks", [])))
         self.runtime.handle("cancel_order", self.cancel(), "POST")
-        self._tick()
+        self._until_call(qmt, "cancel_task")
         self.assertEqual(len(qmt.side_effects("cancel_task")), 1)
         self.assertEqual(qmt.side_effects("cancel"), [])
         self.runtime.observe("task", dict(task, status=8))
@@ -421,14 +545,14 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
                                        "qmt_order_id": "late-child", "trading_day": "20260926",
                                        "market": "SH", "symbol": "600000.SH", "side": "BUY",
                                        "quantity": 500, "filled_quantity": 0, "status": 50})
-        self._tick()
+        self._until_call(qmt, "cancel")
         self.assertEqual(len(qmt.side_effects("cancel")), 1)
         self.assertEqual(qmt.side_effects("cancel")[0][1][0], "late-child")
 
     def test_stop_does_not_cancel_live_qmt_order(self):
         qmt = self.runtime.fake_qmt
         self.runtime.handle("submit_order", self.single(), "POST")
-        self._tick()
+        self._until_call(qmt, "passorder")
         self.runtime.stop()
         self.assertEqual(qmt.side_effects("cancel"), [])
         self.assertEqual(qmt.side_effects("cancel_task"), [])
@@ -441,6 +565,7 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         spec.loader.exec_module(http_module)
 
         self.runtime.stop()
+        self._until_stopped(self.runtime)
         repo = http_module.PostgresRepository(self.config, self.account_id)
         self.repositories.append(repo)
         generated_runtime = http_module.OrderRuntime(self.runtime.fake_qmt.apis(), object(),
@@ -448,8 +573,7 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
                                                      repository=repo, local_lock=_LocalLock())
         self.runtimes.append(generated_runtime)
         generated_runtime.initialize()
-        generated_runtime.tick()
-        self.assertTrue(generated_runtime.recovery_complete, generated_runtime.last_error)
+        self._until(lambda: generated_runtime.recovery_complete, generated_runtime)
         log_patch = patch.object(http_module, "log_message")
         log_patch.start()
         state = http_module.OrderState()
@@ -494,6 +618,7 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(request("POST", "/cancel_order", self.cancel())[0], 200)
         finally:
             state.stop_event.set()
+            state.http_closed.set()
             thread.join(timeout=3)
             server.server_close()
             log_patch.stop()

@@ -13,11 +13,15 @@
 | --- | --- | --- |
 | `account_id` | `66027616` | `8890763409`（当前配置示例） |
 | `http_port` | `8888` | `8886`（当前配置示例） |
+| `submit_batch_size` | `10` | 每轮实际派发业务订单上限，篮子算一笔 |
+| `cancel_batch_size` | `10` | 每轮实际 QMT 撤单动作上限，任务和子委托分别计数 |
+| `reconcile_batch_size` | `100` | 每批进入对账的业务订单上限 |
+| `schedule_budget_ms` | `50` | 整个 `process_http_requests` 回调的毫秒预算 |
 
-优先读取小写 `account_id`、`http_port`，兼容此前的大写 `ACCOUNT_ID`、`HTTP_PORT`。
+优先读取小写参数名，也兼容对应的大写参数名。
 两种写法同时存在时逐项以小写为准；小写值非法时直接报错，不回退到大写或默认值。
 最小／最大／步长用于参数遍历，不是 HTTP 服务配置。
-代码保留已有同名变量，在 `init` 时校验并固定实例配置；两个参数均未设置时仍使用原默认值。
+代码保留已有同名变量，在 `init` 时校验并固定实例配置；未设置的参数使用表中默认值。
 参数注入发生在脚本执行前或 `init` 前的两种情况均有本地模拟测试。
 参数变更需要停止并重新运行策略，运行中不自动切换账户或监听端口。
 
@@ -25,6 +29,8 @@
 会转成 `"66027616"`。字符串前导零保留；数值参数无法恢复已丢失的前导零。
 端口支持整数、整数浮点值或十进制整数字符串，范围 `1–65535`。
 显式填写非法值会阻止启动，不会悄悄使用默认值。
+四个批量/预算参数须为正整数；面板可传可精确表达的整数浮点值，范围为 `1..2147483647`。
+批量值是上限，仍受本轮时间预算约束；剩余工作跨调度轮次继续。已开始的同步 QMT 调用无法强制中断。
 
 不同实例分别配置各自账户和未占用端口；端口本身不决定模拟／实盘模式，仍以对应客户端
 和账户为准。HTTP 请求显式传入 `accountId` 仍可覆盖该次查询的默认账户，端口不是账户访问隔离。
@@ -45,7 +51,7 @@
 启动成功后日志包含实际账户和绑定端口。例如上述参数生效时，启动日志为：
 
 ```text
-... [INFO] QMT HTTP order listening {"host": "127.0.0.1", "port": 8886, "account_id": "8890763409"}
+... [INFO] QMT HTTP order listening {"host": "127.0.0.1", "port": 8886, "account_id": "8890763409", "submit_batch_size": 10, "cancel_batch_size": 10, "reconcile_batch_size": 100, "schedule_budget_ms": 50}
 ```
 
 这条启动日志会打印完整账户号；查询响应正文仍不写入日志。
@@ -126,19 +132,26 @@ GET 可使用 `?algoList=VWAP` 或 `?algoList=VWAP&algoList=TWAP`。
 
 ## 调度、超时和日志
 
-HTTP 线程只解析请求、入队和等待结果。所有 QMT 查询以及 QMT 对象读取均在
-`schedule_run` 回调中执行，避免跨线程调用 QMT。
+HTTP 线程校验写请求、执行 PostgreSQL 持久受理、幂等和订单查询；事务确认后才返回 202。
+旧账户、持仓和算法配置查询仍交给 `schedule_run` 回调执行，HTTP 可等待自己的请求结果。
+数据库后台线程负责候选读取、最终认领、QMT 调用结果落库、回报归并、状态计算和恢复。
+执行权后台线程用专用连接持有并核验 PostgreSQL advisory lock，向 QMT 调度线程提供短期有效授权。
+QMT 调度线程执行 QMT 下单、撤单、交易查询、SMART 配置、篮子操作和原生对象快照；
+不执行 SQL，也不等待数据库结果。授权过期、失权、停止或数据库异常时暂停后续交易调用。
+PG 与 QMT 之间没有原子事务；提交结果不明时保持 `UNKNOWN`，不得盲目重发。
 
-沿用 FEED 的主要参数：队列容量 64，调度间隔 10ms，每轮最多 10 个请求、50ms 启动预算，
-HTTP 等待上限 10 秒。单个 QMT 调用无法被预算中断。
+线程间使用有界队列。交易调用前预留结果缓冲容量；结果未落库时保留待处理内容，数据库故障暂停后续调用。
+回报队列溢出会记录缺口并触发补查。旧查询队列容量为 64，调度间隔为 10ms，HTTP 等待上限为 10 秒。
+`schedule_budget_ms` 从 `process_http_requests` 入口起计，覆盖交易调度和旧查询；撤单优先，其他工作轮转获得服务机会。
+单个已开始的 QMT 同步调用无法被预算中断。
 
 - 队列满：429 / `QUEUE_FULL`。
 - 等待超时：504 / `QMT_TIMEOUT`；尚未执行的过期请求跳过，已开始的查询可能继续。
 - 服务停止：等待中的请求收到 503。
 
-日志同时写到 QMT console 和 `%USERPROFILE%\qmt-bridge\logs\order-YYYY-MM-DD.log`，
+日志由后台线程异步写到 QMT console 和 `%USERPROFILE%\qmt-bridge\logs\order-YYYY-MM-DD.log`，
 使用上海时区，以 `request_id` 关联请求。日志记录 method、状态及耗时等元信息，不记录账户、
-持仓或算法配置响应正文。
+持仓或算法配置响应正文。日志队列满时计入丢弃数，不在 QMT 调度线程同步补写。
 
 ## 新增 ORDER 写入前准备
 
@@ -155,20 +168,29 @@ python tools/build_order_strategy.py
 python tools/build_order_strategy.py --check
 ```
 
-策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具的 schema init/check 只需数据库配置，例如 `config.json`：
+策略源模块为 UTF-8，输出文件是实际 GBK 字节。只在构建器输出与源码一致后导入 QMT。运行配置指定 PostgreSQL host、port、database、user、password；模拟盘与实盘使用不同数据库，例如 `paper`、`live`。每个数据库内部固定使用 `qmt_order` schema，不再接受自定义 `pg_schema`；表中不设 `namespace_id`。管理工具的 schema init/check/migrate 只需数据库配置，例如 `config.json`：
 
 ```json
 {"pg_host":"127.0.0.1","pg_port":5432,"pg_database":"paper","pg_user":"order_service","pg_password":"<secret>"}
 ```
 
-也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD` 环境变量。数据库须事先创建。DDL 唯一存放在 `sql/order_v1.sql`，以下安装命令读取该文件，在**目标隔离数据库**显式建表、登记 schema 版本，再检查：
+也可使用 `ORDER_PG_HOST`、`ORDER_PG_PORT`、`ORDER_PG_DATABASE`、`ORDER_PG_USER`、`ORDER_PG_PASSWORD` 环境变量。数据库须事先创建。全新安装使用 `sql/order_v2.sql`；已有 v1 库仅通过 `sql/order_v1_to_v2.sql` 显式迁移。`sql/order_v1.sql` 保留历史布局。以下命令只对所指定的**目标隔离数据库**执行：
 
 ```powershell
 python tools/order_admin.py --config config.json schema init
 python tools/order_admin.py --config config.json schema check
 ```
 
-策略文件不包含 DDL；启动先检查固定 schema 内的关键表、字段和版本，再按策略配置的 `account_id` 创建缺失的 `account_runtime` 行；已存在的账户行及其字段值保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
+已有 v1 库部署新策略前，先停止连接该库的 ORDER 策略并等待清理完成，再备份选定数据库、执行迁移并检查版本：
+
+```powershell
+python tools/order_admin.py --config config.json schema migrate
+python tools/order_admin.py --config config.json schema check
+```
+
+`schema init` 仅用于全新或兼容 v2 的库；遇到 v1 会提示显式迁移。`schema migrate` 只接受 v1/v2，v2 重复执行不改数据。迁移在单个事务中保留订单、事件、账户事件序号和幂等键；旧单只在能确认未进入 QMT 时退出待对账，其余保守重开。命令不会自动迁移其他数据库或业务库。
+
+策略文件不包含 DDL；后台启动先检查固定 schema 内的关键表、字段和 v2 版本，再按策略配置的 `account_id` 幂等创建缺失的 `account_runtime` 行；已存在行的 `event_seq`、执行主机和代次保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`schema init/check/migrate` 只需数据库配置，`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
 
 ## 订单输入
 
@@ -270,7 +292,9 @@ GET /health
 {"events":[{"event_seq":1,"order_id":"<order_id>","event_type":"ORDER_ACCEPTED","occurred_at":"2026-09-26T01:30:00+00:00","order":{"order_id":"<order_id>"}}],"next_after":1,"has_more":false}
 ```
 
-`/capabilities` 返回 `order_types`、`sizing_types`、`executions`、`price_types`、`qmt_functions`、`paths`、`verification_status`、`trading_configured` 等键。`paths` 分别列出 SINGLE/BASKET × DIRECT/SLICED/SMART 六条路径的 `implemented`、`function_available`、`locally_verified`；当前本地交易验收前 `locally_verified` 均为 false。`/health` 返回 `http_running`、`database_available`、`scheduler_alive`、`recovery_complete`、`accepting_orders`、`last_reconciled_at`、`observation_gap`、`error_code` 等键，不能把单一 HTTP 200 当成交易可用。不存在的 `client_order_id` 返回 404 / `ORDER_NOT_FOUND`，非法过滤/分页参数返回 400 / `INVALID_PARAMS`，数据库或执行器未就绪返回 503；错误响应始终是 `{"error":{"code":"...","message":"..."}}`。
+`/capabilities` 返回 `order_types`、`sizing_types`、`executions`、`price_types`、`qmt_functions`、`paths`、`verification_status`、`trading_configured` 等键。`paths` 分别列出 SINGLE/BASKET × DIRECT/SLICED/SMART 六条路径的 `implemented`、`function_available`、`locally_verified`；当前本地交易验收前 `locally_verified` 均为 false。`/health` 中 `lifecycle` 依次反映 `STARTING`、`RECOVERING`、`RUNNING`、`STOPPING`、`STOPPED`；恢复完成且调度、数据库和短期执行授权均有效时才设置 `accepting_orders=true`。后台初始化、账户补齐、执行权取得和恢复未完成前不受理新订单；未配置 PG 时仍可提供旧查询。停止时先关闭受理和派发并取消定时任务，后台等待在途工作收尾后再释放连接、执行权和日志资源；QMT 的 `stop` 回调不等待后台。不存在的 `client_order_id` 返回 404 / `ORDER_NOT_FOUND`，非法过滤/分页参数返回 400 / `INVALID_PARAMS`，数据库或执行器未就绪返回 503；错误响应始终是 `{"error":{"code":"...","message":"..."}}`。
+
+健康采样含 `sampled_at`、`schema_version`、`pending_count`、`unknown_order_count`、`last_reconciled_at`、`observation_gap`、`history_coverage_complete`、`queues`、`overflow_count`、`tick_ms`、`qmt_ms`、`authority_remaining_ms`、`executor_owned` 和 `error_code`。HTTP 层另附 `schedule_settings`、`scheduler` 与 `logging`（包括日志队列大小、丢弃数及写入错误）。这些是缓存或采样值，应结合采样时间判断；单一 HTTP 200 不能证明交易可用或 QMT 实机验收完成。
 
 `/capabilities` 和 `/health` 示例（均只列关键字段）：
 
@@ -279,7 +303,7 @@ GET /health
 ```
 
 ```json
-{"http_running":true,"database_available":true,"scheduler_alive":true,"recovery_complete":true,"accepting_orders":true,"last_reconciled_at":null,"observation_gap":false,"error_code":null}
+{"http_running":true,"database_available":true,"scheduler_alive":true,"lifecycle":"RUNNING","recovery_complete":true,"accepting_orders":true,"sampled_at":"2026-09-26T09:30:00+08:00","pending_count":0,"queues":{"cancel":0,"submit":0,"prepare":0,"query":0,"results":0,"observations":0},"overflow_count":0,"authority_remaining_ms":500,"last_reconciled_at":null,"observation_gap":false,"schedule_settings":{"submit_batch_size":10,"cancel_batch_size":10,"reconcile_batch_size":100,"schedule_budget_ms":50},"error_code":null}
 ```
 
 错误响应示例：

@@ -80,7 +80,9 @@ class SchemaInstallerTests(unittest.TestCase):
             self.last = statement
             if statement.startswith("INSERT INTO ") and ".schema_version" in statement:
                 if self.version is None:
-                    self.version = 1
+                    self.version = 2
+            if statement.startswith("UPDATE ") and ".schema_version SET version" in statement:
+                self.version = 2
 
         def fetchone(self):
             if self.last.startswith("SELECT to_regclass"):
@@ -111,7 +113,7 @@ class SchemaInstallerTests(unittest.TestCase):
                               'CREATE SCHEMA IF NOT EXISTS "qmt_order";\n'
                               'CREATE TABLE "qmt_order".probe(value text DEFAULT \'a;b\'); '
                               '-- another ; comment\n', encoding="utf-8")
-            self.assertEqual(tool.initialize_schema(repo, source), {"schema_version": 1})
+            self.assertEqual(tool.initialize_schema(repo, source), {"schema_version": 2})
         ddl = [sql for sql, _ in cursor.statements if sql.startswith("CREATE ")]
         self.assertEqual(len(ddl), 2)
         self.assertEqual(ddl[0], 'CREATE SCHEMA IF NOT EXISTS "test_schema"')
@@ -125,22 +127,42 @@ class SchemaInstallerTests(unittest.TestCase):
     def test_existing_incompatible_version_blocks_all_ddl(self):
         from order_bridge.common import OrderError
         tool = load_tool("order_schema")
-        cursor = self.Cursor(existing_version=2)
+        cursor = self.Cursor(existing_version=1)
         with self.assertRaises(OrderError) as caught:
             tool.initialize_schema(self.Repo(cursor))
         self.assertEqual(caught.exception.code, "SCHEMA_VERSION_MISMATCH")
+        self.assertIn("schema migrate", str(caught.exception))
         self.assertFalse(any(sql.startswith(("CREATE ", "ALTER ", "INSERT "))
                              for sql, _ in cursor.statements))
 
     def test_default_sql_contains_all_order_tables(self):
         tool = load_tool("order_schema")
         cursor = self.Cursor()
-        self.assertEqual(tool.initialize_schema(self.Repo(cursor)), {"schema_version": 1})
+        self.assertEqual(tool.initialize_schema(self.Repo(cursor)), {"schema_version": 2})
         ddl = "\n".join(sql for sql, _ in cursor.statements)
         for table in ("orders", "order_events", "qmt_observations", "order_items", "fills"):
             self.assertIn('"qmt_order".' + table, ddl)
         self.assertEqual([params for sql, params in cursor.statements
-                          if sql.startswith("INSERT INTO ")], [(1,)])
+                          if sql.startswith("INSERT INTO ")], [(2,)])
+
+    def test_migration_checks_version_before_ddl_and_is_idempotent(self):
+        from order_bridge.common import OrderError
+        tool = load_tool("order_schema")
+        missing = self.Cursor()
+        with self.assertRaises(OrderError) as caught:
+            tool.migrate_schema(self.Repo(missing))
+        self.assertEqual(caught.exception.code, "SCHEMA_NOT_READY")
+        self.assertFalse(any(sql.startswith("ALTER TABLE") for sql, _ in missing.statements))
+
+        old = self.Cursor(existing_version=1)
+        self.assertEqual(tool.migrate_schema(self.Repo(old)), {"schema_version": 2, "migrated": True})
+        self.assertTrue(any(sql.startswith("ALTER TABLE") for sql, _ in old.statements))
+        self.assertEqual(old.version, 2)
+
+        current = self.Cursor(existing_version=2)
+        self.assertEqual(tool.migrate_schema(self.Repo(current)), {"schema_version": 2, "migrated": False})
+        self.assertFalse(any(sql.startswith(("ALTER TABLE", "CREATE INDEX", "UPDATE "))
+                             for sql, _ in current.statements))
 
 
 class AdminSafetyTests(unittest.TestCase):
@@ -158,19 +180,27 @@ class AdminSafetyTests(unittest.TestCase):
     def test_schema_check_does_not_run_installer(self):
         class Repo:
             def check_schema(self):
-                return {"schema_version": 1, "ready": True}
+                return {"schema_version": 2, "ready": True}
 
         with patch.object(self.tool, "initialize_schema") as install:
             result = self.tool.execute(Repo(), SimpleNamespace(command="schema", action="check"))
-        self.assertEqual(result, {"schema_version": 1, "ready": True})
+        self.assertEqual(result, {"schema_version": 2, "ready": True})
         install.assert_not_called()
 
     def test_schema_init_uses_external_installer(self):
         repo = object()
-        with patch.object(self.tool, "initialize_schema", return_value={"schema_version": 1}) as install:
+        with patch.object(self.tool, "initialize_schema", return_value={"schema_version": 2}) as install:
             result = self.tool.execute(repo, SimpleNamespace(command="schema", action="init"))
-        self.assertEqual(result, {"schema_version": 1})
+        self.assertEqual(result, {"schema_version": 2})
         install.assert_called_once_with(repo)
+
+    def test_schema_migrate_uses_explicit_migrator(self):
+        repo = object()
+        with patch.object(self.tool, "migrate_schema", return_value={"schema_version": 2,
+                                                                       "migrated": True}) as migrate:
+            result = self.tool.execute(repo, SimpleNamespace(command="schema", action="migrate"))
+        self.assertEqual(result, {"schema_version": 2, "migrated": True})
+        migrate.assert_called_once_with(repo)
 
     def test_admin_uses_fixed_schema_and_rejects_legacy_setting(self):
         config = {"pg_host": "localhost", "pg_port": 5432, "pg_database": "order_test",
@@ -199,12 +229,12 @@ class AdminSafetyTests(unittest.TestCase):
             source = Path(temp) / "config.json"
             source.write_text(json.dumps(config), encoding="utf-8")
             with patch.dict(self.tool.os.environ, {}, clear=True):
-                for action in ("init", "check"):
+                for action in ("init", "check", "migrate"):
                     args = self.tool.parser().parse_args(["--config", str(source), "schema", action])
                     parsed = self.tool.config_from_args(args)
                     self.assertNotIn("account_id", parsed)
                     with patch.object(self.tool, "PostgresRepository") as repository, \
-                            patch.object(self.tool, "execute", return_value={"schema_version": 1}):
+                            patch.object(self.tool, "execute", return_value={"schema_version": 2}):
                         self.assertEqual(self.tool.main(["--config", str(source), "schema", action]), 0)
                     repository.assert_called_once()
                     self.assertEqual(repository.call_args[0][1], "")

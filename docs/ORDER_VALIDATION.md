@@ -2,7 +2,20 @@
 
 验证日期：2026-09-26，Asia/Shanghai。以下是代码、HTTP 和 PostgreSQL 验收，不是券商模拟盘交易验收。
 
-## 最新变更：策略启动动态注册账户
+## 最新变更：非阻塞、分批执行与持久对账退出
+
+- 交付的 QMT 文件为实际 GBK 单文件；`Last modified`：2026-09-26 11:32:46，SHA256：`8688420afee66456aa317d93dc29b146c85054c93829e92bc8555eb343fa8746`。构建一致性、实际 QMT Python 3.6.8 编译及无 DDL 检查通过。
+- 启动冻结 `submit_batch_size=10`、`cancel_batch_size=10`、`reconcile_batch_size=100`、`schedule_budget_ms=50`。QMT 线程只运行原生调用和短内存操作；数据库、执行权连接和日志各由后台线程处理。HTTP 持久受理仍等待提交确认后才返回 202。
+- 最终 QMT Python 3.6.8 + 独立 PostgreSQL：`unittest discover -s tests -p 'test*order*.py' -v`，**181 项全部通过，120.874 秒，无跳过**。日志：`.venv/order-nb-final-python36.log`。
+- 项目 Python 3.14 全套回归 **285 项通过，126.569 秒**，其中包含 FEED 106 项。随后补入两项篮子恢复测试并修正恢复阶段，新增用例在项目解释器定向通过，最终 ORDER 181 项在 QMT 解释器全部重跑通过；FEED 源码没有变化。全套日志：`.venv/order-nb-final-all.log`。
+- 非阻塞验证包括：阻塞数据库初始化、结果提交和 HTTP 受理事务；阻塞日志 sink；授权过期和实际 advisory 会话丢失；结果缓冲满；出队时 DB gate 翻转；65 笔撤单候选及每轮实际动作上限；停止时不提前释放本机锁。HTTP 在慢日志收尾期间仍能读取 `STOPPING`。
+- 真实 PG 1000 笔 pending 用例验证：冻结与处理均恰好十批，每批最多 100 笔，ID 无遗漏、无重复；同轮共享 QMT 快照。回报队列保持积压时仍提供后台服务机会；历史查询范围在全部冻结页完成后确定。查询归并与异步回报分别维护事实代次，旧轮无法清除后来的回报或缺口。
+- 终态退出、迟到事实重新入队、重复回报去重、部分成交撤余量、算法停止后晚到子委托、三种原生篮子路径和提交不明不盲重发均有回归。新增恢复用例模拟篮子创建成功但结果未落库：重启先 `get_basket`，不再次 `set_basket`，只产生一次下单调用；参数快照及篮子名称保留。
+- v1→v2 真实迁移保留旧订单、子记录、事件、`event_seq` 和执行代次，重复迁移不改数据。候选查询的 `EXPLAIN` 在事务内禁用顺序扫描、位图扫描及显式排序，确认三个选择器能使用对应索引；这只证明索引适配，不代表生产优化器必然选择该计划。
+- 使用专用容器 `qmt-order-nonblocking-test-20260926`，端口 `127.0.0.1:15439`，数据库 `qmt_order_test`，各用例随机 schema。没有迁移业务库 `qmt_paper`，没有调用真实 QMT 下单、撤单或篮子 API。测试容器在验收后清理。
+- 部署需先停止旧策略，显式执行 `schema migrate`、`schema check`，再导入新的 GBK 策略。v2 SQL、迁移 SQL 和命令见 `HTTP_ORDER.md`。券商模拟盘六条交易路径仍待单独验收，`locally_verified` 保持 false。
+
+## 历史变更：策略启动动态注册账户
 
 - 策略按实际启动参数 `account_id` 在结构检查后、取得执行权前执行 `INSERT ... ON CONFLICT DO NOTHING`。只创建缺失的账户行，已有事件游标、主机绑定和执行代次不被初始化操作覆盖；正常取得执行权仍会更新实例和递增代次。
 - 外部安装器只建表并登记版本；`schema init/check` 无需账户参数。实际 PostgreSQL 验证两条 CLI 命令成功后 `account_runtime` 仍为零行，策略启动才注册账户。
