@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""账户对账失败后节流与 QMT 查询诊断；Last modified: 2026-09-26。"""
+"""账户对账失败后节流与 QMT 查询诊断；Last modified: 2026-09-28。"""
+import datetime as dt
 import unittest
 from unittest.mock import Mock, patch
 
 from order_bridge.common import parse_timestamp
+from order_bridge.background import _background_current_day_covered
 from order_bridge.runtime import OrderRuntime
 
 
@@ -22,7 +24,6 @@ class _Qmt(object):
     def __init__(self):
         self.calls = []
         self.fail = False
-        self.history_fail = False
 
     def query(self, account_id, account_type, kind):
         self.calls.append((account_id, account_type, kind))
@@ -30,15 +31,16 @@ class _Qmt(object):
             raise RuntimeError('QMT gateway dropped while reading task')
         return []
 
-    def history(self, account_id, account_type, kind, start, end):
-        self.calls.append((account_id, account_type, kind, start, end))
-        if self.history_fail and kind == 'ORDER':
-            raise RuntimeError('QMT archive unavailable')
-        return []
-
-
 class ReconcileDiagnosticsTests(unittest.TestCase):
     def setUp(self):
+        self.now = parse_timestamp('2026-09-28T02:00:00+00:00')
+        clock_patch = patch('order_bridge.background.utc_now', return_value=self.now)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        stamp_patch = patch('order_bridge.background.iso_datetime', side_effect=lambda value=None:
+                            (value or self.now).isoformat())
+        stamp_patch.start()
+        self.addCleanup(stamp_patch.stop)
         self.clock = _Clock()
         self.qmt = _Qmt()
         self.repo = Mock()
@@ -49,8 +51,7 @@ class ReconcileDiagnosticsTests(unittest.TestCase):
         self.repo.reconcile_history_start.return_value = None
         self.logs = []
         self.runtime = OrderRuntime(
-            {'get_trade_detail_data': self.qmt.query,
-             'get_history_trade_detail_data': self.qmt.history}, object(), 'acct-01',
+            {'get_trade_detail_data': self.qmt.query}, object(), 'acct-01',
             repository=self.repo, clock=self.clock,
             settings={'reconcile_interval_seconds': 30},
             logger=lambda level, message, **fields: self.logs.append((level, message, fields)))
@@ -143,16 +144,76 @@ class ReconcileDiagnosticsTests(unittest.TestCase):
             self.clock.advance(1)
 
 
-    def test_history_failure_log_includes_query_dates(self):
+    def test_old_gap_does_not_block_today_or_call_history_api(self):
         self.repo.reconcile_history_start.return_value = '2000-01-01T00:00:00+00:00'
-        self.qmt.history_fail = True
+        self.repo.reconcile_round_batch.return_value = {
+            'orders': [{'order_id': key, 'submission_status': 'CONFIRMED',
+                        'created_at': stamp, 'reconcile_round_fact_version': version}
+                       for key, stamp, version in [('old', '2000-01-01T00:00:00+00:00', 2),
+                                                   ('today', self.now.isoformat(), 3)]],
+            'next_cursor': None, 'has_more': False}
         self._finish_round()
-        errors = [fields for unused, message, fields in self.logs
-                  if message == 'QMT reconciliation incomplete']
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]['query_kind'], 'order')
-        self.assertEqual(errors[0]['history_start'], '20000101')
-        self.assertRegex(errors[0]['history_end'], r'^\d{8}$')
+        self.assertEqual(self.qmt.calls, [('acct-01', 'STOCK', kind) for kind in ('task', 'order', 'deal')])
+        self.assertEqual([call[0][:3] for call in self.repo.finish_reconcile.call_args_list],
+                         [('old', 2, False), ('today', 3, True)])
+        health = self.runtime.health()
+        self.assertFalse(health['history_coverage_complete'])
+        self.assertFalse(health['history_query_available'])
+        self.assertEqual(health['reconcile_query_scope'], 'CURRENT_DAY')
+        self.assertTrue(health['recovery_complete'])
+        self.assertIsNone(health['last_reconcile_error'])
+        self.assertEqual(health['last_reconciled_at'], self.now.isoformat())
+        finished = [fields for unused, message, fields in self.logs if message == 'RECONCILE_FINISHED']
+        self.assertEqual(finished[0]['coverage_gap'], 'HISTORY_NOT_COVERED')
+        self.assertIsNone(finished[1]['coverage_gap'])
+        self.assertFalse(any(level == 'ERROR' for level, unused, fields in self.logs))
+
+    def test_scope_uses_submit_date_and_rejects_old_or_missing_dates(self):
+        day = self.now.date()
+        doc = {'submission_status': 'CONFIRMED', 'created_at': '2000-01-01T00:00:00+00:00',
+               'attempts': [{'kind': 'SUBMIT', 'created_at': self.now.isoformat()}]}
+        self.assertTrue(_background_current_day_covered(doc, day))
+        # UTC 前一日的 16:00 已是上海当日；不能按 UTC 日期误报跨日。
+        doc['attempts'][0]['created_at'] = '2026-09-27T16:00:00+00:00'
+        self.assertTrue(_background_current_day_covered(doc, day))
+        for field in ('qmt_tasks', 'qmt_orders', 'fills'):
+            doc[field] = [{'trading_day': '20260927'}]
+            self.assertFalse(_background_current_day_covered(doc, day))
+            doc.pop(field)
+        doc['qmt_tasks'] = [{'trading_day': None}]
+        self.assertTrue(_background_current_day_covered(doc, day))
+        for field in ('qmt_orders', 'fills'):
+            doc[field] = [{'trading_day': None}]
+            self.assertFalse(_background_current_day_covered(doc, day))
+            doc.pop(field)
+        doc['attempts'][0]['created_at'] = '2026-09-27T15:59:59+00:00'
+        self.assertFalse(_background_current_day_covered(doc, day))
+        doc['attempts'][0]['created_at'] = None
+        self.assertFalse(_background_current_day_covered(doc, day))
+
+    def test_midnight_round_does_not_confirm_mixed_day_snapshots(self):
+        self.background._reconcile_step()
+        self.background.round['query_day'] -= dt.timedelta(days=1)
+        self._finish_round()
+        self.assertIsNone(self.runtime.last_reconciled_at)
+        self.assertFalse(self.runtime.history_coverage_complete)
+        self.assertFalse(self.runtime.recovery_complete)
+
+    def test_checkpoint_paging_keeps_the_completed_query_date(self):
+        docs = [{'order_id': key, 'submission_status': 'CONFIRMED',
+                 'created_at': self.now.isoformat(), 'reconcile_round_fact_version': 1}
+                for key in ('one', 'two')]
+        self.repo.reconcile_round_batch.side_effect = [
+            {'orders': docs[:1], 'next_cursor': 'one', 'has_more': True},
+            {'orders': docs[1:], 'next_cursor': None, 'has_more': False}]
+        self.background._reconcile_step()
+        # 查询在第一天已结束，第二页只是数据库写入，不是第二天的新 QMT 查询。
+        current = self.background.round
+        current.update(stage=3, waiting=False, query_finished_at=self.now.isoformat())
+        self.background._reconcile_step()
+        self.now += dt.timedelta(days=1)
+        self.background._reconcile_step()
+        self.assertEqual([call[0][2] for call in self.repo.finish_reconcile.call_args_list], [True, True])
 
     def test_cooldown_does_not_prevent_dispatch_or_overlap_round(self):
         self.background._reconcile_step()
@@ -171,6 +232,7 @@ class ReconcileDiagnosticsTests(unittest.TestCase):
     def test_finish_passes_interval_to_repository(self):
         self.repo.reconcile_round_batch.return_value = {
             'orders': [{'order_id': 'one', 'submission_status': 'CONFIRMED',
+                        'created_at': self.now.isoformat(),
                         'reconcile_round_fact_version': 3}],
             'next_cursor': None, 'has_more': False}
         self._finish_round()

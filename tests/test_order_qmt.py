@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""QMT 订单适配器测试。Last modified: 2026-09-28。"""
 import copy
 import json
 import unittest
@@ -270,21 +271,9 @@ class QmtAdapterTests(unittest.TestCase):
             m_nVolume = 10
         self.apis["get_trade_detail_data"] = lambda *args: [Row()]
         self.assertEqual("r1", self.adapter.query("order")[0]["m_strRemark"])
-        with self.assertRaises(OrderError):
-            self.adapter.query("task", "20260927", "20260928")
-        self.apis["get_history_trade_detail_data"] = lambda *args: [("20260928", Row())]
-        history = self.adapter.query("deal", "20260927", "20260928")[0]
-        self.assertEqual("r1", history["m_strRemark"])
-        self.assertEqual("20260928", history["m_strTradingDay"])
-        self.apis["get_history_trade_detail_data"] = lambda *args: [("20260928", {
-            "m_strTradingDay": "20260927", "m_strRemark": "r1"})]
-        self.assertEqual("20260927", self.adapter.query("deal", "20260927", "20260928")[0]["m_strTradingDay"])
-        self.apis["get_history_trade_detail_data"] = lambda *args: [("20260928", Row(), Row())]
-        self.assertEqual(2, len(self.adapter.query("deal", "20260927", "20260928")))
-        self.apis["get_history_trade_detail_data"] = lambda *args: [("20260928", [Row(), Row()])]
-        self.assertEqual(2, len(self.adapter.query("deal", "20260927", "20260928")))
-        self.apis["get_history_trade_detail_data"] = lambda *args: [("bad-date", Row())]
-        with self.assertRaises(OrderError):
+        self.assertNotIn("m_strTradingDay", self.adapter.query("deal")[0])
+        self.assertEqual("r1", self.adapter.query("task")[0]["m_strRemark"])
+        with self.assertRaises(TypeError):
             self.adapter.query("deal", "20260927", "20260928")
 
     def test_passorder_error_callback_snapshot_correlates_remark(self):

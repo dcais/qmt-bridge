@@ -1,5 +1,9 @@
 # QMT HTTP ORDER bridge
 
+Last modified: 2026-09-28
+
+对账每轮只调用 `get_trade_detail_data(account_id, "STOCK", "task"/"order"/"deal")`，不调用历史交易查询函数。`/health` 的 `reconcile_query_scope="CURRENT_DAY"`、`history_query_available=false` 明确当前范围；`last_reconciled_at` 表示最近一轮当日查询成功时间，不证明跨日历史完整。历史缺口不会阻断当天订单完成对账，也不会触发原订单重发；尚未结案或证据不完整的旧单仍可保留 `sync_status=INCOMPLETE` 和 `reconcile_pending=true`。已完整对账结案的订单在正常重启时保持结案。`history_coverage_complete` 对更早创建的待核对订单保守提示缺口，不能单独用它判断当日查询是否失败。`RECONCILE_FINISHED` 日志附查询日期、范围及 `HISTORY_NOT_COVERED` 原因。
+
 策略文件：`strategies/http_order.py`，由 `order_bridge/*.py` 构建。提供原有账户、持仓和智能算法配置查询，以及持久下单、撤单和订单查询。
 
 默认地址为 `http://127.0.0.1:8888/{method}`。独立运行，不依赖 FEED 策略文件。
@@ -305,6 +309,18 @@ GET /health
 账户级对账首次启动立即执行；每轮查询任务、委托和成交后，无论结果成功或失败，都从本轮结束时等待 `reconcile_interval_seconds`（默认 30 秒），不会因为上次成功时间未更新而每秒重试。轮次不重叠，等待期间回报归并、下单和撤单调度继续运行。逐笔订单的 `reconcile_due_at` 同样使用此配置；已有到期时间保持原值，下一次选中或完成对账时按当前配置计算。
 
 若早期回报缺委托号，而后续正式委托可通过账户、交易日、市场及两项原生委托引用唯一核对，bridge 会自动解除该项关联缺口，原始回报保存在 `resolved_evidence` 和 `qmt_observations` 中。旧版留下的此类记录也在启动恢复或下次对账时处理。拒单仍须确认相关任务停止、委托终态、成交一致且完整对账成功，才返回 `execution_status=REJECTED`、`sync_status=COMPLETE`、`reconcile_pending=false` 并退出逐单周期对账；有歧义或缺失成交的记录继续核对。
+
+正常启动只重新安排未结案或明确要求核对的订单；已有成功对账时间、所有任务/委托已结束、无待关联证据和未决撤单、且没有待对账请求的订单保持结案，包括跨交易日重启。运行中真实回报丢失仍会触发缺口核查；账户级查询也继续运行。查询失败或覆盖不足时，若终态所依据的业务事实未变，保留已确认的执行结果，仅将同步标为不完整；新的成交、子委托或冲突证据仍可重新推导状态。失败查询不会刷新订单的 `last_reconciled_at`。
+
+旧版重启误打开的已拒单记录可用 `tools/order_terminal_repair.py` 定向修复。先从 `order_events` 选定先前成功的 `RECONCILE_STATE_CHANGED` 事件，提供最新订单版本与原因；默认只读校验。工具要求之后仅发生对账缺口/状态检查点变化，QMT 身份、任务、委托、成交和请求不变；后续观察逐条验证，存在新事实或歧义即拒绝。
+
+```powershell
+python tools/order_terminal_repair.py --config config.json --order-id <order_id> --expected-version <version> --checkpoint-event-seq <event_seq> --reason "恢复被启动缺口误打开的已拒单终态"
+# 校验通过后使用相同参数，追加下列选项写入；备份路径必须尚不存在。
+# --apply --evidence-out C:\evidence\terminal-repair-before.json
+```
+
+配置沿用管理工具的 `ORDER_*` 环境变量或外部配置文件。写入事务锁定账户与订单、再次校验版本和证据，先落盘完整写前快照，再追加 `MANUAL_TERMINAL_REPAIR` 审计事件并同步订单/成员投影。修复保持原成功对账时间，修复时间单独记录；提高事实代次使修复前的在途对账失效。重复执行会因版本或状态不符而拒绝，不重复追加审计。此工具仅处理已完整确认拒单的误重开，不用于把未知历史伪装成完整对账。
 
 `/health` 另返回 `last_reconcile_attempt_at`（最近轮次开始）、`last_reconcile_finished_at`（最近轮次结束，包括失败）、`next_reconcile_at`（预计下次轮次，执行中为空）及 `last_reconcile_error`（最近查询异常摘要）。`last_reconciled_at` 只表示成功完成对账的时间，失败不得刷新它。调度使用单调时钟，展示时间使用带时区的 UTC 时间戳；这些轮次诊断字段在策略重启后重新采样。
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-26。"""
+"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
 import hashlib
 import json
 import math
@@ -12,7 +12,8 @@ from .common import (OrderError, copy_json, fingerprint, iso_datetime,
                      json_text, new_order_document, parse_timestamp, utc_now)
 from .state import (apply_cancel_request, apply_observation, cancel_response,
                     is_order_active, observation_identifiers, pending_cancellations,
-                    reconcile_pending, recompute_order, mark_reconciled)
+                    reconcile_pending, recompute_order, mark_reconciled,
+                    state_execution_finished)
 
 
 repo_SCHEMA_VERSION = 2
@@ -595,8 +596,8 @@ class PostgresRepository(object):
             return True
         return self.repo_run(finish, mutation=True)
 
-    def mark_reconcile_gap(self, since, limit=100, cursor=None):
-        """按 order_id 有界重开进入过 QMT 的记录，包括已退出的终态。"""
+    def mark_reconcile_gap(self, since, limit=100, cursor=None, startup=False):
+        """按 order_id 有界重开进入过 QMT 的记录；启动时保留已完整对账的终态。"""
         since = since if isinstance(since, str) else iso_datetime(since)
         limit = max(1, min(int(limit), 1000))
         def mark(cur):
@@ -612,15 +613,21 @@ class PostgresRepository(object):
                         "OR document->'fills'<>'[]'::jsonb)" + after + " ORDER BY order_id LIMIT %s FOR UPDATE",
                         params + (limit + 1,))
             rows = cur.fetchall()
+            marked = 0
             for order_id, raw in rows[:limit]:
                 doc = repo_json(raw)
                 if doc.get("last_reconcile_gap_since") == since:
                     continue
+                if (startup and state_execution_finished(doc) and doc.get("last_reconciled_at")
+                        and not doc.get("reconcile_pending") and not doc.get("reconcile_requested")
+                        and not doc.get("unassociated_evidence")):
+                    continue
                 doc["last_reconcile_gap_since"] = since
                 doc["reconcile_requested"] = True
                 self.repo_save(cur, doc, "RECONCILE_GAP")
+                marked += 1
             has_more = len(rows) > limit
-            return {"marked": len(rows[:limit]), "next_cursor": rows[limit - 1][0] if has_more else None,
+            return {"marked": marked, "next_cursor": rows[limit - 1][0] if has_more else None,
                     "has_more": has_more}
         return self.repo_run(mark, mutation=True)
 

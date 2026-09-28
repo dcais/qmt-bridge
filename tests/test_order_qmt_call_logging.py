@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QMT 原生调用日志与参数恒等性测试。Last modified: 2026-09-26。"""
+"""QMT 原生调用日志与参数恒等性测试。Last modified: 2026-09-28。"""
 import copy
 import unittest
 
@@ -183,24 +183,18 @@ class QmtCallLoggingTests(unittest.TestCase):
                 self.assertEqual(basket, logs[2][2]["qmt_parameters"])
                 self.assertEqual(basket, natives[1][2][0])
 
-    def test_current_and_history_queries_log_kind_dates_and_single_call(self):
-        for name, args, query in (
-                ("get_trade_detail_data", ("account-1", "STOCK", "order"),
-                 lambda: self.adapter.query("order")),
-                ("get_history_trade_detail_data",
-                 ("account-1", "STOCK", "DEAL", "20260927", "20260928"),
-                 lambda: self.adapter.query("deal", "20260927", "20260928"))):
-            with self.subTest(name=name):
+    def test_current_queries_log_kind_and_single_call(self):
+        self.assertNotIn("get_history_trade_detail_data", self.apis)
+        for kind in ("order", "deal", "task"):
+            with self.subTest(kind=kind):
                 self.events[:] = []
-                self.native(name, [])
-                self.assertEqual([], query())
-                started, actual, returned = self.pair(name)
-                self.assertEqual(args, actual)
-                self.assertEqual("deal" if "history" in name else "order",
-                                 started["query_kind"])
-                if "history" in name:
-                    self.assertEqual("20260927", started["qmt_parameters"]["startDate"])
-                    self.assertEqual("20260928", started["qmt_parameters"]["endDate"])
+                self.native("get_trade_detail_data", [])
+                self.assertEqual([], self.adapter.query(kind))
+                started, actual, returned = self.pair("get_trade_detail_data")
+                self.assertEqual(("account-1", "STOCK", kind), actual)
+                self.assertEqual(kind, started["query_kind"])
+                self.assertEqual({"accountID": "account-1", "accountType": "STOCK",
+                                  "dataType": kind}, started["qmt_parameters"])
                 self.assertEqual(0, returned["return_count"])
 
 

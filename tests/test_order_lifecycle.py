@@ -12,8 +12,7 @@ from order_bridge.runtime import LocalExecutorLock, OrderRuntime, read_pg_config
 
 
 class LifecycleTests(unittest.TestCase):
-    qmt_queries = {"get_trade_detail_data": lambda *args: [],
-                   "get_history_trade_detail_data": lambda *args: []}
+    qmt_queries = {"get_trade_detail_data": lambda *args: []}
 
     def _store(self):
         store = Mock()

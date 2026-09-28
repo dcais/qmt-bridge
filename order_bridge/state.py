@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
 from decimal import Decimal, InvalidOperation
 from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, utc_now
 
@@ -151,6 +151,8 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
     if kind == 'error':
         # 错误回调不能证明先前不确定调用未进入交易系统。
         doc['error'] = {'raw': copy_json(raw), 'source': source, 'observed_at': stamp}
+        if doc['error'] != before.get('error'):
+            doc['reconciliation_complete'] = False
         if doc['submission_status'] in ('QUEUED', 'SUBMITTING') and not doc['qmt_orders'] and not doc['qmt_tasks']:
             doc['submission_status'] = 'REJECTED'
     elif kind == 'deal':
@@ -279,6 +281,20 @@ def reconcile_pending(doc):
     return not state_execution_finished(doc)
 
 
+def state_terminal_facts(doc):
+    """记录已确认终态所依赖的事实，排除对账检查点与派生状态。"""
+    derived = {'filled_quantity', 'filled_amount', 'open_quantity',
+               'cancelled_quantity', 'execution_status'}
+    return fingerprint({'submission_status': doc['submission_status'],
+                        'request': doc.get('request'),
+                        'items': [{key: value for key, value in item.items() if key not in derived}
+                                  for item in doc['items']],
+                        'qmt_orders': doc['qmt_orders'], 'qmt_tasks': doc['qmt_tasks'],
+                        'fills': doc['fills'], 'error': doc.get('error'),
+                        'unassociated_evidence': doc.get('unassociated_evidence'),
+                        'resolved_evidence': doc.get('resolved_evidence')})
+
+
 def recompute_order(doc, now=None, reconciled=False):
     before = copy_json(doc)
     resolve_missing_order_evidence(doc)
@@ -291,6 +307,10 @@ def recompute_order(doc, now=None, reconciled=False):
     identity_complete = all(row.get('trading_day') and row.get('market') and row.get('item_id')
                             for row in doc['qmt_orders'])
     complete = bool(doc.get('reconciliation_complete')) and not doc.get('unassociated_evidence') and identity_complete
+    terminal_facts = state_terminal_facts(doc)
+    # 查询失败只改变覆盖状态；已有完整对账确认的相同事实仍保留执行终态。
+    preserve_terminal = (not complete and bool(doc.get('last_reconciled_at'))
+                         and doc.get('terminal_facts_fingerprint') == terminal_facts)
     tasks = doc['qmt_tasks']
     tasks_stopped = bool(tasks) and all(row.get('terminal') for row in tasks)
     algorithm = state_algorithm(doc)
@@ -330,12 +350,12 @@ def recompute_order(doc, now=None, reconciled=False):
             status = 'FILLED'
         elif (qty is None and item.get('requested_amount') is not None and not algorithm
               and doc.get('request', {}).get('execution', {}).get('type') == 'DIRECT'
-              and complete and all_orders_filled):
+              and (complete or preserve_terminal) and all_orders_filled):
             # 金额单的整手余款不要求成交额等于预算；须由每笔委托及稳定成交共同证明已成。
             status = 'FILLED'
         elif local:
             status = 'REJECTED' if doc['submission_status'] == 'REJECTED' else 'NOT_STARTED'
-        elif terminal_orders and producer_stopped and complete:
+        elif terminal_orders and producer_stopped and (complete or preserve_terminal):
             if cancelled_qty:
                 status = 'PARTIALLY_CANCELLED' if filled else 'CANCELLED'
             elif all(row['status'] == 'REJECTED' for row in orders):
@@ -371,6 +391,13 @@ def recompute_order(doc, now=None, reconciled=False):
     if fill_gap or doc.get('unassociated_evidence'):
         execution = 'INCOMPLETE'
     doc['execution_status'] = execution
+    if complete:
+        if any(status in state_TERMINAL for status in statuses):
+            doc['terminal_facts_fingerprint'] = state_terminal_facts(doc)
+        else:
+            doc.pop('terminal_facts_fingerprint', None)
+    elif not preserve_terminal:
+        doc.pop('terminal_facts_fingerprint', None)
     if doc['order_type'] == 'SINGLE':
         for field in ('filled_quantity', 'filled_amount', 'open_quantity', 'cancelled_quantity'):
             doc[field] = doc['items'][0][field]
@@ -475,6 +502,12 @@ def is_order_active(doc):
 
 def mark_reconciled(doc, complete=True, now=None):
     before = copy_json(doc)
+    # 旧文档尚无事实指纹时，先保存已经完整确认的终态，再记录失败检查点。
+    if (not complete and not doc.get('terminal_facts_fingerprint')
+            and doc.get('reconciliation_complete') and doc.get('sync_status') == 'COMPLETE'
+            and doc.get('last_reconciled_at')
+            and any(item.get('execution_status') in state_TERMINAL for item in doc['items'])):
+        doc['terminal_facts_fingerprint'] = state_terminal_facts(doc)
     resolve_missing_order_evidence(doc)
     doc['reconciliation_complete'] = bool(complete)
     if complete:

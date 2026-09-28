@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""原生 QMT 字段读取失败时的有界返回诊断；Last modified: 2026-09-26。"""
+"""原生 QMT 字段读取失败时的有界返回诊断；Last modified: 2026-09-28。"""
 import json
 import unittest
 from unittest.mock import Mock
@@ -90,20 +90,20 @@ class SnapshotValuesTests(unittest.TestCase):
         self.assertEqual(repr_calls, [])
         self.assertLess(len(json.dumps(diagnostic)), 20000)
 
-    def test_history_query_skips_xt_tag_and_keeps_trading_day(self):
+    def test_current_query_skips_xt_tag_and_keeps_native_trading_day(self):
         reads = []
 
         class COrderDetail(object):
             m_strOrderID = "order-1"
+            m_strTradingDay = "20260926"
 
             @property
             def m_xtTag(self):
                 reads.append("m_xtTag")
                 raise TypeError("converter unavailable")
 
-        adapter = QmtAdapter({"get_history_trade_detail_data": lambda *args: [("20260926", [COrderDetail()])]},
-                             object(), account_id="account-1")
-        result = adapter.query("order", "20260926", "20260926")
+        adapter = self.adapter([COrderDetail()])
+        result = adapter.query("order")
         self.assertEqual(result, [{"m_strOrderID": "order-1", "m_strTradingDay": "20260926"}])
         self.assertEqual(reads, [])
 

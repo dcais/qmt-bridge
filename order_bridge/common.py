@@ -23,7 +23,7 @@
 # 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
 # HTTP_HOST 固定为 127.0.0.1，交易账户类型固定为 STOCK；日志和队列设置是代码常量。
 #
-"""订单共用类型及调用诊断；导入时不连接数据库或调用 QMT。Last modified: 2026-09-26。"""
+"""订单共用类型及调用诊断；导入时不连接数据库或调用 QMT。Last modified: 2026-09-28。"""
 import copy
 import datetime as dt
 import hashlib
@@ -285,7 +285,8 @@ def new_order_document(request):
 
 def public_order(document, replayed=None):
     result = copy_json(document)
-    for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested", "manual_resolutions"):
+    for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
+                "manual_resolutions", "terminal_facts_fingerprint"):
         result.pop(key, None)
     if replayed is not None:
         result["replayed"] = replayed

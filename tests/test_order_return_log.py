@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QMT 返回对象诊断通过真实异步日志链路；Last modified: 2026-09-26。"""
+"""QMT 返回对象诊断通过真实异步日志链路；Last modified: 2026-09-28。"""
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -57,8 +57,8 @@ class ReturnLogTests(unittest.TestCase):
                                    object(), "account", repository=repo, logger=logger)
             bg = runtime.background
             bg.round = {"id": "round-1", "complete": True, "live_complete": True,
-                        "waiting": True, "stage": 1}
-            bg._enqueue("query", query_kind="order", dates=(), round_id="round-1")
+                        "waiting": True, "stage": 1, "queries": ['task', 'order', 'deal']}
+            bg._enqueue("query", query_kind="order", round_id="round-1")
             self.assertEqual(runtime.tick(max_actions=1), 1)
             result = bg.results.get_nowait()
             bg._merge(result)

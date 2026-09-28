@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""对账逐单 checkpoint 日志与节流的离线验证；Last modified: 2026-09-26。"""
+"""对账逐单 checkpoint 日志与节流的离线验证；Last modified: 2026-09-28。"""
 import unittest
 from unittest.mock import Mock
 
 from order_bridge.runtime import OrderRuntime
+from order_bridge.common import iso_datetime
 
 
 class Clock(object):
@@ -16,6 +17,7 @@ class Clock(object):
 
 def document(order_id, version=1):
     return {'order_id': order_id, 'client_order_id': 'client-' + order_id,
+            'created_at': iso_datetime(),
             'version': version, 'reconcile_round_fact_version': version + 10,
             'last_reconcile_attempt_at': '2026-09-26T00:00:00+00:00',
             'reconcile_due_at': '2026-09-26T00:00:30+00:00',

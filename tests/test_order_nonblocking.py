@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""非阻塞调度与缓冲/授权边界；Last modified: 2026-09-26。"""
+"""非阻塞调度与缓冲/授权边界；Last modified: 2026-09-28。"""
+import datetime as dt
 import queue
 import threading
 import time
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from order_bridge.runtime import OrderRuntime
-from order_bridge.common import OrderError
+from order_bridge.common import OrderError, iso_datetime, utc_now
 
 
 class NonblockingRuntimeTests(unittest.TestCase):
@@ -242,13 +243,17 @@ class NonblockingRuntimeTests(unittest.TestCase):
     def test_reconcile_uses_prequery_per_order_versions(self):
         runtime = self.runtime()
         background = self.ready(runtime)
-        background.round = {'id': 'round-a', 'stage': 3, 'queries': [('task', ()), ('order', ()), ('deal', ())],
+        background.round = {'id': 'round-a', 'stage': 3, 'queries': ['task', 'order', 'deal'],
+                            'query_day': utc_now().astimezone(dt.timezone(dt.timedelta(hours=8))).date(),
+                            'history_complete': True,
                             'frozen': True, 'cursor': None, 'waiting': False, 'complete': True,
                             'live_complete': True, 'generation': 0}
         runtime.repo.reconcile_round_batch.return_value = {
             'orders': [{'order_id': 'changed', 'submission_status': 'CONFIRMED',
+                        'created_at': iso_datetime(),
                         'reconcile_round_fact_version': 4, 'fact_version': 5},
                        {'order_id': 'unchanged', 'submission_status': 'CONFIRMED',
+                        'created_at': iso_datetime(),
                         'reconcile_round_fact_version': 8, 'fact_version': 8}],
             'next_cursor': None, 'has_more': False}
         background._reconcile_step()
@@ -326,7 +331,7 @@ class NonblockingRuntimeTests(unittest.TestCase):
         self.assertTrue(serviced.wait(2))
         self.assertGreater(remaining[0], 0)
 
-    def test_history_range_is_sampled_after_all_freeze_pages(self):
+    def test_history_gap_is_sampled_without_extra_queries_after_all_freeze_pages(self):
         runtime = self.runtime()
         background = self.ready(runtime)
         runtime.repo.begin_reconcile_batch.side_effect = [
@@ -338,8 +343,8 @@ class NonblockingRuntimeTests(unittest.TestCase):
         background._reconcile_step()
         runtime.repo.reconcile_history_start.assert_called_once()
         queries = background.round['queries']
-        self.assertEqual(len(queries), 5)
-        self.assertEqual(queries[3][1][0], '20000101')
+        self.assertEqual(queries, ['task', 'order', 'deal'])
+        self.assertFalse(background.round['history_complete'])
 
     def test_elapsed_deadline_performs_no_qmt_stage(self):
         runtime = self.runtime()

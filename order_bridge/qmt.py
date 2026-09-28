@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QMT 函数适配层。调用者必须处于策略调度回调线程。Last modified: 2026-09-26。"""
+"""QMT 函数适配层。调用者必须处于策略调度回调线程。Last modified: 2026-09-28。"""
 import datetime as dt
 import math
 import re
@@ -18,7 +18,6 @@ _qmt_market = {"SH": {"BEST5_IOC": 42, "BEST5_TO_LIMIT": 43,
 _qmt_strategy_name = "qmt-bridge-order"
 _qmt_passorder_fields = ("accountID", "currentTime", "formulaName", "modelPrice",
                          "modelVolume", "opType", "orderCode", "orderType", "prType", "strategyName")
-_qmt_history_date = re.compile(r"^\d{8}$")
 _qmt_range = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
 _qmt_diagnostic_missing = object()
 
@@ -480,51 +479,11 @@ class QmtAdapter(object):
                              "qmt_order_id" if kind == "CANCEL_ORDER" else "qmt_task_id": identifier})
         return bool(result)
 
-    def query(self, kind, start_date=None, end_date=None):
+    def query(self, kind):
         if kind not in ("order", "deal", "task"):
             _qmt_error("INVALID_QUERY", "kind must be order, deal or task", 400)
         if not self.account_id:
             _qmt_error("ACCOUNT_UNAVAILABLE", "adapter has no bound account", 500)
-        if (start_date is None) != (end_date is None):
-            _qmt_error("INVALID_QUERY", "both history dates are required", 400)
-        if start_date is not None:
-            if kind == "task":
-                _qmt_error("HISTORY_UNAVAILABLE", "QMT history does not document task data", 501)
-            if not _qmt_history_date.match(start_date) or not _qmt_history_date.match(end_date) or start_date > end_date:
-                _qmt_error("INVALID_QUERY", "history dates must be ordered YYYYMMDD", 400)
-            try:
-                rows = self._call("get_history_trade_detail_data",
-                                  (self.account_id, self.account_type, kind.upper(), start_date, end_date),
-                                  {"accountID": self.account_id, "accountType": self.account_type,
-                                   "dataType": kind.upper(), "startDate": start_date, "endDate": end_date},
-                                  {"query_kind": kind})
-            except Exception as exc:
-                _qmt_exception_context(exc, "native_query")
-                raise
-            if not isinstance(rows, (list, tuple)):
-                _qmt_error("INVALID_QMT_RESULT", "history query returned invalid collection", 502)
-            result = []
-            for row_index, row in enumerate(rows):
-                if not isinstance(row, (list, tuple)) or len(row) < 2:
-                    _qmt_error("INVALID_QMT_RESULT", "history query returned invalid tuple", 502)
-                for raw_item in row[1:]:
-                    group = raw_item if isinstance(raw_item, (list, tuple)) else [raw_item]
-                    for member in group:
-                        try:
-                            item = self.snapshot(member)
-                        except Exception as exc:
-                            _qmt_exception_context(exc, "snapshot", value=member)
-                            _qmt_query_result_context(exc, rows, row_index)
-                            raise
-                        if not isinstance(item, dict):
-                            _qmt_error("INVALID_QMT_RESULT", "history entry has no QMT fields", 502)
-                        if not item.get("m_strTradingDay"):
-                            trading_day = str(row[0])
-                            if not _qmt_history_date.match(trading_day):
-                                _qmt_error("INVALID_QMT_RESULT", "history entry has no valid trading day", 502)
-                            item["m_strTradingDay"] = trading_day
-                        result.append(item)
-            return result
         try:
             rows = self._call("get_trade_detail_data", (self.account_id, self.account_type, kind),
                               {"accountID": self.account_id, "accountType": self.account_type,

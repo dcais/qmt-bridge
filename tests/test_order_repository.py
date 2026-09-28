@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""真实 PostgreSQL 隔离 schema 验证；未配置数据库时明确跳过。"""
+"""真实 PostgreSQL 隔离 schema 验证；未配置数据库时明确跳过。Last modified: 2026-09-28。"""
 import os
 import datetime as dt
 import sys
@@ -731,31 +731,92 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repo.get_by_id(doc["order_id"]), before)
         self.assertEqual(self.repo.events()["events"], events)
 
-    def test_restart_gap_reopens_terminal_in_bounded_pages(self):
-        docs = [self.order("gap-" + str(index)) for index in range(3)]
-        for doc in docs:
+    def test_startup_gap_skips_settled_terminal_and_advances_mixed_pages(self):
+        settled = []
+        for index, status in enumerate((56, 57, 56)):
+            doc = self.order("gap-" + str(index))
             raw = {"remark": doc["remark"], "qmt_order_id": "qmt-" + doc["client_order_id"],
                    "trading_day": "20260925", "market": "SH", "symbol": "510300.SH", "side": "BUY",
-                   "quantity": 100, "filled_quantity": 100, "status": 56}
-            self.repo.ingest_observation("order", raw)
-            current = self.repo.ingest_observation("deal", {"qmt_order_id": raw["qmt_order_id"],
-                                                       "trade_id": "fill-" + doc["client_order_id"],
-                                                       "trading_day": "20260925", "market": "SH", "symbol": "510300.SH",
-                                                       "side": "BUY", "quantity": 100, "amount": "420"})
+                   "quantity": 100, "filled_quantity": 100 if status == 56 else 0, "status": status}
+            current = self.repo.ingest_observation("order", raw)
+            if status == 56:
+                current = self.repo.ingest_observation("deal", {"qmt_order_id": raw["qmt_order_id"],
+                                                           "trade_id": "fill-" + doc["client_order_id"],
+                                                           "trading_day": "20260925", "market": "SH", "symbol": "510300.SH",
+                                                           "side": "BUY", "quantity": 100, "amount": "420"})
             self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True))
-            self.assertFalse(self.repo.get_by_id(doc["order_id"])["reconcile_pending"])
-        cursor, marked = None, 0
+            finished = self.repo.get_by_id(doc["order_id"])
+            self.assertFalse(finished["reconcile_pending"])
+            self.assertEqual(finished["execution_status"], "REJECTED" if status == 57 else "FILLED")
+            settled.append(finished)
+        active = self.order("gap-active")
+        self.repo.ingest_observation("order", {
+            "remark": active["remark"], "qmt_order_id": "qmt-active", "trading_day": "20260925",
+            "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100, "status": 50})
+        requested = settled[2]
+        self.repo.update_order(requested["order_id"], "TEST_MANUAL_RECONCILE", lambda row: row.update(
+            reconcile_requested=True, reconcile_pending=True))
+        before = {doc["order_id"]: self.repo.get_by_id(doc["order_id"])["version"] for doc in settled}
+        cursor, marked, pages = None, 0, 0
         while True:
-            page = self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", limit=1, cursor=cursor)
+            page = self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", limit=1,
+                                                cursor=cursor, startup=True)
+            pages += 1
             marked += page["marked"]
             if not page["has_more"]:
                 break
+            self.assertIsNotNone(page["next_cursor"])
             cursor = page["next_cursor"]
-        self.assertEqual(marked, 3)
-        for doc in docs:
+        self.assertEqual(pages, 4)
+        self.assertEqual(marked, 2)
+        for doc in settled[:2]:
+            current = self.repo.get_by_id(doc["order_id"])
+            self.assertEqual(current["version"], before[doc["order_id"]])
+            self.assertFalse(current["reconcile_pending"])
+        for doc in (requested, active):
             current = self.repo.get_by_id(doc["order_id"])
             self.assertTrue(current["reconcile_pending"])
             self.assertTrue(current["reconcile_requested"])
+        # 相同扫描标记不能重复计数；真实回报缺口仍会重开已完成的拒单。
+        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", startup=True)["marked"], 0)
+        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:01:00Z")["marked"], 4)
+        self.assertTrue(self.repo.get_by_id(settled[1]["order_id"])["reconcile_pending"])
+
+    def test_late_child_after_startup_skip_still_reopens_reconciliation(self):
+        doc = self.order("startup-late")
+        raw = {"remark": doc["remark"], "qmt_order_id": "first-child", "trading_day": "20260925",
+               "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100,
+               "filled_quantity": 100, "status": 56}
+        self.repo.ingest_observation("order", raw)
+        current = self.repo.ingest_observation("deal", {
+            "qmt_order_id": "first-child", "trade_id": "first-fill", "trading_day": "20260925",
+            "market": "SH", "symbol": "510300.SH", "side": "BUY", "quantity": 100, "amount": "420"})
+        self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True)
+        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", startup=True)["marked"], 0)
+        current = self.repo.ingest_observation("order", dict(raw, qmt_order_id="late-child",
+                                                             filled_quantity=0, status=50))
+        self.assertTrue(current["reconcile_pending"])
+        self.assertEqual(len(current["qmt_orders"]), 2)
+
+    def test_startup_gap_keeps_active_algorithm_basket_with_rejected_child(self):
+        request = {"client_order_id": "active-algo-basket", "account_id": "test-account",
+                   "order_type": "BASKET", "items": [
+                       {"item_id": "first", "symbol": "510300.SH", "side": "BUY", "quantity": 100}],
+                   "execution": {"type": "SLICED", "mode": "ALGO", "params": {}}}
+        doc = self.repo.accept_order(request)[1]
+        self.repo.ingest_observation("task", {
+            "remark": doc["remark"], "qmt_task_id": "basket-task", "trading_day": "20260925",
+            "market": "SH", "symbol": "510300.SH", "side": "BUY", "status": 3})
+        current = self.repo.ingest_observation("order", {
+            "remark": doc["remark"], "qmt_task_id": "basket-task", "qmt_order_id": "rejected-child",
+            "trading_day": "20260925", "market": "SH", "symbol": "510300.SH", "side": "BUY",
+            "quantity": 100, "filled_quantity": 0, "status": 57})
+        self.assertTrue(self.repo.finish_reconcile(doc["order_id"], current["fact_version"], True))
+        before = self.repo.get_by_id(doc["order_id"])
+        self.assertTrue(before["reconcile_pending"])
+        self.assertNotEqual(before["execution_status"], "REJECTED")
+        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", startup=True)["marked"], 1)
+        self.assertTrue(self.repo.get_by_id(doc["order_id"])["reconcile_requested"])
 
     def test_authority_claims_do_not_touch_advisory_connection(self):
         self.owner()

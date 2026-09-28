@@ -1,6 +1,6 @@
 import copy
 import unittest
-from order_bridge.common import OrderError, new_order_document
+from order_bridge.common import OrderError, new_order_document, public_order
 from order_bridge.state import (apply_observation, apply_cancel_request, cancel_response,
                                 pending_cancellations, mark_reconciled, recompute_order,
                                 is_order_active, observation_identifiers, reconcile_pending)
@@ -56,6 +56,123 @@ class StateTests(unittest.TestCase):
         doc['submission_status'] = 'UNKNOWN'
         mark_reconciled(doc, complete=False)
         self.assertIsNone(doc['last_reconciled_at'])
+        self.assertTrue(doc['reconcile_pending'])
+
+    def test_failed_checkpoints_preserve_confirmed_terminal_facts(self):
+        cases = (('REJECTED', 57, 0), ('CANCELLED', 54, 0),
+                 ('PARTIALLY_CANCELLED', 53, 40), ('FILLED', 56, 100))
+        for expected, native_status, filled in cases:
+            doc = document()
+            if filled:
+                observe(doc, 'deal', deal(quantity=filled, amount=str(filled * 10)))
+            observe(doc, 'order', order(status=native_status, filled=filled))
+            mark_reconciled(doc, now='2026-09-25T10:00:00+00:00')
+            self.assertEqual(doc['execution_status'], expected)
+            self.assertNotIn('terminal_facts_fingerprint', public_order(doc))
+            for minute in ('01', '02'):
+                mark_reconciled(doc, complete=False, now='2026-09-25T10:%s:00+00:00' % minute)
+                self.assertEqual(doc['execution_status'], expected)
+                self.assertEqual(doc['items'][0]['execution_status'], expected)
+                self.assertEqual(doc['sync_status'], 'INCOMPLETE')
+                self.assertFalse(doc['reconciliation_complete'])
+                self.assertTrue(doc['reconcile_pending'])
+                self.assertEqual(doc['last_reconciled_at'], '2026-09-25T10:00:00+00:00')
+                self.assertFalse(recompute_order(doc))
+                self.assertEqual(doc['execution_status'], expected)
+
+    def test_failed_checkpoint_preserves_each_terminal_basket_item(self):
+        doc = document(basket=True)
+        observe(doc, 'order', order(status=54))
+        observe(doc, 'order', order('o2', status=57, quantity=200,
+                                    symbol='159001', side=49, market='SZ'))
+        mark_reconciled(doc)
+        self.assertEqual([item['execution_status'] for item in doc['items']], ['CANCELLED', 'REJECTED'])
+        mark_reconciled(doc, complete=False)
+        recompute_order(doc)
+        self.assertEqual([item['execution_status'] for item in doc['items']], ['CANCELLED', 'REJECTED'])
+        self.assertEqual(doc['execution_status'], 'CANCELLED')
+
+    def test_failed_checkpoint_preserves_legacy_confirmed_terminal(self):
+        doc = document()
+        observe(doc, 'order', order(status=57))
+        mark_reconciled(doc)
+        doc.pop('terminal_facts_fingerprint')
+        mark_reconciled(doc, complete=False)
+        self.assertEqual(doc['execution_status'], 'REJECTED')
+        self.assertEqual(doc['items'][0]['execution_status'], 'REJECTED')
+        self.assertEqual(doc['sync_status'], 'INCOMPLETE')
+
+    def test_failed_checkpoint_keeps_terminal_item_in_active_basket(self):
+        doc = document(basket=True)
+        observe(doc, 'order', order(status=54))
+        observe(doc, 'order', order('o2', quantity=200,
+                                    symbol='159001', side=49, market='SZ'))
+        mark_reconciled(doc)
+        self.assertEqual([item['execution_status'] for item in doc['items']], ['CANCELLED', 'WORKING'])
+        doc.pop('terminal_facts_fingerprint')
+        mark_reconciled(doc, complete=False)
+        recompute_order(doc)
+        self.assertEqual([item['execution_status'] for item in doc['items']], ['CANCELLED', 'WORKING'])
+        self.assertEqual(doc['execution_status'], 'WORKING')
+        self.assertTrue(doc['reconcile_pending'])
+
+    def test_new_fact_after_failed_checkpoint_reopens_terminal_decision(self):
+        for kind, raw, expected in (
+                ('deal', deal(quantity=40), 'INCOMPLETE'),
+                ('order', order('late'), 'WORKING'),
+                ('error', {'message': 'late error'}, 'INCOMPLETE')):
+            doc = document()
+            observe(doc, 'order', order(status=54))
+            mark_reconciled(doc)
+            mark_reconciled(doc, complete=False)
+            observe(doc, kind, raw)
+            self.assertEqual(doc['execution_status'], expected)
+            self.assertTrue(doc['reconcile_pending'])
+            self.assertFalse(recompute_order(doc))
+            self.assertEqual(doc['execution_status'], expected)
+            if kind == 'deal':
+                mark_reconciled(doc)
+                self.assertEqual(doc['execution_status'], 'PARTIALLY_CANCELLED')
+
+    def test_failed_checkpoint_does_not_confirm_unreconciled_terminal_child(self):
+        doc = document()
+        observe(doc, 'order', order(status=54))
+        self.assertEqual(doc['execution_status'], 'INCOMPLETE')
+        mark_reconciled(doc, complete=False)
+        self.assertEqual(doc['execution_status'], 'INCOMPLETE')
+        self.assertIsNone(doc['last_reconciled_at'])
+
+    def test_late_error_before_failed_checkpoint_reopens_terminal(self):
+        doc = document()
+        observe(doc, 'order', order(status=54))
+        mark_reconciled(doc)
+        observe(doc, 'error', {'message': 'late error'})
+        self.assertFalse(doc['reconciliation_complete'])
+        self.assertEqual(doc['execution_status'], 'INCOMPLETE')
+        mark_reconciled(doc, complete=False)
+        self.assertEqual(doc['execution_status'], 'INCOMPLETE')
+
+    def test_late_fill_identity_gap_overrides_preserved_terminal(self):
+        doc = document()
+        observe(doc, 'order', order(status=54))
+        mark_reconciled(doc)
+        mark_reconciled(doc, complete=False)
+        raw = deal()
+        del raw['m_strTradeID']
+        observe(doc, 'deal', raw)
+        self.assertEqual(doc['execution_status'], 'INCOMPLETE')
+        self.assertEqual(doc['sync_status'], 'INCOMPLETE')
+        self.assertTrue(doc['unassociated_evidence'])
+        self.assertTrue(doc['reconcile_pending'])
+
+    def test_failed_checkpoint_does_not_finish_running_algorithm(self):
+        doc = document(algo=True)
+        observe(doc, 'task', {'m_nTaskId': 5, 'm_eStatus': 3})
+        observe(doc, 'order', order(status=54))
+        mark_reconciled(doc)
+        self.assertNotIn(doc['execution_status'], ('CANCELLED', 'PARTIALLY_CANCELLED', 'FILLED'))
+        mark_reconciled(doc, complete=False)
+        self.assertNotIn(doc['execution_status'], ('CANCELLED', 'PARTIALLY_CANCELLED', 'FILLED'))
         self.assertTrue(doc['reconcile_pending'])
 
     def test_queued_cancel_is_local_and_never_dispatches(self):

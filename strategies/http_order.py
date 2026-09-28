@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-26 22:45:35
+# Last modified (Asia/Shanghai): 2026-09-28 15:31:30
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -26,7 +26,7 @@
 # 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
 # HTTP_HOST 固定为 127.0.0.1，交易账户类型固定为 STOCK；日志和队列设置是代码常量。
 #
-"""订单共用类型及调用诊断；导入时不连接数据库或调用 QMT。Last modified: 2026-09-26。"""
+"""订单共用类型及调用诊断；导入时不连接数据库或调用 QMT。Last modified: 2026-09-28。"""
 import copy
 import datetime as dt
 import hashlib
@@ -288,7 +288,8 @@ def new_order_document(request):
 
 def public_order(document, replayed=None):
     result = copy_json(document)
-    for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested", "manual_resolutions"):
+    for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
+                "manual_resolutions", "terminal_facts_fingerprint"):
         result.pop(key, None)
     if replayed is not None:
         result["replayed"] = replayed
@@ -703,7 +704,7 @@ def capabilities():
             "quantity_unit": "shares or ETF units; no multiplication", "amount_unit": "CNY, stocks only"}
 
 # ---- order_bridge/state.py ----
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
 from decimal import Decimal, InvalidOperation
 
 
@@ -854,6 +855,8 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
     if kind == 'error':
         # 错误回调不能证明先前不确定调用未进入交易系统。
         doc['error'] = {'raw': copy_json(raw), 'source': source, 'observed_at': stamp}
+        if doc['error'] != before.get('error'):
+            doc['reconciliation_complete'] = False
         if doc['submission_status'] in ('QUEUED', 'SUBMITTING') and not doc['qmt_orders'] and not doc['qmt_tasks']:
             doc['submission_status'] = 'REJECTED'
     elif kind == 'deal':
@@ -982,6 +985,20 @@ def reconcile_pending(doc):
     return not state_execution_finished(doc)
 
 
+def state_terminal_facts(doc):
+    """记录已确认终态所依赖的事实，排除对账检查点与派生状态。"""
+    derived = {'filled_quantity', 'filled_amount', 'open_quantity',
+               'cancelled_quantity', 'execution_status'}
+    return fingerprint({'submission_status': doc['submission_status'],
+                        'request': doc.get('request'),
+                        'items': [{key: value for key, value in item.items() if key not in derived}
+                                  for item in doc['items']],
+                        'qmt_orders': doc['qmt_orders'], 'qmt_tasks': doc['qmt_tasks'],
+                        'fills': doc['fills'], 'error': doc.get('error'),
+                        'unassociated_evidence': doc.get('unassociated_evidence'),
+                        'resolved_evidence': doc.get('resolved_evidence')})
+
+
 def recompute_order(doc, now=None, reconciled=False):
     before = copy_json(doc)
     resolve_missing_order_evidence(doc)
@@ -994,6 +1011,10 @@ def recompute_order(doc, now=None, reconciled=False):
     identity_complete = all(row.get('trading_day') and row.get('market') and row.get('item_id')
                             for row in doc['qmt_orders'])
     complete = bool(doc.get('reconciliation_complete')) and not doc.get('unassociated_evidence') and identity_complete
+    terminal_facts = state_terminal_facts(doc)
+    # 查询失败只改变覆盖状态；已有完整对账确认的相同事实仍保留执行终态。
+    preserve_terminal = (not complete and bool(doc.get('last_reconciled_at'))
+                         and doc.get('terminal_facts_fingerprint') == terminal_facts)
     tasks = doc['qmt_tasks']
     tasks_stopped = bool(tasks) and all(row.get('terminal') for row in tasks)
     algorithm = state_algorithm(doc)
@@ -1033,12 +1054,12 @@ def recompute_order(doc, now=None, reconciled=False):
             status = 'FILLED'
         elif (qty is None and item.get('requested_amount') is not None and not algorithm
               and doc.get('request', {}).get('execution', {}).get('type') == 'DIRECT'
-              and complete and all_orders_filled):
+              and (complete or preserve_terminal) and all_orders_filled):
             # 金额单的整手余款不要求成交额等于预算；须由每笔委托及稳定成交共同证明已成。
             status = 'FILLED'
         elif local:
             status = 'REJECTED' if doc['submission_status'] == 'REJECTED' else 'NOT_STARTED'
-        elif terminal_orders and producer_stopped and complete:
+        elif terminal_orders and producer_stopped and (complete or preserve_terminal):
             if cancelled_qty:
                 status = 'PARTIALLY_CANCELLED' if filled else 'CANCELLED'
             elif all(row['status'] == 'REJECTED' for row in orders):
@@ -1074,6 +1095,13 @@ def recompute_order(doc, now=None, reconciled=False):
     if fill_gap or doc.get('unassociated_evidence'):
         execution = 'INCOMPLETE'
     doc['execution_status'] = execution
+    if complete:
+        if any(status in state_TERMINAL for status in statuses):
+            doc['terminal_facts_fingerprint'] = state_terminal_facts(doc)
+        else:
+            doc.pop('terminal_facts_fingerprint', None)
+    elif not preserve_terminal:
+        doc.pop('terminal_facts_fingerprint', None)
     if doc['order_type'] == 'SINGLE':
         for field in ('filled_quantity', 'filled_amount', 'open_quantity', 'cancelled_quantity'):
             doc[field] = doc['items'][0][field]
@@ -1178,6 +1206,12 @@ def is_order_active(doc):
 
 def mark_reconciled(doc, complete=True, now=None):
     before = copy_json(doc)
+    # 旧文档尚无事实指纹时，先保存已经完整确认的终态，再记录失败检查点。
+    if (not complete and not doc.get('terminal_facts_fingerprint')
+            and doc.get('reconciliation_complete') and doc.get('sync_status') == 'COMPLETE'
+            and doc.get('last_reconciled_at')
+            and any(item.get('execution_status') in state_TERMINAL for item in doc['items'])):
+        doc['terminal_facts_fingerprint'] = state_terminal_facts(doc)
     resolve_missing_order_evidence(doc)
     doc['reconciliation_complete'] = bool(complete)
     if complete:
@@ -1187,7 +1221,7 @@ def mark_reconciled(doc, complete=True, now=None):
     return before != doc
 
 # ---- order_bridge/repository.py ----
-"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-26。"""
+"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
 import hashlib
 import json
 import math
@@ -1778,8 +1812,8 @@ class PostgresRepository(object):
             return True
         return self.repo_run(finish, mutation=True)
 
-    def mark_reconcile_gap(self, since, limit=100, cursor=None):
-        """按 order_id 有界重开进入过 QMT 的记录，包括已退出的终态。"""
+    def mark_reconcile_gap(self, since, limit=100, cursor=None, startup=False):
+        """按 order_id 有界重开进入过 QMT 的记录；启动时保留已完整对账的终态。"""
         since = since if isinstance(since, str) else iso_datetime(since)
         limit = max(1, min(int(limit), 1000))
         def mark(cur):
@@ -1795,15 +1829,21 @@ class PostgresRepository(object):
                         "OR document->'fills'<>'[]'::jsonb)" + after + " ORDER BY order_id LIMIT %s FOR UPDATE",
                         params + (limit + 1,))
             rows = cur.fetchall()
+            marked = 0
             for order_id, raw in rows[:limit]:
                 doc = repo_json(raw)
                 if doc.get("last_reconcile_gap_since") == since:
                     continue
+                if (startup and state_execution_finished(doc) and doc.get("last_reconciled_at")
+                        and not doc.get("reconcile_pending") and not doc.get("reconcile_requested")
+                        and not doc.get("unassociated_evidence")):
+                    continue
                 doc["last_reconcile_gap_since"] = since
                 doc["reconcile_requested"] = True
                 self.repo_save(cur, doc, "RECONCILE_GAP")
+                marked += 1
             has_more = len(rows) > limit
-            return {"marked": len(rows[:limit]), "next_cursor": rows[limit - 1][0] if has_more else None,
+            return {"marked": marked, "next_cursor": rows[limit - 1][0] if has_more else None,
                     "has_more": has_more}
         return self.repo_run(mark, mutation=True)
 
@@ -2064,7 +2104,7 @@ class PostgresRepository(object):
         return self.repo_run(associate, mutation=True)
 
 # ---- order_bridge/qmt.py ----
-"""QMT 函数适配层。调用者必须处于策略调度回调线程。Last modified: 2026-09-26。"""
+"""QMT 函数适配层。调用者必须处于策略调度回调线程。Last modified: 2026-09-28。"""
 import datetime as dt
 import math
 import re
@@ -2082,7 +2122,6 @@ _qmt_market = {"SH": {"BEST5_IOC": 42, "BEST5_TO_LIMIT": 43,
 _qmt_strategy_name = "qmt-bridge-order"
 _qmt_passorder_fields = ("accountID", "currentTime", "formulaName", "modelPrice",
                          "modelVolume", "opType", "orderCode", "orderType", "prType", "strategyName")
-_qmt_history_date = re.compile(r"^\d{8}$")
 _qmt_range = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$")
 _qmt_diagnostic_missing = object()
 
@@ -2544,51 +2583,11 @@ class QmtAdapter(object):
                              "qmt_order_id" if kind == "CANCEL_ORDER" else "qmt_task_id": identifier})
         return bool(result)
 
-    def query(self, kind, start_date=None, end_date=None):
+    def query(self, kind):
         if kind not in ("order", "deal", "task"):
             _qmt_error("INVALID_QUERY", "kind must be order, deal or task", 400)
         if not self.account_id:
             _qmt_error("ACCOUNT_UNAVAILABLE", "adapter has no bound account", 500)
-        if (start_date is None) != (end_date is None):
-            _qmt_error("INVALID_QUERY", "both history dates are required", 400)
-        if start_date is not None:
-            if kind == "task":
-                _qmt_error("HISTORY_UNAVAILABLE", "QMT history does not document task data", 501)
-            if not _qmt_history_date.match(start_date) or not _qmt_history_date.match(end_date) or start_date > end_date:
-                _qmt_error("INVALID_QUERY", "history dates must be ordered YYYYMMDD", 400)
-            try:
-                rows = self._call("get_history_trade_detail_data",
-                                  (self.account_id, self.account_type, kind.upper(), start_date, end_date),
-                                  {"accountID": self.account_id, "accountType": self.account_type,
-                                   "dataType": kind.upper(), "startDate": start_date, "endDate": end_date},
-                                  {"query_kind": kind})
-            except Exception as exc:
-                _qmt_exception_context(exc, "native_query")
-                raise
-            if not isinstance(rows, (list, tuple)):
-                _qmt_error("INVALID_QMT_RESULT", "history query returned invalid collection", 502)
-            result = []
-            for row_index, row in enumerate(rows):
-                if not isinstance(row, (list, tuple)) or len(row) < 2:
-                    _qmt_error("INVALID_QMT_RESULT", "history query returned invalid tuple", 502)
-                for raw_item in row[1:]:
-                    group = raw_item if isinstance(raw_item, (list, tuple)) else [raw_item]
-                    for member in group:
-                        try:
-                            item = self.snapshot(member)
-                        except Exception as exc:
-                            _qmt_exception_context(exc, "snapshot", value=member)
-                            _qmt_query_result_context(exc, rows, row_index)
-                            raise
-                        if not isinstance(item, dict):
-                            _qmt_error("INVALID_QMT_RESULT", "history entry has no QMT fields", 502)
-                        if not item.get("m_strTradingDay"):
-                            trading_day = str(row[0])
-                            if not _qmt_history_date.match(trading_day):
-                                _qmt_error("INVALID_QMT_RESULT", "history entry has no valid trading day", 502)
-                            item["m_strTradingDay"] = trading_day
-                        result.append(item)
-            return result
         try:
             rows = self._call("get_trade_detail_data", (self.account_id, self.account_type, kind),
                               {"accountID": self.account_id, "accountType": self.account_type,
@@ -2894,7 +2893,7 @@ class AsyncOrderLogger(object):
                 self._sampled_at = order_log_datetime.datetime.now(self._ZONE).isoformat()
 
 # ---- order_bridge/background.py ----
-"""ORDER 后台事务与短期授权；Last modified: 2026-09-26。
+"""ORDER 后台事务与短期授权；Last modified: 2026-09-28。
 
 队列只承载普通快照。容量令牌覆盖排队、QMT 在途和待持久结果整个生命期。
 """
@@ -2904,6 +2903,29 @@ import threading
 import time
 import uuid
 
+
+
+def _background_current_day_covered(document, day):
+    """按提交时间核对当日覆盖；委托、成交缺日期或已有旧事实时保留缺口。"""
+    facts = [row for field in ('qmt_tasks', 'qmt_orders', 'fills')
+             for row in document.get(field, [])]
+    if document['submission_status'] in ('QUEUED', 'CANCELLED_LOCAL', 'EXPIRED', 'REJECTED') and not facts:
+        return True
+    attempts = [row for row in document.get('attempts', [])
+                if row.get('kind') == 'SUBMIT' and row.get('status') != 'ABORTED_NO_CALL']
+    stamps = [row.get('created_at') for row in attempts] or [document.get('created_at')]
+    zone = dt.timezone(dt.timedelta(hours=8))
+    try:
+        if any(parse_timestamp(stamp).astimezone(zone).date() != day for stamp in stamps):
+            return False
+    except OrderError:
+        return False
+    # CTaskDetail 在本机不带交易日，以持久提交时间为界；委托和成交仍须明确日期。
+    dated = [row for field in ('qmt_orders', 'fills') for row in document.get(field, [])]
+    if any(not row.get('trading_day') for row in dated):
+        return False
+    return all(not row.get('trading_day') or str(row['trading_day']).replace('-', '') == day.strftime('%Y%m%d')
+               for row in facts)
 
 
 class OrderBackground(object):
@@ -3096,7 +3118,7 @@ class OrderBackground(object):
                         elif kind == 'prepare':
                             result['value'] = r.adapter.prepare_step(directive['document'], directive['stage'])
                         else:
-                            result['value'] = r.adapter.query(directive['query_kind'], *directive.get('dates', ()))
+                            result['value'] = r.adapter.query(directive['query_kind'])
                         result['status'] = 'RETURNED'
                 except Exception as exc:
                     if kind == 'query':
@@ -3165,7 +3187,7 @@ class OrderBackground(object):
                                 continue
                             recovery_done = True
                         gap = r.repo.mark_reconcile_gap(startup_stamp, limit=r.settings['reconcile_batch_size'],
-                                                        cursor=startup_gap_cursor)
+                                                        cursor=startup_gap_cursor, startup=True)
                         startup_gap_cursor = gap['next_cursor']
                         if gap['has_more']:
                             continue
@@ -3330,7 +3352,7 @@ class OrderBackground(object):
                 index = result.get('merge_index', 0)
                 values = result['value']
                 for raw in values[index:index + r.settings['reconcile_batch_size']]:
-                    r.repo.ingest_observation(result['query_kind'], raw, 'history' if result.get('dates') else 'query')
+                    r.repo.ingest_observation(result['query_kind'], raw, 'query')
                     index += 1
                     result['merge_index'] = index
                 if index < len(values):
@@ -3342,12 +3364,10 @@ class OrderBackground(object):
                            if key in error}
                 summary.setdefault('code', result['status'])
                 self.last_reconcile_error = summary
-                dates = result.get('dates') or ()
                 self._log('ERROR', 'QMT reconciliation incomplete', account_id=r.account_id,
                           kind=result['query_kind'], query_kind=result['query_kind'],
                           round_id=result.get('round_id') or self.round['id'],
-                          history_start=dates[0] if dates else None,
-                          history_end=dates[1] if dates else None,
+                          query_scope='CURRENT_DAY',
                           error_code=summary['code'],
                           error_message=error.get('message'), error_type=error.get('type'),
                           error_phase=error.get('phase'), error_field=error.get('field'),
@@ -3355,10 +3375,11 @@ class OrderBackground(object):
                           return_type=error.get('return_type'), return_count=error.get('return_count'),
                           row_index=error.get('row_index'), return_snapshot=error.get('return_snapshot'),
                           traceback=error.get('traceback'))
-                if not result.get('dates'):
-                    self.round['live_complete'] = False
+                self.round['live_complete'] = False
             self.round['waiting'] = False
             self.round['stage'] += 1
+            if self.round['stage'] == len(self.round['queries']):
+                self.round['query_finished_at'] = iso_datetime()
             return
         doc = result['document']
         status = result['status']
@@ -3429,25 +3450,27 @@ class OrderBackground(object):
             current['cursor'] = None
             today = utc_now().astimezone(dt.timezone(dt.timedelta(hours=8))).date()
             earliest = r.repo.reconcile_history_start()
-            dates = ()
-            if earliest:
-                start = parse_timestamp(earliest).astimezone(dt.timezone(dt.timedelta(hours=8))).date()
-                if start < today:
-                    dates = (start.strftime('%Y%m%d'), (today - dt.timedelta(days=1)).strftime('%Y%m%d'))
-            self.round['queries'] = [('task', ()), ('order', ()), ('deal', ())]
-            if dates:
-                self.round['queries'].extend([('order', dates), ('deal', dates)])
+            current['query_day'] = today
+            # get_trade_detail_data 不接受日期范围；旧单只影响历史覆盖标记。
+            current['history_complete'] = not earliest or parse_timestamp(earliest).astimezone(
+                dt.timezone(dt.timedelta(hours=8))).date() >= today
+            current['queries'] = ['task', 'order', 'deal']
         if current['waiting']:
             return
         if current['stage'] < len(current['queries']):
-            kind, dates = current['queries'][current['stage']]
-            if self._enqueue('query', query_kind=kind, dates=dates, round_id=current['id']):
+            kind = current['queries'][current['stage']]
+            if self._enqueue('query', query_kind=kind, round_id=current['id']):
                 current['waiting'] = True
             return
+        # 覆盖日期以 QMT 三份快照读完时为准；后续数据库分页不改变同一份快照的日期。
+        current.setdefault('query_finished_at', iso_datetime())
         batch = r.repo.reconcile_round_batch(current['id'], limit=r.settings['reconcile_batch_size'],
                                              cursor=current['cursor'])
-        complete = current['complete'] and current['generation'] == self.fact_generation
         stamp = iso_datetime()
+        today = parse_timestamp(current['query_finished_at']).astimezone(dt.timezone(dt.timedelta(hours=8))).date()
+        # 查询跨越上海零点时，本轮三份快照可能来自不同日期，不能宣告完整。
+        same_day = current['query_day'] == today
+        complete = current['complete'] and current['generation'] == self.fact_generation and same_day
         for document in batch['orders']:
             if document['submission_status'] == 'SUBMITTING':
                 attempts = [a for a in document['attempts'] if a.get('kind') == 'SUBMIT']
@@ -3458,28 +3481,34 @@ class OrderBackground(object):
                             row.update(submission_status='UNKNOWN', execution_status='UNKNOWN',
                                        error={'code': 'SUBMISSION_OUTCOME_UNKNOWN', 'message': 'QMT acknowledgement is not yet associated'})
                     document = r.repo.update_order(document['order_id'], 'SUBMISSION_UNKNOWN', unknown)
+            covered = _background_current_day_covered(document, current['query_day'])
+            if not covered:
+                current['history_complete'] = False
+            order_complete = complete and covered
             checkpoint_applied = r.repo.finish_reconcile(
                 document['order_id'], document.get('reconcile_round_fact_version', -1),
-                complete, stamp, interval_seconds=interval)
+                order_complete, stamp, interval_seconds=interval)
             # False 表示查询期间事实已更新，旧快照未写入；不得记录为对账完成。
             outcome = ('STALE_FACT_VERSION' if not checkpoint_applied else
-                       'COMPLETE' if complete else 'INCOMPLETE')
+                       'COMPLETE' if order_complete else 'INCOMPLETE')
             self._log('INFO', 'RECONCILE_FINISHED', account_id=r.account_id,
                       order_id=document['order_id'], client_order_id=document.get('client_order_id'),
                       round_id=current['id'], source_version=document.get('version'),
                       fact_version=document.get('reconcile_round_fact_version'),
                       checkpoint_applied=bool(checkpoint_applied),
-                      complete=bool(complete) if checkpoint_applied else None,
+                      complete=bool(order_complete) if checkpoint_applied else None,
+                      query_scope='CURRENT_DAY', query_day=current['query_day'].isoformat(),
+                      coverage_gap=None if covered else 'HISTORY_NOT_COVERED',
                       outcome=outcome)
         current['cursor'] = batch['next_cursor']
         if batch['has_more']:
             return
-        if current['live_complete']:
+        if current['live_complete'] and same_day:
             r.recovery_complete = True
         if complete:
             r.last_reconciled_at = stamp
             self.last_reconcile_error = None
-        r.history_coverage_complete = current['complete']
+        r.history_coverage_complete = complete and current['history_complete']
         self.round = None
         self.last_reconcile_finished_at = stamp
         self.next_round = r.clock() + interval
@@ -3492,6 +3521,7 @@ class OrderBackground(object):
         return dict(http_running=not r.stop_event.is_set(), database_available=self.db_ready and self.sample.get('ready', True),
                     trading_configured=r.repo is not None, scheduler_alive=alive,
                     recovery_complete=r.recovery_complete, history_coverage_complete=r.history_coverage_complete,
+                    reconcile_query_scope='CURRENT_DAY', history_query_available=False,
                     accepting_orders=bool(self.authorized() and r.recovery_complete and alive),
                     executor_owned=bool(grant and r.clock() < grant[2]), schema_version=self.sample.get('schema_version'),
                     unknown_order_count=self.sample.get('unknown_order_count'), pending_count=self.sample.get('pending_count'),
