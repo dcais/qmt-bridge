@@ -228,6 +228,11 @@ def iso_datetime(value=None):
     return (value or utc_now()).astimezone(dt.timezone.utc).isoformat()
 
 
+def new_record_metadata(created_at=None):
+    """Assign immutable identity and creation time when a child record is born."""
+    return {"record_id": str(uuid.uuid4()), "created_at": created_at or iso_datetime()}
+
+
 def parse_timestamp(value):
     if not isinstance(value, str):
         raise OrderError(400, "INVALID_TIMESTAMP", "timestamp must include a timezone")
@@ -263,6 +268,7 @@ def new_order_document(request):
     members = [{"item_id": "single", "symbol": request["symbol"], "side": request["side"],
                 "quantity": request.get("quantity"), "amount": request.get("amount")}] if single else copy_json(request["items"])
     for member in members:
+        member.update(new_record_metadata(now))
         member.update({"requested_quantity": member.get("quantity"), "requested_amount": member.get("amount"),
                        "filled_quantity": 0, "filled_amount": "0", "open_quantity": 0,
                        "cancelled_quantity": 0, "execution_status": "NOT_STARTED", "error": None})
@@ -288,6 +294,11 @@ def public_order(document, replayed=None):
     for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
                 "manual_resolutions", "terminal_facts_fingerprint"):
         result.pop(key, None)
+    for field in ("items", "attempts", "cancel_requests", "qmt_tasks", "qmt_orders", "fills"):
+        for record in result.get(field, []):
+            record.pop("record_id", None)
+            if field in ("items", "qmt_tasks", "qmt_orders", "fills"):
+                record.pop("created_at", None)
     if replayed is not None:
         result["replayed"] = replayed
     return result

@@ -8,9 +8,11 @@ Last modified: 2026-09-28
 
 `order_bridge/*.py` 是 UTF-8 开发源码。`python tools/build_order_strategy.py` 按 common、contracts、state、repository、qmt、async_log、background、runtime、http 顺序生成 `strategies/http_order.py`，交给 QMT 的是单份 GBK 文件。`--check` 仅检查是否与源码一致，忽略生成时间。策略不依赖运行时可导入 `order_bridge` 包，但 QMT Python 环境需要 PostgreSQL 驱动。`tools/install_order_dependencies.py` 默认把锁定的 wheel 装到 `%USERPROFILE%\qmt-bridge\vendor`，支持 `--wheel-dir` 离线安装与 `--python36` 目标兼容选择；不修改系统 site-packages。
 
-配置通过 `pg_database` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。开发阶段只维护当前结构，不提供历史版本升级。`tools/order_admin.py schema init` 初始化全新或兼容当前结构的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
+配置通过 `pg_database` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。只维护一份当前结构，不设常驻历史升级框架。`tools/order_admin.py schema init` 仅初始化全新或兼容版本 3 的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
 
-后台启动先检查既有关键表、字段及当前结构版本，再按配置的账户 ID 幂等插入缺失的 `account_runtime` 行；已有行的 `event_seq`、执行主机和代次保持原值。当前结构版本标识仍为 2，与既有数据库兼容；初始化遇到不兼容版本会在执行 DDL 前拒绝，不自动重建或删除数据。运行时只读写业务状态，不执行 DDL。固定 schema 和按账户动态补行互不冲突。
+后台启动先检查既有关键表、字段、生成表达式、索引及当前结构版本，再按配置的账户 ID 幂等插入缺失的 `account_runtime` 行；已有行的 `event_seq`、执行主机、代次和创建时间保持原值。当前结构版本为 3；版本 2 不能由 `schema init` 或启动自动升级，不兼容版本在初始化 DDL 前即被拒绝。运行时只读写业务状态，不执行 DDL。固定 schema 和按账户动态补行互不冲突。
+
+已停写的版本 2 库先由 `tools/order_storage_backfill.py` 只读预检，另行完成 `pg_dump` 备份，再显式迁移。默认入口只读；提供 `--apply` 和现有备份文件的 `--backup` 后，在一次事务中补齐内部 UUID、时间与查询列并切换版本，提交前失败整体回滚。保留可证明的首次时间，无法证明的旧记录统一使用该库的 `migration_at`；当前订单文档和关系投影同步，历史事件快照与原始观察不改。多个业务库逐库备份、迁移和验收；本文不表示业务库已实际迁移。命令及配置见 `HTTP_ORDER.md`。
 
 QMT 面板在启动时读取并冻结 `submit_batch_size=10`、`cancel_batch_size=10`、`reconcile_batch_size=100`、`schedule_budget_ms=50`、`reconcile_interval_seconds=30`；小写优先，兼容大写，非法值启动失败。提交上限按业务订单计，篮子算一笔；撤单上限按实际 QMT 任务/子委托动作计；对账上限按进入该批的业务订单计；预算从 `process_http_requests` 入口覆盖整个回调。数量只是上限，剩余工作跨 tick 继续；已开始的同步 QMT 调用不能强制中断。
 
@@ -47,6 +49,10 @@ flowchart TD
 ```
 
 订单 JSON 文档是权威状态；关系投影与事件由同一 PostgreSQL 事务更新。`orders` 的 `submission_status`、`cancel_ready`、`reconcile_pending`、`reconcile_priority`、`reconcile_due_at`、最近对账时间、`fact_version` 和 `created_at` 支持有界候选扫描。预取不改变 `QUEUED`；参数读取和篮子写后读回可跨 tick，准备快照落库后才最终认领。认领再次核对撤单、期限、实例代次及执行权；指令带尝试 ID 和实例代次，只消费一次。调用结果未落库不再次派发，崩溃后先归入 `UNKNOWN` 再核对。QMT 同步返回、委托回报、任务状态、成交回报和主动查询是不同证据；任何单一提交 API 返回都不等于成交。订单保留任务、委托、成交及每个篮子 item 的关联标识。重复或乱序回报以持久标识去重/合并，并在事件中标明来源和时间。`UNKNOWN` 仅冻结该订单的盲目重发，其他订单可继续执行。
+
+版本 3 的全部 11 张表都有 `created_at timestamptz`，表示本系统首次创建该逻辑记录；订单与六张子表的权威文档和投影时间必须一致，普通保存不允许改写首次时间。六张子表以首次创建后不变的 UUID `record_id` 作内部主键，交易日或市场等身份补齐时原地更新同一记录。业务字段从子记录 JSON 生成存储列，按账户及 QMT 编号、交易日、市场建立查询索引；`item_id`、`attempt_id` 分别在订单内唯一，`cancel_request_id` 在账户内唯一且供撤单幂等查询。三种业务 ID 必须非空；QMT 记录仍按完整业务身份及缺失维度的歧义规则归并，不假设其编号跨订单全局唯一。
+
+子表保存按需要刷新的集合执行 INSERT/UPSERT，无变化行跳过；普通保存不自动 DELETE。若已有 UUID 从权威集合消失、相同业务身份换 UUID、首次时间变化或出现重复业务键，事务拒绝并回滚。局部保存只更新指定子集合，同时校验未指定集合在父文档中没有变化；父文档、投影与事件仍在同一事务提交。内部 `record_id` 不进入下单、查询、事件展示或撤单的 HTTP 响应；已公开的时间字段保持原义。
 
 运行检查点与业务事件分开保存：常规对账开始/结束只更新订单中的轮次、时间和门闩，并写 INFO 日志，不追加 `order_events` 或重写子表。完成对账时比较排除运行字段后的状态；真实业务或同步状态改变才追加 `RECONCILE_STATE_CHANGED`，并在同一事务中更新相关投影。`version` 继续随持久保存增加，以维持人工处置的并发校验；`event_seq` 只随真实事件增加。`order_events` 供增量查询和追溯，恢复不回放它；既有事件保留，不自动归档或清理。
 

@@ -218,11 +218,12 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.runtime.background.next_round = 0
 
     def _age_order_column(self, order_id, created_at):
-        """Keep the indexed SQL timestamp aligned with the synthetic JSON age."""
+        """Seed a synthetic historical fixture; normal saves cannot rewrite creation time."""
         def age(cur):
             cur.execute("UPDATE " + self.runtime.repo.repo_s +
-                        ".orders SET created_at=%s WHERE account_type=%s AND account_id=%s AND order_id=%s",
-                        (created_at,) + self.runtime.repo.repo_scope + (order_id,))
+                        ".orders SET created_at=%s,document=jsonb_set(document,'{created_at}',to_jsonb(%s::text)) "
+                        "WHERE account_type=%s AND account_id=%s AND order_id=%s",
+                        (created_at, created_at) + self.runtime.repo.repo_scope + (order_id,))
         self.runtime.repo.repo_run(age, mutation=True)
 
     def test_startup_uses_configured_account_and_restart_preserves_event_cursor(self):
@@ -438,8 +439,7 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         old = self.runtime.handle("submit_order", self.single(client="old"), "POST")[1]
         yesterday = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat()
         self.runtime.repo.update_order(old["order_id"], "TEST_OLD_UNCERTAIN",
-                                       lambda row: row.update(created_at=yesterday,
-                                                              submission_status="UNKNOWN",
+                                       lambda row: row.update(submission_status="UNKNOWN",
                                                               execution_status="UNKNOWN"))
         self._age_order_column(old["order_id"], yesterday)
         self.runtime.handle("submit_order", self.single(client="new"), "POST")
@@ -463,8 +463,6 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self._until_order("single-one", lambda row: row["submission_status"] == "SUBMITTING")
         doc = self.runtime.repo.get_order("single-one")
         yesterday = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat()
-        self.runtime.repo.update_order(doc["order_id"], "TEST_HISTORICAL_TERMINAL",
-                                       lambda row: row.update(created_at=yesterday))
         self._age_order_column(doc["order_id"], yesterday)
         trading_day = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))) -
                        dt.timedelta(days=2)).strftime("%Y%m%d")

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
 from decimal import Decimal, InvalidOperation
-from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, utc_now
+from .common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
 
 state_ORDER_STATUS = {48: 'WORKING', 49: 'WORKING', 50: 'WORKING',
@@ -44,25 +44,52 @@ def state_status(value, mapping):
 def observation_identifiers(kind, raw):
     market = state_value(raw, 'market', 'm_strExchangeID')
     market = {'SSE': 'SH', 'SZSE': 'SZ', 'SHSE': 'SH'}.get(str(market).upper(), market)
+    if isinstance(market, (str, int)) and not isinstance(market, bool):
+        market = str(market)
     symbol = state_value(raw, 'symbol', 'm_strInstrumentID', 'm_stockCode')
+    if isinstance(symbol, (str, int)) and not isinstance(symbol, bool):
+        symbol = str(symbol)
     if symbol and '.' in str(symbol):
         market = market or str(symbol).rsplit('.', 1)[1]
     elif symbol and market:
         symbol = str(symbol) + '.' + str(market)
     side = state_value(raw, 'side', 'm_nOffsetFlag')
-    side = {48: 'BUY', 49: 'SELL', 23: 'BUY', 24: 'SELL', '48': 'BUY', '49': 'SELL',
-            '23': 'BUY', '24': 'SELL'}.get(side, str(side).upper() if side is not None else None)
+    side_map = {48: 'BUY', 49: 'SELL', 23: 'BUY', 24: 'SELL', '48': 'BUY', '49': 'SELL',
+                '23': 'BUY', '24': 'SELL'}
+    side = side_map.get(side, str(side).upper() if side is not None else None) if isinstance(side, (str, int)) else side
     if side is None:
         # CTaskDetail 使用 EOperationType，其18/19与passorder的23/24不同。
-        side = {18: 'BUY', 19: 'SELL', '18': 'BUY', '19': 'SELL'}.get(raw.get('m_eOperationType'))
+        operation = raw.get('m_eOperationType')
+        side = {18: 'BUY', 19: 'SELL', '18': 'BUY', '19': 'SELL'}.get(operation) if isinstance(operation, (str, int)) else None
     day = state_value(raw, 'trading_day', 'm_strTradingDay', 'm_strTradeDate', 'm_strInsertDate')
-    return {'remark': state_value(raw, 'remark', 'm_strRemark', 'userOrderId'),
+    remark = state_value(raw, 'remark', 'm_strRemark', 'userOrderId')
+    account_id = state_value(raw, 'account_id', 'm_strAccountID')
+    return {'remark': str(remark) if isinstance(remark, (str, int)) and not isinstance(remark, bool) else remark,
             'qmt_order_id': state_id(state_value(raw, 'qmt_order_id', 'm_strOrderSysID')),
             'qmt_task_id': state_id(state_value(raw, 'qmt_task_id', 'm_nTaskId', 'm_nTaskID')),
             'trade_id': state_id(state_value(raw, 'trade_id', 'm_strTradeID')),
             'trading_day': str(day) if day is not None else None,
             'market': market, 'symbol': symbol, 'side': side,
-            'account_id': state_value(raw, 'account_id', 'm_strAccountID')}
+            'account_id': str(account_id) if isinstance(account_id, (str, int)) and not isinstance(account_id, bool) else account_id}
+
+
+def observation_identity_valid(kind, raw, identifiers=None):
+    """Reject container-valued QMT identities before matching or materializing records."""
+    if kind not in ('order', 'task', 'deal'):
+        return True
+    identity_keys = (
+        'remark', 'm_strRemark', 'userOrderId', 'account_id', 'm_strAccountID',
+        'qmt_order_id', 'm_strOrderSysID', 'qmt_task_id', 'm_nTaskId', 'm_nTaskID',
+        'trade_id', 'm_strTradeID', 'trading_day', 'm_strTradingDay',
+        'm_strTradeDate', 'm_strInsertDate', 'market', 'm_strExchangeID',
+        'symbol', 'm_strInstrumentID', 'm_stockCode', 'side', 'm_nOffsetFlag',
+        'm_eOperationType', 'm_nRef', 'm_strOrderRef')
+    for key in identity_keys:
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+            return False
+    ids = identifiers if identifiers is not None else observation_identifiers(kind, raw)
+    return all(value is None or isinstance(value, str) for value in ids.values())
 
 
 def state_item(doc, identifiers):
@@ -148,7 +175,9 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
     before = copy_json(doc)
     stamp = observed_at or iso_datetime()
     ids = observation_identifiers(kind, raw)
-    if kind == 'error':
+    if not observation_identity_valid(kind, raw, ids):
+        state_evidence(doc, kind, raw, source, 'INVALID_OBSERVATION_IDENTITY', stamp)
+    elif kind == 'error':
         # 错误回调不能证明先前不确定调用未进入交易系统。
         doc['error'] = {'raw': copy_json(raw), 'source': source, 'observed_at': stamp}
         if doc['error'] != before.get('error'):
@@ -174,6 +203,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
             elif previous is None:
                 record = dict(ids, fill_key=key, item_id=item['item_id'], quantity=quantity,
                               amount=str(Decimal(str(amount))), raw=copy_json(raw), source=source, observed_at=stamp)
+                record.update(new_record_metadata())
                 doc['fills'].append(record)
                 doc['submission_status'] = 'CONFIRMED'
                 doc['reconciliation_complete'] = False
@@ -192,7 +222,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
             if len(matching) > 1:
                 state_evidence(doc, kind, raw, source, 'AMBIGUOUS_QMT_ID', stamp)
             else:
-                record = matching[0] if matching else dict(ids)
+                record = matching[0] if matching else dict(ids, **new_record_metadata())
                 if not matching:
                     collection.append(record)
                 old_status = record.get('status', 'UNKNOWN')
@@ -445,7 +475,8 @@ def apply_cancel_request(doc, request):
     recompute_order(doc)
     canonical = doc.get('active_cancel_request_id') if doc['cancel_status'] in state_CANCEL_ACTIVE else cancel_id
     record = {'cancel_request_id': cancel_id, 'canonical_cancel_request_id': canonical,
-              'request_hash': digest, 'request': copy_json(request), 'created_at': iso_datetime(), 'status': 'REQUESTED'}
+              'request_hash': digest, 'request': copy_json(request), 'status': 'REQUESTED'}
+    record.update(new_record_metadata())
     doc['cancel_requests'].append(record)
     doc.update(cancel_requested=True, active_cancel_request_id=canonical)
     if doc['submission_status'] == 'QUEUED':
@@ -460,6 +491,7 @@ def cancel_response(doc, cancel_request_id, replayed=False):
         raise OrderError(404, 'CANCEL_NOT_FOUND', 'cancel request does not exist')
     result = copy_json(record)
     result.pop('request_hash', None)
+    result.pop('record_id', None)
     result.update(order_id=doc['order_id'], client_order_id=doc['client_order_id'],
                   account_id=doc['account_id'], submission_status=doc['submission_status'],
                   execution_status=doc['execution_status'], cancel_status=record['status'], replayed=replayed)

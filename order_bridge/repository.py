@@ -9,14 +9,15 @@ import uuid
 from datetime import timedelta
 
 from .common import (OrderError, copy_json, fingerprint, iso_datetime,
-                     json_text, new_order_document, parse_timestamp, utc_now)
+                     json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now)
+from .storage_schema import repo_check_storage_schema
 from .state import (apply_cancel_request, apply_observation, cancel_response,
-                    is_order_active, observation_identifiers, pending_cancellations,
+                    is_order_active, observation_identifiers, observation_identity_valid, pending_cancellations,
                     reconcile_pending, recompute_order, mark_reconciled,
                     state_execution_finished)
 
 
-repo_SCHEMA_VERSION = 2
+repo_SCHEMA_VERSION = 3
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -41,6 +42,55 @@ def repo_schema(value):
 
 def repo_json(value):
     return json.loads(value) if isinstance(value, str) else copy_json(value)
+
+
+def repo_inconsistent(message):
+    return OrderError(409, "PERSISTENCE_INCONSISTENT", message)
+
+
+def repo_record_time(value):
+    try:
+        stamp = parse_timestamp(value) if isinstance(value, str) else value
+        if stamp is None or stamp.tzinfo is None:
+            raise ValueError("timezone required")
+        return stamp
+    except (ValueError, TypeError, AttributeError, OrderError):
+        raise repo_inconsistent("invalid record creation timestamp")
+
+
+def repo_child_records(field, records):
+    """内部 UUID 和业务身份分别校验；不在保存时生成或修补身份。"""
+    keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
+            "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
+    indexed, identities = {}, set()
+    if not isinstance(records, list):
+        raise repo_inconsistent("invalid child collection: " + field)
+    for record in records:
+        if not isinstance(record, dict):
+            raise repo_inconsistent("invalid child record: " + field)
+        value = record.get("record_id")
+        try:
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError("canonical UUID required")
+        except (ValueError, TypeError, AttributeError):
+            raise repo_inconsistent("invalid child UUID: " + field)
+        if value in indexed:
+            raise repo_inconsistent("duplicate child UUID: " + field)
+        repo_record_time(record.get("created_at"))
+        business_id = record.get(keys[field])
+        if not isinstance(business_id, str) or not business_id.strip():
+            raise repo_inconsistent("missing child business identity: " + field)
+        identity = (business_id,)
+        if field in ("qmt_tasks", "qmt_orders", "fills"):
+            if any(record.get(key) is not None and not isinstance(record[key], str)
+                   for key in ("trading_day", "market")):
+                raise repo_inconsistent("invalid child identity dimensions: " + field)
+            identity = (record.get("trading_day"), record.get("market"), business_id)
+        if identity in identities:
+            raise repo_inconsistent("duplicate child business identity: " + field)
+        identities.add(identity)
+        indexed[value] = record
+    return indexed
 
 
 def repo_error(code="PERSISTENCE_UNAVAILABLE"):
@@ -143,34 +193,7 @@ class PostgresRepository(object):
 
     def check_schema(self):
         """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
-        def check(cur):
-            required = {
-                "schema_version": ("version",),
-                "account_runtime": ("account_type", "account_id", "event_seq", "executor_host", "executor_instance", "executor_epoch"),
-                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document",
-                           "submission_status", "cancel_ready", "reconcile_pending", "reconcile_priority", "reconcile_due_at",
-                           "last_reconcile_attempt_at", "last_reconciled_at", "fact_version", "created_at"),
-                "order_events": ("account_type", "account_id", "event_seq", "order_id", "event_type", "occurred_at", "document"),
-                "qmt_observations": ("observation_id", "account_type", "account_id", "kind", "source", "observed_at", "raw", "order_id", "applied", "observation_hash"),
-            }
-            required.update({table: ("account_type", "account_id", "order_id", "record_id", "document")
-                             for table in repo_CHILD_TABLES})
-            cur.execute("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=%s",
-                        (self.config.get("pg_schema", "qmt_order"),))
-            existing = {}
-            for table, column in cur.fetchall():
-                existing.setdefault(table, set()).add(column)
-            for table, columns in required.items():
-                if table not in existing:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "missing required table: " + table)
-                missing = sorted(set(columns) - existing[table])
-                if missing:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "missing required columns in " + table + ": " + ", ".join(missing))
-            cur.execute("SELECT version FROM " + self.repo_s + ".schema_version")
-            if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
-                raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
-            return {"schema_version": repo_SCHEMA_VERSION, "ready": True}
-        return self.repo_run(check)
+        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, repo_SCHEMA_VERSION))
 
     def ensure_account_runtime(self):
         """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
@@ -281,6 +304,54 @@ class PostgresRepository(object):
         return doc
 
     def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None, child_fields=None):
+        # 先验证旧状态及所有目标投影；任何不一致均在本事务中拒绝。
+        selected = set(repo_CHILD_TABLES.values()) if child_fields is None else set(child_fields)
+        if not selected.issubset(set(repo_CHILD_TABLES.values())):
+            raise repo_inconsistent("unknown child collection")
+        cur.execute("SELECT document,created_at FROM " + self.repo_s + ".orders "
+                    "WHERE account_type=%s AND account_id=%s AND order_id=%s FOR UPDATE",
+                    self.repo_scope + (doc["order_id"],))
+        old_row = cur.fetchone()
+        previous = repo_json(old_row[0]) if old_row else None
+        if previous is not None:
+            if (repo_record_time(doc.get("created_at")) != repo_record_time(old_row[1]) or
+                    repo_record_time(previous.get("created_at")) != repo_record_time(old_row[1])):
+                raise repo_inconsistent("order creation timestamp changed")
+        else:
+            repo_record_time(doc.get("created_at"))
+            if selected != set(repo_CHILD_TABLES.values()):
+                raise repo_inconsistent("new order requires all child projections")
+        prepared = {}
+        id_keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
+                   "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
+        for table, field in repo_CHILD_TABLES.items():
+            target = doc.get(field, [])
+            if field not in selected:
+                if target != previous.get(field, []):
+                    raise repo_inconsistent("unselected child collection changed: " + field)
+                continue
+            indexed = repo_child_records(field, target)
+            cur.execute("SELECT record_id,document,created_at FROM " + self.repo_s + "." + table +
+                        " WHERE account_type=%s AND account_id=%s AND order_id=%s",
+                        self.repo_scope + (doc["order_id"],))
+            old_records = {}
+            for record_id, payload, created_at in cur.fetchall():
+                old = repo_json(payload)
+                record_id = str(record_id)
+                if old.get("record_id") != record_id or repo_record_time(old.get("created_at")) != repo_record_time(created_at):
+                    raise repo_inconsistent("child metadata differs from projection: " + field)
+                if record_id not in indexed:
+                    raise repo_inconsistent("existing child record removed: " + field)
+                incoming = indexed[record_id]
+                if repo_record_time(incoming["created_at"]) != repo_record_time(created_at):
+                    raise repo_inconsistent("child creation timestamp changed: " + field)
+                if incoming.get(id_keys[field]) != old.get(id_keys[field]):
+                    raise repo_inconsistent("child business identifier changed: " + field)
+                old_records[record_id] = old
+            prior_records = repo_child_records(field, previous.get(field, [])) if previous else {}
+            if old_records != prior_records:
+                raise repo_inconsistent("child projection differs from order document: " + field)
+            prepared[table] = indexed
         doc.setdefault("fact_version", 0)
         doc.setdefault("last_reconcile_attempt_at", None)
         doc.setdefault("reconcile_due_at", repo_EPOCH)
@@ -314,19 +385,16 @@ class PostgresRepository(object):
                                        doc["last_reconcile_attempt_at"], doc.get("last_reconciled_at"), doc["fact_version"],
                                        doc["created_at"]))
         for table, field in repo_CHILD_TABLES.items():
-            if child_fields is not None and field not in child_fields:
+            if field not in selected:
                 continue
-            cur.execute("DELETE FROM " + self.repo_s + "." + table +
-                        " WHERE account_type=%s AND account_id=%s AND order_id=%s", self.repo_scope + (doc["order_id"],))
-            for index, record in enumerate(doc.get(field, [])):
-                keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
-                        "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
-                record_id = str(record.get(keys[field]) or record.get("id") or index)
-                if field in ("qmt_tasks", "qmt_orders", "fills"):
-                    record_id = fingerprint([record.get("trading_day"), record.get("market"), record_id])
-                cur.execute("INSERT INTO " + self.repo_s + "." + table +
-                            "(account_type,account_id,order_id,record_id,document) VALUES(%s,%s,%s,%s,%s::jsonb)",
-                            self.repo_scope + (doc["order_id"], record_id, json_text(record)))
+            for record_id, record in prepared[table].items():
+                cur.execute("INSERT INTO " + self.repo_s + "." + table + " AS existing "
+                            "(account_type,account_id,order_id,record_id,document,created_at) "
+                            "VALUES(%s,%s,%s,%s::uuid,%s::jsonb,%s) "
+                            "ON CONFLICT(account_type,account_id,order_id,record_id) "
+                            "DO UPDATE SET document=EXCLUDED.document "
+                            "WHERE existing.document IS DISTINCT FROM EXCLUDED.document",
+                            self.repo_scope + (doc["order_id"], record_id, json_text(record), record["created_at"]))
         if event_type is not None:
             cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
                         "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
@@ -384,9 +452,8 @@ class PostgresRepository(object):
                 doc["submission_status"] = "EXPIRED"
                 return False, self.repo_save(cur, doc, "SUBMISSION_EXPIRED")
             doc["submission_status"] = "SUBMITTING"
-            doc["attempts"].append({"attempt_id": str(uuid.uuid4()), "kind": "SUBMIT", "remark": doc["remark"],
-                                    "status": "CALLING", "created_at": iso_datetime(),
-                                    "executor_epoch": authority[1]})
+            doc["attempts"].append(dict(new_record_metadata(), attempt_id=str(uuid.uuid4()), kind="SUBMIT",
+                                        remark=doc["remark"], status="CALLING", executor_epoch=authority[1]))
             return True, self.repo_save(cur, doc, "SUBMISSION_CLAIMED")
         return self.repo_run(claim, mutation=True)
 
@@ -407,7 +474,8 @@ class PostgresRepository(object):
             if candidate is None:
                 return False, doc
             attempt = dict(candidate, attempt_id=str(action.get("attempt_id") or uuid.uuid4()),
-                           status="CALLING", created_at=iso_datetime(), executor_epoch=authority[1])
+                           status="CALLING", executor_epoch=authority[1])
+            attempt.update(new_record_metadata())
             doc["attempts"].append(attempt)
             return True, self.repo_save(cur, doc, "CANCEL_CLAIMED")
         return self.repo_run(claim, mutation=True)
@@ -418,7 +486,7 @@ class PostgresRepository(object):
         def cancel(cur):
             cancel_id = normalized["cancel_request_id"]
             cur.execute("SELECT order_id,document FROM " + self.repo_s + ".cancel_requests "
-                        "WHERE account_type=%s AND account_id=%s AND record_id=%s", self.repo_scope + (cancel_id,))
+                        "WHERE account_type=%s AND account_id=%s AND cancel_request_id=%s", self.repo_scope + (cancel_id,))
             row = cur.fetchone()
             if row:
                 record = repo_json(row[1])
@@ -643,17 +711,20 @@ class PostgresRepository(object):
             if row:
                 return repo_json(row[0])
         matches = {}
+        if not observation_identity_valid(kind, raw, identifiers):
+            # 无法归属的异常身份留在原始观察队列，不把数组等值传入 SQL 文本比较。
+            return None
         for field, table in (("qmt_task_id", "qmt_tasks"), ("qmt_order_id", "qmt_orders")):
             value = identifiers.get(field)
             if value is None or str(value) in ("", "0", "-1"):
                 continue
             sql = "SELECT DISTINCT order_id FROM " + self.repo_s + "." + table + \
-                  " WHERE account_type=%s AND account_id=%s AND document->>%s=%s"
-            params = self.repo_scope + (field, str(value))
+                  " WHERE account_type=%s AND account_id=%s AND " + field + "=%s"
+            params = self.repo_scope + (str(value),)
             for dimension in ("trading_day", "market"):
                 if identifiers.get(dimension):
-                    sql += " AND (document->>%s IS NULL OR document->>%s=%s)"
-                    params += (dimension, dimension, str(identifiers[dimension]))
+                    sql += " AND (" + dimension + " IS NULL OR " + dimension + "=%s)"
+                    params += (str(identifiers[dimension]),)
             cur.execute(sql, params)
             for row in cur.fetchall():
                 matches[row[0]] = True

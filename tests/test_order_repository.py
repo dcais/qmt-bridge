@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from order_bridge.common import OrderError, iso_datetime, json_text, new_order_document, parse_timestamp, utc_now
+from order_bridge.common import OrderError, iso_datetime, json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now
 from order_bridge.repository import PostgresRepository
 from tools.order_schema import initialize_schema
 
@@ -204,7 +204,7 @@ class PostgresRepositoryTests(unittest.TestCase):
 
     def test_schema_check_needs_no_account_and_does_not_insert_one(self):
         other = self.other("new-startup-account")
-        self.assertEqual(other.check_schema(), {"schema_version": 2, "ready": True})
+        self.assertEqual(other.check_schema(), {"schema_version": 3, "ready": True})
         def records(cur):
             cur.execute("SELECT account_id FROM " + other.repo_s +
                         ".account_runtime WHERE account_type=%s AND account_id=%s", other.repo_scope)
@@ -406,8 +406,8 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.repo.request_cancel({"client_order_id": "order-one", "cancel_request_id": "cancel-one"})
         def cancelling(row):
             row["attempts"][0]["status"] = "RETURNED"
-            row["attempts"].append({"attempt_id": "cancel-attempt", "kind": "CANCEL_ORDER", "target_id": "qmt-one",
-                                    "cancel_request_id": "cancel-one", "status": "CALLING"})
+            row["attempts"].append(dict(new_record_metadata(), attempt_id="cancel-attempt", kind="CANCEL_ORDER",
+                                        target_id="qmt-one", cancel_request_id="cancel-one", status="CALLING"))
         self.repo.update_order(doc["order_id"], "CANCEL_CALLING", cancelling)
         self.repo.recover()
         current = self.repo.get_by_id(doc["order_id"])
@@ -457,7 +457,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 404)
 
     def test_health_and_canonical_event_contract(self):
-        self.assertEqual(self.repo.health(), {"schema_version": 2, "ready": True,
+        self.assertEqual(self.repo.health(), {"schema_version": 3, "ready": True,
                                              "executor": False, "unknown_order_count": 0, "pending_count": 0})
         self.owner()
         doc = self.order()
@@ -523,7 +523,8 @@ class PostgresRepositoryTests(unittest.TestCase):
             self.repo.request_cancel({"client_order_id": doc["client_order_id"],
                                       "cancel_request_id": "cancel-" + doc["client_order_id"]})
         self.repo.update_order(frozen["order_id"], "CANCEL_UNKNOWN", lambda row: row["attempts"].append(
-            {"kind": "CANCEL_ORDER", "target_id": "frozen", "cancel_request_id": "cancel-frozen", "status": "UNKNOWN"}))
+            dict(new_record_metadata(), attempt_id="frozen-attempt", kind="CANCEL_ORDER", target_id="frozen",
+                 cancel_request_id="cancel-frozen", status="UNKNOWN")))
         self.assertEqual(self.repo.cancellation_orders(limit=1)[0]["order_id"], fresh["order_id"])
 
     def test_selectors_rounds_and_stale_reconcile_fact_version(self):
@@ -698,7 +699,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         def projected_status(cur):
             cur.execute("SELECT document->>'status' FROM " + self.repo.repo_s +
                         ".cancel_requests WHERE account_type=%s AND account_id=%s AND order_id=%s "
-                        "AND record_id=%s", self.repo.repo_scope +
+                        "AND cancel_request_id=%s", self.repo.repo_scope +
                         (doc["order_id"], "cancel-projection"))
             return cur.fetchone()[0]
         self.assertEqual(self.repo.repo_run(projected_status), "REQUESTED")

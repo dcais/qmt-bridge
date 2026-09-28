@@ -198,7 +198,19 @@ python tools/order_admin.py --config config.json schema init
 python tools/order_admin.py --config config.json schema check
 ```
 
-开发阶段只维护当前初始化结构，不提供历史版本升级命令。`schema init` 用于全新或与当前结构兼容的库，重复执行保留已有数据和账户记录；`schema check` 只读检查关键表、字段及结构版本。不兼容版本在执行 DDL 前被拒绝，不会自动重建或删除数据。结构版本标识仍为 2，与现有数据库保持兼容；初始化不用于清理既有约束。
+当前结构版本为 3，只维护一份当前初始化 SQL。`schema init` 仅用于全新或已兼容版本 3 的库，重复执行保留已有数据、首次创建时间和账户记录；`schema check` 只读检查结构版本、列、生成表达式及必要约束和索引。版本 2 或损坏的结构在执行初始化 DDL 前被拒绝，不会自动重建、清理或升级。策略启动也只检查结构，不执行 DDL。
+
+已停写的版本 2 业务库使用专用的一次性离线工具；这不是 `schema init` 或策略启动的一部分。先对目标库逐库运行只读预检，完成备份并确认备份文件存在后，才显式执行迁移。工具要求 `--apply` 同时提供非空的现有 `--backup` 文件；成功提交后再次运行只读预检只报告已是版本 3，不重复回填：
+
+```powershell
+python tools/order_storage_backfill.py --config config.json
+python tools/order_storage_backfill.py --config config.json --apply --backup "C:\backup\order-v2.dump"
+python tools/order_admin.py --config config.json schema check
+```
+
+将示例备份路径替换为该库实际 `pg_dump` 备份文件。每个库的转换在一次事务内完成：保留可证明的历史创建时间，无法证明的记录统一使用该库本次迁移的 `migration_at`；当前订单文档与六张子表同步补齐稳定 UUID 和时间，历史事件快照、原始观察及交易业务标识不改。失败在提交前整体回滚；若提交结果不确定，先重新连接只读核查，不盲目重试。上述命令是操作入口说明，不表示任何业务库已经迁移或启动验证。
+
+版本 3 的 11 张表均有不可由常规保存改写的 `created_at timestamptz`。六张订单子表使用内部 UUID `record_id`，并从 JSON 文档生成可查询的业务字段；`order_items` 的 `item_id`、`execution_attempts` 的 `attempt_id` 在订单内唯一，`cancel_requests` 的 `cancel_request_id` 在账户内唯一，且三者不得为空。任务、委托、成交的 QMT 编号及交易日、市场等可按显式列查询；QMT 编号不被当作跨订单全局唯一键。
 
 策略文件不包含 DDL；后台启动先检查固定 schema 内的关键表、字段和当前结构版本，再按策略配置的 `account_id` 幂等创建缺失的 `account_runtime` 行；已存在行的 `event_seq`、执行主机和代次保持不变。缺少表或字段时报告 `SCHEMA_NOT_READY`，版本不兼容时报告 `SCHEMA_VERSION_MISMATCH`；启动不会自动建表或升级。口令不在 CLI 输出中打印；不要把含口令的配置文件提交到仓库。QMT 策略参数面板须分别配置 `pg_host`、`pg_port`、`pg_database`、`pg_user`、`pg_password` 和交易账户 `account_id`；大写 PG 参数名也兼容，小写优先。`schema init/check` 只需数据库配置，`unknown` 人工管理命令仍须指定账户，可在配置文件添加 `"account_id":"<account>"`，或传 `--account-id <account>` / 设置 `ORDER_ACCOUNT_ID`。三项 `pg_database`、`pg_user`、`pg_password` 全部未设置时只启用旧查询，写入接口返回 `TRADING_NOT_CONFIGURED`。旧配置中的 `pg_schema` / `PG_SCHEMA` / `ORDER_PG_SCHEMA` 请移除，配置检查会明确拒绝它们。
 
@@ -252,6 +264,8 @@ SMART 的两个时间须带时区，派发当天按上海时区校验仍在该�
 ## 下单、撤单与查询响应
 
 `POST /submit_order` 返回含 `order_id`、`client_order_id`、`submission_status`、`version` 等字段的订单记录；受理时通常为 `QUEUED`。响应一旦丢失，必须以原 `client_order_id` 重试，或用 `/order` 查询，不得改键直接再下。QMT 提交返回与成交是独立事实。
+
+子记录的 UUID `record_id` 仅用于内部持久化，不作为客户端输入或响应字段。提交、订单详情、订单列表和事件查询均过滤该内部字段；撤单响应也不公开它。已有公开的时间字段保持原语义，数据库新增的内部子记录时间不会悄然扩展响应合同。
 
 例如受理响应为 HTTP 202，下面仅列出关键字段，实际订单还含原请求、各 item、QMT 任务/委托/成交、取消与同步状态：
 

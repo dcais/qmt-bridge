@@ -16,7 +16,7 @@ class LifecycleTests(unittest.TestCase):
 
     def _store(self):
         store = Mock()
-        store.check_schema.return_value = {"schema_version": 2, "ready": True}
+        store.check_schema.return_value = {"schema_version": 3, "ready": True}
         store.ensure_account_runtime.return_value = True
         store.acquire_executor.return_value = {"epoch": 1, "instance_id": "test"}
         store.check_executor.return_value = True
@@ -77,7 +77,7 @@ class LifecycleTests(unittest.TestCase):
         def blocked_schema():
             entered.set()
             release.wait(2)
-            return {"schema_version": 2, "ready": True}
+            return {"schema_version": 3, "ready": True}
 
         store.check_schema.side_effect = blocked_schema
         runtime = OrderRuntime(self.qmt_queries, object(), "account", repository=store, local_lock=lock)

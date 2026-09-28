@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-28 15:31:30
+# Last modified (Asia/Shanghai): 2026-09-28 17:31:52
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -231,6 +231,11 @@ def iso_datetime(value=None):
     return (value or utc_now()).astimezone(dt.timezone.utc).isoformat()
 
 
+def new_record_metadata(created_at=None):
+    """Assign immutable identity and creation time when a child record is born."""
+    return {"record_id": str(uuid.uuid4()), "created_at": created_at or iso_datetime()}
+
+
 def parse_timestamp(value):
     if not isinstance(value, str):
         raise OrderError(400, "INVALID_TIMESTAMP", "timestamp must include a timezone")
@@ -266,6 +271,7 @@ def new_order_document(request):
     members = [{"item_id": "single", "symbol": request["symbol"], "side": request["side"],
                 "quantity": request.get("quantity"), "amount": request.get("amount")}] if single else copy_json(request["items"])
     for member in members:
+        member.update(new_record_metadata(now))
         member.update({"requested_quantity": member.get("quantity"), "requested_amount": member.get("amount"),
                        "filled_quantity": 0, "filled_amount": "0", "open_quantity": 0,
                        "cancelled_quantity": 0, "execution_status": "NOT_STARTED", "error": None})
@@ -291,6 +297,11 @@ def public_order(document, replayed=None):
     for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
                 "manual_resolutions", "terminal_facts_fingerprint"):
         result.pop(key, None)
+    for field in ("items", "attempts", "cancel_requests", "qmt_tasks", "qmt_orders", "fills"):
+        for record in result.get(field, []):
+            record.pop("record_id", None)
+            if field in ("items", "qmt_tasks", "qmt_orders", "fills"):
+                record.pop("created_at", None)
     if replayed is not None:
         result["replayed"] = replayed
     return result
@@ -748,25 +759,52 @@ def state_status(value, mapping):
 def observation_identifiers(kind, raw):
     market = state_value(raw, 'market', 'm_strExchangeID')
     market = {'SSE': 'SH', 'SZSE': 'SZ', 'SHSE': 'SH'}.get(str(market).upper(), market)
+    if isinstance(market, (str, int)) and not isinstance(market, bool):
+        market = str(market)
     symbol = state_value(raw, 'symbol', 'm_strInstrumentID', 'm_stockCode')
+    if isinstance(symbol, (str, int)) and not isinstance(symbol, bool):
+        symbol = str(symbol)
     if symbol and '.' in str(symbol):
         market = market or str(symbol).rsplit('.', 1)[1]
     elif symbol and market:
         symbol = str(symbol) + '.' + str(market)
     side = state_value(raw, 'side', 'm_nOffsetFlag')
-    side = {48: 'BUY', 49: 'SELL', 23: 'BUY', 24: 'SELL', '48': 'BUY', '49': 'SELL',
-            '23': 'BUY', '24': 'SELL'}.get(side, str(side).upper() if side is not None else None)
+    side_map = {48: 'BUY', 49: 'SELL', 23: 'BUY', 24: 'SELL', '48': 'BUY', '49': 'SELL',
+                '23': 'BUY', '24': 'SELL'}
+    side = side_map.get(side, str(side).upper() if side is not None else None) if isinstance(side, (str, int)) else side
     if side is None:
         # CTaskDetail 使用 EOperationType，其18/19与passorder的23/24不同。
-        side = {18: 'BUY', 19: 'SELL', '18': 'BUY', '19': 'SELL'}.get(raw.get('m_eOperationType'))
+        operation = raw.get('m_eOperationType')
+        side = {18: 'BUY', 19: 'SELL', '18': 'BUY', '19': 'SELL'}.get(operation) if isinstance(operation, (str, int)) else None
     day = state_value(raw, 'trading_day', 'm_strTradingDay', 'm_strTradeDate', 'm_strInsertDate')
-    return {'remark': state_value(raw, 'remark', 'm_strRemark', 'userOrderId'),
+    remark = state_value(raw, 'remark', 'm_strRemark', 'userOrderId')
+    account_id = state_value(raw, 'account_id', 'm_strAccountID')
+    return {'remark': str(remark) if isinstance(remark, (str, int)) and not isinstance(remark, bool) else remark,
             'qmt_order_id': state_id(state_value(raw, 'qmt_order_id', 'm_strOrderSysID')),
             'qmt_task_id': state_id(state_value(raw, 'qmt_task_id', 'm_nTaskId', 'm_nTaskID')),
             'trade_id': state_id(state_value(raw, 'trade_id', 'm_strTradeID')),
             'trading_day': str(day) if day is not None else None,
             'market': market, 'symbol': symbol, 'side': side,
-            'account_id': state_value(raw, 'account_id', 'm_strAccountID')}
+            'account_id': str(account_id) if isinstance(account_id, (str, int)) and not isinstance(account_id, bool) else account_id}
+
+
+def observation_identity_valid(kind, raw, identifiers=None):
+    """Reject container-valued QMT identities before matching or materializing records."""
+    if kind not in ('order', 'task', 'deal'):
+        return True
+    identity_keys = (
+        'remark', 'm_strRemark', 'userOrderId', 'account_id', 'm_strAccountID',
+        'qmt_order_id', 'm_strOrderSysID', 'qmt_task_id', 'm_nTaskId', 'm_nTaskID',
+        'trade_id', 'm_strTradeID', 'trading_day', 'm_strTradingDay',
+        'm_strTradeDate', 'm_strInsertDate', 'market', 'm_strExchangeID',
+        'symbol', 'm_strInstrumentID', 'm_stockCode', 'side', 'm_nOffsetFlag',
+        'm_eOperationType', 'm_nRef', 'm_strOrderRef')
+    for key in identity_keys:
+        value = raw.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+            return False
+    ids = identifiers if identifiers is not None else observation_identifiers(kind, raw)
+    return all(value is None or isinstance(value, str) for value in ids.values())
 
 
 def state_item(doc, identifiers):
@@ -852,7 +890,9 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
     before = copy_json(doc)
     stamp = observed_at or iso_datetime()
     ids = observation_identifiers(kind, raw)
-    if kind == 'error':
+    if not observation_identity_valid(kind, raw, ids):
+        state_evidence(doc, kind, raw, source, 'INVALID_OBSERVATION_IDENTITY', stamp)
+    elif kind == 'error':
         # 错误回调不能证明先前不确定调用未进入交易系统。
         doc['error'] = {'raw': copy_json(raw), 'source': source, 'observed_at': stamp}
         if doc['error'] != before.get('error'):
@@ -878,6 +918,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
             elif previous is None:
                 record = dict(ids, fill_key=key, item_id=item['item_id'], quantity=quantity,
                               amount=str(Decimal(str(amount))), raw=copy_json(raw), source=source, observed_at=stamp)
+                record.update(new_record_metadata())
                 doc['fills'].append(record)
                 doc['submission_status'] = 'CONFIRMED'
                 doc['reconciliation_complete'] = False
@@ -896,7 +937,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
             if len(matching) > 1:
                 state_evidence(doc, kind, raw, source, 'AMBIGUOUS_QMT_ID', stamp)
             else:
-                record = matching[0] if matching else dict(ids)
+                record = matching[0] if matching else dict(ids, **new_record_metadata())
                 if not matching:
                     collection.append(record)
                 old_status = record.get('status', 'UNKNOWN')
@@ -1149,7 +1190,8 @@ def apply_cancel_request(doc, request):
     recompute_order(doc)
     canonical = doc.get('active_cancel_request_id') if doc['cancel_status'] in state_CANCEL_ACTIVE else cancel_id
     record = {'cancel_request_id': cancel_id, 'canonical_cancel_request_id': canonical,
-              'request_hash': digest, 'request': copy_json(request), 'created_at': iso_datetime(), 'status': 'REQUESTED'}
+              'request_hash': digest, 'request': copy_json(request), 'status': 'REQUESTED'}
+    record.update(new_record_metadata())
     doc['cancel_requests'].append(record)
     doc.update(cancel_requested=True, active_cancel_request_id=canonical)
     if doc['submission_status'] == 'QUEUED':
@@ -1164,6 +1206,7 @@ def cancel_response(doc, cancel_request_id, replayed=False):
         raise OrderError(404, 'CANCEL_NOT_FOUND', 'cancel request does not exist')
     result = copy_json(record)
     result.pop('request_hash', None)
+    result.pop('record_id', None)
     result.update(order_id=doc['order_id'], client_order_id=doc['client_order_id'],
                   account_id=doc['account_id'], submission_status=doc['submission_status'],
                   execution_status=doc['execution_status'], cancel_status=record['status'], replayed=replayed)
@@ -1220,6 +1263,236 @@ def mark_reconciled(doc, complete=True, now=None):
     recompute_order(doc, now=now)
     return before != doc
 
+# ---- order_bridge/storage_schema.py ----
+"""Read-only PostgreSQL ORDER storage contract shared by runtime and installer."""
+import re
+from datetime import datetime, timezone
+
+
+
+def repo_column(kind, required=True, default=None, generated=None):
+    return (kind, required, default, generated)
+
+
+repo_SCHEMA_COLUMNS = {
+    "schema_version": {
+        "version": repo_column("integer"),
+        "created_at": repo_column("timestamp with time zone", default="now()")},
+    "account_runtime": {
+        "account_type": repo_column("text"), "account_id": repo_column("text"),
+        "event_seq": repo_column("bigint", default="0"),
+        "executor_host": repo_column("text", False),
+        "executor_instance": repo_column("text", False),
+        "executor_epoch": repo_column("bigint", default="0"),
+        "created_at": repo_column("timestamp with time zone", default="now()")},
+    "orders": {
+        "account_type": repo_column("text"), "account_id": repo_column("text"),
+        "order_id": repo_column("text"), "client_order_id": repo_column("text"),
+        "request_hash": repo_column("text"), "remark": repo_column("text"),
+        "active": repo_column("boolean"), "document": repo_column("jsonb"),
+        "submission_status": repo_column("text"),
+        "cancel_ready": repo_column("boolean", default="false"),
+        "reconcile_pending": repo_column("boolean", default="false"),
+        "reconcile_priority": repo_column("boolean", default="false"),
+        "reconcile_due_at": repo_column("timestamp with time zone", default="epoch"),
+        "last_reconcile_attempt_at": repo_column("timestamp with time zone", False),
+        "last_reconciled_at": repo_column("timestamp with time zone", False),
+        "fact_version": repo_column("bigint", default="0"),
+        "created_at": repo_column("timestamp with time zone", default="now()")},
+    "order_events": {
+        "account_type": repo_column("text"), "account_id": repo_column("text"),
+        "event_seq": repo_column("bigint"), "order_id": repo_column("text"),
+        "event_type": repo_column("text"), "occurred_at": repo_column("text"),
+        "document": repo_column("jsonb"),
+        "created_at": repo_column("timestamp with time zone", default="now()")},
+    "qmt_observations": {
+        "observation_id": repo_column("bigint", default="nextval"),
+        "account_type": repo_column("text"), "account_id": repo_column("text"),
+        "kind": repo_column("text"), "source": repo_column("text"),
+        "observed_at": repo_column("text"), "raw": repo_column("jsonb"),
+        "order_id": repo_column("text", False),
+        "applied": repo_column("boolean", default="false"),
+        "observation_hash": repo_column("text", False),
+        "created_at": repo_column("timestamp with time zone", default="now()")},
+}
+
+repo_CHILD_GENERATED = {
+    "order_items": {"item_id": "text", "symbol": "text", "side": "text"},
+    "execution_attempts": {"attempt_id": "text", "kind": "text", "status": "text",
+                           "target_id": "text", "cancel_request_id": "text"},
+    "cancel_requests": {"cancel_request_id": "text", "status": "text"},
+    "qmt_tasks": {"qmt_task_id": "text", "trading_day": "text", "market": "text", "status": "text"},
+    "qmt_orders": {"qmt_order_id": "text", "qmt_task_id": "text", "item_id": "text",
+                   "trading_day": "text", "market": "text", "symbol": "text",
+                   "side": "text", "status": "text", "native_ref": "text",
+                   "native_order_ref": "text"},
+    "fills": {"trade_id": "text", "qmt_order_id": "text", "item_id": "text",
+              "trading_day": "text", "market": "text", "symbol": "text",
+              "side": "text", "quantity": "numeric", "amount": "numeric"},
+}
+repo_BUSINESS_IDS = {"order_items": "item_id", "execution_attempts": "attempt_id",
+                     "cancel_requests": "cancel_request_id"}
+for repo_table, repo_fields in repo_CHILD_GENERATED.items():
+    repo_columns = {
+        "account_type": repo_column("text"), "account_id": repo_column("text"),
+        "order_id": repo_column("text"), "record_id": repo_column("uuid"),
+        "document": repo_column("jsonb"),
+        "created_at": repo_column("timestamp with time zone", default="now()")}
+    for repo_field, repo_kind in repo_fields.items():
+        repo_columns[repo_field] = repo_column(repo_kind,
+            repo_field == repo_BUSINESS_IDS.get(repo_table), generated=repo_field)
+    repo_SCHEMA_COLUMNS[repo_table] = repo_columns
+
+repo_SCHEMA_INDEXES = {
+    "order_items_business_id": ("order_items", True, ("account_type", "account_id", "order_id", "item_id")),
+    "execution_attempts_business_id": ("execution_attempts", True, ("account_type", "account_id", "order_id", "attempt_id")),
+    "cancel_request_scope_id": ("cancel_requests", True, ("account_type", "account_id", "cancel_request_id")),
+    "qmt_tasks_identity_lookup": ("qmt_tasks", False, ("account_type", "account_id", "qmt_task_id", "trading_day", "market")),
+    "qmt_orders_identity_lookup": ("qmt_orders", False, ("account_type", "account_id", "qmt_order_id", "trading_day", "market")),
+    "fills_trade_identity_lookup": ("fills", False, ("account_type", "account_id", "trade_id", "trading_day", "market")),
+    "fills_order_identity_lookup": ("fills", False, ("account_type", "account_id", "qmt_order_id", "trading_day", "market")),
+}
+repo_PRIMARY_KEYS = {
+    "schema_version": ("version",),
+    "account_runtime": ("account_type", "account_id"),
+    "orders": ("account_type", "account_id", "order_id"),
+    "order_events": ("account_type", "account_id", "event_seq"),
+    "qmt_observations": ("observation_id",),
+}
+for repo_table in repo_CHILD_GENERATED:
+    repo_PRIMARY_KEYS[repo_table] = ("account_type", "account_id", "order_id", "record_id")
+repo_EXISTING_UNIQUE_INDEXES = {
+    "orders_account_type_account_id_client_order_id_key":
+        ("orders", ("account_type", "account_id", "client_order_id")),
+    "orders_remark_key": ("orders", ("remark",)),
+}
+
+
+def repo_storage_error(message):
+    return OrderError(503, "SCHEMA_NOT_READY", message)
+
+
+def repo_normalize_default(value):
+    if value is None:
+        return None
+    normalized = "".join(value.lower().split())
+    if normalized in ("now()", "current_timestamp"):
+        return "now()"
+    if normalized.startswith("nextval("):
+        return "nextval"
+    if normalized.startswith("'epoch'::") and normalized.endswith(("timestamptz", "timestampwithtimezone")):
+        return "epoch"
+    timestamp = re.match(r"^'(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})([+-]\d{2}(?::?\d{2})?)'::timestamp with time zone$",
+                         value.strip().lower())
+    if timestamp:
+        offset = timestamp.group(3)
+        if len(offset) == 3:
+            offset += "00"
+        elif len(offset) == 6:
+            offset = offset[:3] + offset[4:]
+        try:
+            instant = datetime.strptime(timestamp.group(1) + " " + timestamp.group(2) + offset,
+                                        "%Y-%m-%d %H:%M:%S%z")
+            if instant.astimezone(timezone.utc) == datetime(1970, 1, 1, tzinfo=timezone.utc):
+                return "epoch"
+        except ValueError:
+            pass
+    return normalized
+
+
+def repo_generated_matches(expression, field, kind):
+    if expression is None:
+        return False
+    # pg_get_expr may add grouping parentheses and an explicit ::text cast on the JSON key.
+    compact = re.sub(r"\s+", "", expression.lower()).replace("(", "").replace(")", "")
+    expected = "document->>'{0}'::text".format(field)
+    if kind == "numeric":
+        return compact in ("document->>'{0}'::numeric".format(field), expected + "::numeric")
+    return compact in ("document->>'{0}'".format(field), expected)
+
+
+def repo_check_storage_schema(cur, schema, expected_version=3):
+    """Validate the full v3 contract with catalog reads; never performs DDL or repairs."""
+    if not isinstance(schema, str) or not re.match(r'^"[A-Za-z_][A-Za-z0-9_]{0,62}"$', schema):
+        raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
+    schema_name = schema[1:-1]
+    cur.execute("""SELECT c.relname, a.attname, pg_catalog.format_type(a.atttypid,a.atttypmod),
+                          a.attnotnull, a.attgenerated, pg_get_expr(d.adbin,d.adrelid)
+                   FROM pg_catalog.pg_class c
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                   JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
+                   LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
+                   WHERE n.nspname=%s AND c.relkind IN ('r','p')
+                     AND a.attnum>0 AND NOT a.attisdropped""", (schema_name,))
+    actual = {}
+    for table, column, kind, not_null, generated, expression in cur.fetchall():
+        actual.setdefault(table, {})[column] = (kind, bool(not_null), generated or "", expression)
+    if "version" in actual.get("schema_version", {}):
+        cur.execute("SELECT version FROM " + schema + ".schema_version")
+        if [row[0] for row in cur.fetchall()] != [expected_version]:
+            raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
+    for table, columns in repo_SCHEMA_COLUMNS.items():
+        if table not in actual:
+            raise repo_storage_error("missing required table: " + table)
+        for column, (kind, required, default, generated) in columns.items():
+            found = actual[table].get(column)
+            if found is None:
+                raise repo_storage_error("missing required column: " + table + "." + column)
+            found_kind, found_required, found_generated, expression = found
+            if found_kind != kind or found_required != required:
+                raise repo_storage_error("incorrect column type or nullability: " + table + "." + column)
+            if generated:
+                if found_generated != "s" or not repo_generated_matches(expression, generated, kind):
+                    raise repo_storage_error("incorrect generated column: " + table + "." + column)
+            elif found_generated or repo_normalize_default(expression) != default:
+                raise repo_storage_error("incorrect column default: " + table + "." + column)
+    cur.execute("""SELECT tab.relname, idx.relname, i.indisunique, i.indisvalid, i.indisready,
+                          pg_get_expr(i.indpred,i.indrelid),
+                          ARRAY(SELECT pg_get_indexdef(i.indexrelid,k,true)
+                                FROM generate_series(1,i.indnkeyatts) AS k ORDER BY k)
+                   FROM pg_catalog.pg_index i
+                   JOIN pg_catalog.pg_class tab ON tab.oid=i.indrelid
+                   JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid
+                   JOIN pg_catalog.pg_namespace n ON n.oid=tab.relnamespace
+                   WHERE n.nspname=%s""", (schema_name,))
+    indexes = {name: (table, bool(unique), bool(valid), bool(ready), predicate, tuple(columns))
+               for table, name, unique, valid, ready, predicate, columns in cur.fetchall()}
+    for name, (table, unique, columns) in repo_SCHEMA_INDEXES.items():
+        found = indexes.get(name)
+        if found != (table, unique, True, True, None, columns):
+            raise repo_storage_error("missing or incorrect required index: " + name)
+    for table, columns in repo_PRIMARY_KEYS.items():
+        name = table + "_pkey"
+        found = indexes.get(name)
+        if found != (table, True, True, True, None, columns):
+            raise repo_storage_error("missing or incorrect primary key: " + name)
+    for name, (table, columns) in repo_EXISTING_UNIQUE_INDEXES.items():
+        if indexes.get(name) != (table, True, True, True, None, columns):
+            raise repo_storage_error("missing or incorrect unique index: " + name)
+    observation_index = indexes.get("qmt_observation_content")
+    if (observation_index is None or observation_index[:4] !=
+            ("qmt_observations", True, True, True) or
+            observation_index[5] != ("account_type", "account_id", "observation_hash") or
+            not re.fullmatch(r"\(?observation_hash IS NOT NULL\)?", observation_index[4] or "", re.I)):
+        raise repo_storage_error("missing or incorrect unique index: qmt_observation_content")
+    cur.execute("""SELECT c.relname, con.conname, con.convalidated, pg_get_constraintdef(con.oid)
+                   FROM pg_catalog.pg_constraint con
+                   JOIN pg_catalog.pg_class c ON c.oid=con.conrelid
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                   WHERE n.nspname=%s AND con.contype='c'""", (schema_name,))
+    checks = {(table, name): (validated, definition)
+              for table, name, validated, definition in cur.fetchall()}
+    for table, field in repo_BUSINESS_IDS.items():
+        name = ("cancel_requests_request_id_nonempty" if table == "cancel_requests" else
+                table + "_" + field + "_nonempty")
+        validated, definition = checks.get((table, name), (False, ""))
+        normalized_check = re.sub(r"[\s()]", "", definition.lower())
+        if not validated or normalized_check not in (
+                "checkbtrim{0}<>''".format(field),
+                "checkbtrim{0}<>''::text".format(field)):
+            raise repo_storage_error("missing or incorrect nonempty check: " + name)
+    return {"schema_version": expected_version, "ready": True}
+
 # ---- order_bridge/repository.py ----
 """PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
 import hashlib
@@ -1232,7 +1505,7 @@ from datetime import timedelta
 
 
 
-repo_SCHEMA_VERSION = 2
+repo_SCHEMA_VERSION = 3
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -1257,6 +1530,55 @@ def repo_schema(value):
 
 def repo_json(value):
     return json.loads(value) if isinstance(value, str) else copy_json(value)
+
+
+def repo_inconsistent(message):
+    return OrderError(409, "PERSISTENCE_INCONSISTENT", message)
+
+
+def repo_record_time(value):
+    try:
+        stamp = parse_timestamp(value) if isinstance(value, str) else value
+        if stamp is None or stamp.tzinfo is None:
+            raise ValueError("timezone required")
+        return stamp
+    except (ValueError, TypeError, AttributeError, OrderError):
+        raise repo_inconsistent("invalid record creation timestamp")
+
+
+def repo_child_records(field, records):
+    """内部 UUID 和业务身份分别校验；不在保存时生成或修补身份。"""
+    keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
+            "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
+    indexed, identities = {}, set()
+    if not isinstance(records, list):
+        raise repo_inconsistent("invalid child collection: " + field)
+    for record in records:
+        if not isinstance(record, dict):
+            raise repo_inconsistent("invalid child record: " + field)
+        value = record.get("record_id")
+        try:
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError("canonical UUID required")
+        except (ValueError, TypeError, AttributeError):
+            raise repo_inconsistent("invalid child UUID: " + field)
+        if value in indexed:
+            raise repo_inconsistent("duplicate child UUID: " + field)
+        repo_record_time(record.get("created_at"))
+        business_id = record.get(keys[field])
+        if not isinstance(business_id, str) or not business_id.strip():
+            raise repo_inconsistent("missing child business identity: " + field)
+        identity = (business_id,)
+        if field in ("qmt_tasks", "qmt_orders", "fills"):
+            if any(record.get(key) is not None and not isinstance(record[key], str)
+                   for key in ("trading_day", "market")):
+                raise repo_inconsistent("invalid child identity dimensions: " + field)
+            identity = (record.get("trading_day"), record.get("market"), business_id)
+        if identity in identities:
+            raise repo_inconsistent("duplicate child business identity: " + field)
+        identities.add(identity)
+        indexed[value] = record
+    return indexed
 
 
 def repo_error(code="PERSISTENCE_UNAVAILABLE"):
@@ -1359,34 +1681,7 @@ class PostgresRepository(object):
 
     def check_schema(self):
         """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
-        def check(cur):
-            required = {
-                "schema_version": ("version",),
-                "account_runtime": ("account_type", "account_id", "event_seq", "executor_host", "executor_instance", "executor_epoch"),
-                "orders": ("account_type", "account_id", "order_id", "client_order_id", "request_hash", "remark", "active", "document",
-                           "submission_status", "cancel_ready", "reconcile_pending", "reconcile_priority", "reconcile_due_at",
-                           "last_reconcile_attempt_at", "last_reconciled_at", "fact_version", "created_at"),
-                "order_events": ("account_type", "account_id", "event_seq", "order_id", "event_type", "occurred_at", "document"),
-                "qmt_observations": ("observation_id", "account_type", "account_id", "kind", "source", "observed_at", "raw", "order_id", "applied", "observation_hash"),
-            }
-            required.update({table: ("account_type", "account_id", "order_id", "record_id", "document")
-                             for table in repo_CHILD_TABLES})
-            cur.execute("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=%s",
-                        (self.config.get("pg_schema", "qmt_order"),))
-            existing = {}
-            for table, column in cur.fetchall():
-                existing.setdefault(table, set()).add(column)
-            for table, columns in required.items():
-                if table not in existing:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "missing required table: " + table)
-                missing = sorted(set(columns) - existing[table])
-                if missing:
-                    raise OrderError(503, "SCHEMA_NOT_READY", "missing required columns in " + table + ": " + ", ".join(missing))
-            cur.execute("SELECT version FROM " + self.repo_s + ".schema_version")
-            if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
-                raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
-            return {"schema_version": repo_SCHEMA_VERSION, "ready": True}
-        return self.repo_run(check)
+        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, repo_SCHEMA_VERSION))
 
     def ensure_account_runtime(self):
         """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
@@ -1497,6 +1792,54 @@ class PostgresRepository(object):
         return doc
 
     def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None, child_fields=None):
+        # 先验证旧状态及所有目标投影；任何不一致均在本事务中拒绝。
+        selected = set(repo_CHILD_TABLES.values()) if child_fields is None else set(child_fields)
+        if not selected.issubset(set(repo_CHILD_TABLES.values())):
+            raise repo_inconsistent("unknown child collection")
+        cur.execute("SELECT document,created_at FROM " + self.repo_s + ".orders "
+                    "WHERE account_type=%s AND account_id=%s AND order_id=%s FOR UPDATE",
+                    self.repo_scope + (doc["order_id"],))
+        old_row = cur.fetchone()
+        previous = repo_json(old_row[0]) if old_row else None
+        if previous is not None:
+            if (repo_record_time(doc.get("created_at")) != repo_record_time(old_row[1]) or
+                    repo_record_time(previous.get("created_at")) != repo_record_time(old_row[1])):
+                raise repo_inconsistent("order creation timestamp changed")
+        else:
+            repo_record_time(doc.get("created_at"))
+            if selected != set(repo_CHILD_TABLES.values()):
+                raise repo_inconsistent("new order requires all child projections")
+        prepared = {}
+        id_keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
+                   "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
+        for table, field in repo_CHILD_TABLES.items():
+            target = doc.get(field, [])
+            if field not in selected:
+                if target != previous.get(field, []):
+                    raise repo_inconsistent("unselected child collection changed: " + field)
+                continue
+            indexed = repo_child_records(field, target)
+            cur.execute("SELECT record_id,document,created_at FROM " + self.repo_s + "." + table +
+                        " WHERE account_type=%s AND account_id=%s AND order_id=%s",
+                        self.repo_scope + (doc["order_id"],))
+            old_records = {}
+            for record_id, payload, created_at in cur.fetchall():
+                old = repo_json(payload)
+                record_id = str(record_id)
+                if old.get("record_id") != record_id or repo_record_time(old.get("created_at")) != repo_record_time(created_at):
+                    raise repo_inconsistent("child metadata differs from projection: " + field)
+                if record_id not in indexed:
+                    raise repo_inconsistent("existing child record removed: " + field)
+                incoming = indexed[record_id]
+                if repo_record_time(incoming["created_at"]) != repo_record_time(created_at):
+                    raise repo_inconsistent("child creation timestamp changed: " + field)
+                if incoming.get(id_keys[field]) != old.get(id_keys[field]):
+                    raise repo_inconsistent("child business identifier changed: " + field)
+                old_records[record_id] = old
+            prior_records = repo_child_records(field, previous.get(field, [])) if previous else {}
+            if old_records != prior_records:
+                raise repo_inconsistent("child projection differs from order document: " + field)
+            prepared[table] = indexed
         doc.setdefault("fact_version", 0)
         doc.setdefault("last_reconcile_attempt_at", None)
         doc.setdefault("reconcile_due_at", repo_EPOCH)
@@ -1530,19 +1873,16 @@ class PostgresRepository(object):
                                        doc["last_reconcile_attempt_at"], doc.get("last_reconciled_at"), doc["fact_version"],
                                        doc["created_at"]))
         for table, field in repo_CHILD_TABLES.items():
-            if child_fields is not None and field not in child_fields:
+            if field not in selected:
                 continue
-            cur.execute("DELETE FROM " + self.repo_s + "." + table +
-                        " WHERE account_type=%s AND account_id=%s AND order_id=%s", self.repo_scope + (doc["order_id"],))
-            for index, record in enumerate(doc.get(field, [])):
-                keys = {"items": "item_id", "attempts": "attempt_id", "cancel_requests": "cancel_request_id",
-                        "qmt_tasks": "qmt_task_id", "qmt_orders": "qmt_order_id", "fills": "trade_id"}
-                record_id = str(record.get(keys[field]) or record.get("id") or index)
-                if field in ("qmt_tasks", "qmt_orders", "fills"):
-                    record_id = fingerprint([record.get("trading_day"), record.get("market"), record_id])
-                cur.execute("INSERT INTO " + self.repo_s + "." + table +
-                            "(account_type,account_id,order_id,record_id,document) VALUES(%s,%s,%s,%s,%s::jsonb)",
-                            self.repo_scope + (doc["order_id"], record_id, json_text(record)))
+            for record_id, record in prepared[table].items():
+                cur.execute("INSERT INTO " + self.repo_s + "." + table + " AS existing "
+                            "(account_type,account_id,order_id,record_id,document,created_at) "
+                            "VALUES(%s,%s,%s,%s::uuid,%s::jsonb,%s) "
+                            "ON CONFLICT(account_type,account_id,order_id,record_id) "
+                            "DO UPDATE SET document=EXCLUDED.document "
+                            "WHERE existing.document IS DISTINCT FROM EXCLUDED.document",
+                            self.repo_scope + (doc["order_id"], record_id, json_text(record), record["created_at"]))
         if event_type is not None:
             cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
                         "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
@@ -1600,9 +1940,8 @@ class PostgresRepository(object):
                 doc["submission_status"] = "EXPIRED"
                 return False, self.repo_save(cur, doc, "SUBMISSION_EXPIRED")
             doc["submission_status"] = "SUBMITTING"
-            doc["attempts"].append({"attempt_id": str(uuid.uuid4()), "kind": "SUBMIT", "remark": doc["remark"],
-                                    "status": "CALLING", "created_at": iso_datetime(),
-                                    "executor_epoch": authority[1]})
+            doc["attempts"].append(dict(new_record_metadata(), attempt_id=str(uuid.uuid4()), kind="SUBMIT",
+                                        remark=doc["remark"], status="CALLING", executor_epoch=authority[1]))
             return True, self.repo_save(cur, doc, "SUBMISSION_CLAIMED")
         return self.repo_run(claim, mutation=True)
 
@@ -1623,7 +1962,8 @@ class PostgresRepository(object):
             if candidate is None:
                 return False, doc
             attempt = dict(candidate, attempt_id=str(action.get("attempt_id") or uuid.uuid4()),
-                           status="CALLING", created_at=iso_datetime(), executor_epoch=authority[1])
+                           status="CALLING", executor_epoch=authority[1])
+            attempt.update(new_record_metadata())
             doc["attempts"].append(attempt)
             return True, self.repo_save(cur, doc, "CANCEL_CLAIMED")
         return self.repo_run(claim, mutation=True)
@@ -1634,7 +1974,7 @@ class PostgresRepository(object):
         def cancel(cur):
             cancel_id = normalized["cancel_request_id"]
             cur.execute("SELECT order_id,document FROM " + self.repo_s + ".cancel_requests "
-                        "WHERE account_type=%s AND account_id=%s AND record_id=%s", self.repo_scope + (cancel_id,))
+                        "WHERE account_type=%s AND account_id=%s AND cancel_request_id=%s", self.repo_scope + (cancel_id,))
             row = cur.fetchone()
             if row:
                 record = repo_json(row[1])
@@ -1859,17 +2199,20 @@ class PostgresRepository(object):
             if row:
                 return repo_json(row[0])
         matches = {}
+        if not observation_identity_valid(kind, raw, identifiers):
+            # 无法归属的异常身份留在原始观察队列，不把数组等值传入 SQL 文本比较。
+            return None
         for field, table in (("qmt_task_id", "qmt_tasks"), ("qmt_order_id", "qmt_orders")):
             value = identifiers.get(field)
             if value is None or str(value) in ("", "0", "-1"):
                 continue
             sql = "SELECT DISTINCT order_id FROM " + self.repo_s + "." + table + \
-                  " WHERE account_type=%s AND account_id=%s AND document->>%s=%s"
-            params = self.repo_scope + (field, str(value))
+                  " WHERE account_type=%s AND account_id=%s AND " + field + "=%s"
+            params = self.repo_scope + (str(value),)
             for dimension in ("trading_day", "market"):
                 if identifiers.get(dimension):
-                    sql += " AND (document->>%s IS NULL OR document->>%s=%s)"
-                    params += (dimension, dimension, str(identifiers[dimension]))
+                    sql += " AND (" + dimension + " IS NULL OR " + dimension + "=%s)"
+                    params += (str(identifiers[dimension]),)
             cur.execute(sql, params)
             for row in cur.fetchall():
                 matches[row[0]] = True

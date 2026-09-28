@@ -14,7 +14,7 @@ from order_bridge.common import OrderError, iso_datetime, utc_now
 class NonblockingRuntimeTests(unittest.TestCase):
     def runtime(self):
         repo = Mock()
-        repo.check_schema.return_value = {'ready': True, 'schema_version': 2}
+        repo.check_schema.return_value = {'ready': True, 'schema_version': 3}
         repo.acquire_executor.return_value = {'epoch': 7}
         repo.recover.return_value = {'next_cursor': None, 'has_more': False}
         repo.health.return_value = {'ready': True}

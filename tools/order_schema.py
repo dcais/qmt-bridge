@@ -6,13 +6,11 @@ from pathlib import Path
 
 from order_bridge.common import OrderError
 from order_bridge.repository import repo_SCHEMA_VERSION, repo_schema
+from order_bridge.storage_schema import repo_check_storage_schema
 
 
 DEFAULT_SQL_PATH = Path(__file__).resolve().parents[1] / "sql" / "order_init.sql"
 DEFAULT_SCHEMA = '"qmt_order"'
-ORDER_COLUMNS = ("submission_status", "cancel_ready", "reconcile_pending",
-                 "reconcile_priority", "reconcile_due_at", "last_reconcile_attempt_at",
-                 "last_reconciled_at", "fact_version", "created_at")
 
 
 def sql_statements(script):
@@ -87,10 +85,6 @@ def _version(cur, schema):
     return [row[0] for row in cur.fetchall()]
 
 
-def _check_orders(cur, schema):
-    cur.execute("SELECT " + ",".join(ORDER_COLUMNS) + " FROM " + schema + ".orders LIMIT 0")
-
-
 def initialize_schema(repo, sql_path=None):
     """Install the current schema or verify a compatible installation."""
     source = DEFAULT_SQL_PATH if sql_path is None else Path(sql_path)
@@ -113,9 +107,7 @@ def initialize_schema(repo, sql_path=None):
         cur.execute("SELECT version FROM " + schema + ".schema_version")
         if [row[0] for row in cur.fetchall()] != [repo_SCHEMA_VERSION]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
-        _check_orders(cur, schema)
-        for table in ("orders", "order_events", "qmt_observations"):
-            cur.execute("SELECT 1 FROM " + schema + "." + table + " LIMIT 0")
+        repo_check_storage_schema(cur, schema, repo_SCHEMA_VERSION)
         return {"schema_version": repo_SCHEMA_VERSION}
 
     return repo.repo_run(install)

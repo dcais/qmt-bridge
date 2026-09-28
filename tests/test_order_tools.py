@@ -91,7 +91,7 @@ class SchemaInstallerTests(unittest.TestCase):
             self.last = statement
             if statement.startswith("INSERT INTO ") and ".schema_version" in statement:
                 if self.version is None:
-                    self.version = 2
+                    self.version = 3
 
         def fetchone(self):
             if self.last.startswith("SELECT to_regclass"):
@@ -112,6 +112,12 @@ class SchemaInstallerTests(unittest.TestCase):
             assert not mutation
             return callback(self.cursor)
 
+    def initialize(self, tool, repo, source=None):
+        # These cursor tests cover SQL parsing and version order. The real
+        # PostgreSQL catalog contract is exercised in test_order_storage_schema.
+        with patch.object(tool, "repo_check_storage_schema", return_value={"schema_version": 3, "ready": True}):
+            return tool.initialize_schema(repo, source)
+
     def test_installer_reads_external_sql_and_replaces_validated_schema(self):
         tool = load_tool("order_schema")
         cursor = self.Cursor()
@@ -122,7 +128,7 @@ class SchemaInstallerTests(unittest.TestCase):
                               'CREATE SCHEMA IF NOT EXISTS "qmt_order";\n'
                               'CREATE TABLE "qmt_order".probe(value text DEFAULT \'a;b\'); '
                               '-- another ; comment\n', encoding="utf-8")
-            self.assertEqual(tool.initialize_schema(repo, source), {"schema_version": 2})
+            self.assertEqual(self.initialize(tool, repo, source), {"schema_version": 3})
         ddl = [sql for sql, _ in cursor.statements if sql.startswith("CREATE ")]
         self.assertEqual(len(ddl), 2)
         self.assertEqual(ddl[0], 'CREATE SCHEMA IF NOT EXISTS "test_schema"')
@@ -138,7 +144,7 @@ class SchemaInstallerTests(unittest.TestCase):
         tool = load_tool("order_schema")
         cursor = self.Cursor(existing_version=1)
         with self.assertRaises(OrderError) as caught:
-            tool.initialize_schema(self.Repo(cursor))
+            self.initialize(tool, self.Repo(cursor))
         self.assertEqual(caught.exception.code, "SCHEMA_VERSION_MISMATCH")
         self.assertIn("no automatic upgrade", str(caught.exception))
         self.assertFalse(any(sql.startswith(("CREATE ", "ALTER ", "INSERT ", "UPDATE ", "DELETE "))
@@ -148,21 +154,21 @@ class SchemaInstallerTests(unittest.TestCase):
         tool = load_tool("order_schema")
         self.assertEqual(tool.DEFAULT_SQL_PATH, ROOT / "sql" / "order_init.sql")
         cursor = self.Cursor()
-        self.assertEqual(tool.initialize_schema(self.Repo(cursor)), {"schema_version": 2})
+        self.assertEqual(self.initialize(tool, self.Repo(cursor)), {"schema_version": 3})
         ddl = "\n".join(sql for sql, _ in cursor.statements)
         for table in ("orders", "order_events", "qmt_observations", "order_items", "fills"):
             self.assertIn('"qmt_order".' + table, ddl)
         self.assertEqual([params for sql, params in cursor.statements
-                          if sql.startswith("INSERT INTO ")], [(2,)])
+                          if sql.startswith("INSERT INTO ")], [(3,)])
 
     def test_current_schema_init_can_be_repeated(self):
         tool = load_tool("order_schema")
-        current = self.Cursor(existing_version=2)
+        current = self.Cursor(existing_version=3)
         repo = self.Repo(current)
-        self.assertEqual(tool.initialize_schema(repo), {"schema_version": 2})
+        self.assertEqual(self.initialize(tool, repo), {"schema_version": 3})
         first_run = list(current.statements)
-        self.assertEqual(tool.initialize_schema(repo), {"schema_version": 2})
-        self.assertEqual(current.version, 2)
+        self.assertEqual(self.initialize(tool, repo), {"schema_version": 3})
+        self.assertEqual(current.version, 3)
         self.assertEqual(current.statements, first_run * 2)
         self.assertFalse(any(sql.startswith(("UPDATE ", "DELETE "))
                              for sql, _ in current.statements))

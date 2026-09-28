@@ -1,9 +1,11 @@
 import copy
 import unittest
-from order_bridge.common import OrderError, new_order_document, public_order
+import uuid
+from order_bridge.common import OrderError, new_order_document, new_record_metadata, public_order
 from order_bridge.state import (apply_observation, apply_cancel_request, cancel_response,
                                 pending_cancellations, mark_reconciled, recompute_order,
-                                is_order_active, observation_identifiers, reconcile_pending)
+                                is_order_active, observation_identifiers,
+                                observation_identity_valid, reconcile_pending)
 
 
 def document(algo=False, basket=False):
@@ -33,6 +35,92 @@ def observe(doc, kind, raw):
 
 
 class StateTests(unittest.TestCase):
+    def test_container_valued_qmt_identity_is_evidence_without_child_record(self):
+        examples = (
+            ('order', dict(order(), m_strExchangeID=['SH']), 'qmt_orders'),
+            ('order', dict(order(), m_strInsertDate={'day': '20260925'}), 'qmt_orders'),
+            ('order', dict(order(), m_nOffsetFlag=['BUY']), 'qmt_orders'),
+            ('task', {'m_nTaskId': 5, 'm_eStatus': 3, 'market': ['SH']}, 'qmt_tasks'),
+            ('deal', dict(deal(), m_strExchangeID=['SH']), 'fills'))
+        for kind, raw, field in examples:
+            with self.subTest(kind=kind, field=field, raw=raw):
+                doc = document()
+                self.assertFalse(observation_identity_valid(kind, raw))
+                self.assertTrue(observe(doc, kind, raw))
+                self.assertEqual(doc[field], [])
+                self.assertEqual(doc['unassociated_evidence'][0]['reason'],
+                                 'INVALID_OBSERVATION_IDENTITY')
+                self.assertEqual(doc['unassociated_evidence'][0]['raw'], raw)
+
+    def test_integer_native_qmt_identity_still_normalizes(self):
+        doc = document()
+        raw = order(12345)
+        self.assertTrue(observation_identity_valid('order', raw))
+        self.assertEqual(observation_identifiers('order', raw)['qmt_order_id'], '12345')
+        observe(doc, 'order', raw)
+        self.assertEqual(doc['qmt_orders'][0]['qmt_order_id'], '12345')
+        self.assertFalse(doc.get('unassociated_evidence'))
+
+    def test_new_child_records_have_stable_uuids_and_creation_times(self):
+        doc = document(basket=True)
+        item_ids = [item['record_id'] for item in doc['items']]
+        self.assertEqual(len(set(item_ids)), 2)
+        for item in doc['items']:
+            self.assertEqual(str(uuid.UUID(item['record_id'])), item['record_id'])
+            self.assertEqual(item['created_at'], doc['created_at'])
+
+        task = {'m_nTaskId': 5, 'm_eStatus': 3}
+        raw_order = order()
+        del raw_order['m_strInsertDate']
+        observe(doc, 'task', task)
+        observe(doc, 'order', raw_order)
+        observe(doc, 'deal', deal())
+        apply_cancel_request(doc, {'cancel_request_id': 'c1'})
+        initial = {field: (doc[field][0]['record_id'], doc[field][0]['created_at'])
+                   for field in ('qmt_tasks', 'qmt_orders', 'fills', 'cancel_requests')}
+        self.assertEqual(len(set(item_ids + [value[0] for value in initial.values()])), 6)
+        for record_id, created_at in initial.values():
+            self.assertEqual(str(uuid.UUID(record_id)), record_id)
+            self.assertNotEqual(created_at, '2026-09-25T10:00:00+00:00')
+
+        observe(doc, 'task', task)
+        observe(doc, 'order', order())  # Complete a previously missing trading day.
+        observe(doc, 'deal', deal())
+        apply_cancel_request(doc, {'cancel_request_id': 'c1'})
+        for field, metadata in initial.items():
+            self.assertEqual((doc[field][0]['record_id'], doc[field][0]['created_at']), metadata)
+        self.assertEqual(len(doc['qmt_orders']), 1)
+
+    def test_public_responses_hide_only_new_child_metadata(self):
+        doc = document()
+        raw = order()
+        raw['record_id'] = 'broker-provided'
+        raw['created_at'] = 'broker-provided-time'
+        observe(doc, 'order', raw)
+        observe(doc, 'deal', deal())
+        observe(doc, 'task', {'m_nTaskId': 5, 'm_eStatus': 3})
+        apply_cancel_request(doc, {'cancel_request_id': 'c1'})
+        original = copy.deepcopy(doc)
+        result = public_order(doc)
+        self.assertEqual(result['created_at'], doc['created_at'])
+        for field in ('items', 'qmt_tasks', 'qmt_orders', 'fills', 'cancel_requests'):
+            self.assertNotIn('record_id', result[field][0])
+        for field in ('items', 'qmt_tasks', 'qmt_orders', 'fills'):
+            self.assertNotIn('created_at', result[field][0])
+        self.assertEqual(result['cancel_requests'][0]['created_at'], doc['cancel_requests'][0]['created_at'])
+        self.assertEqual(result['qmt_orders'][0]['raw']['record_id'], 'broker-provided')
+        self.assertEqual(result['qmt_orders'][0]['raw']['created_at'], 'broker-provided-time')
+        cancel = cancel_response(doc, 'c1')
+        self.assertNotIn('record_id', cancel)
+        self.assertEqual(cancel['created_at'], doc['cancel_requests'][0]['created_at'])
+        self.assertEqual(doc, original)
+
+    def test_record_metadata_helper_assigns_new_uuid_and_time(self):
+        first, second = new_record_metadata(), new_record_metadata()
+        self.assertNotEqual(first['record_id'], second['record_id'])
+        self.assertEqual(str(uuid.UUID(first['record_id'])), first['record_id'])
+        self.assertTrue(first['created_at'].endswith('+00:00'))
+
     def test_reconcile_pending_enters_exits_and_reopens_on_late_fact(self):
         doc = document()
         self.assertFalse(reconcile_pending(doc))
