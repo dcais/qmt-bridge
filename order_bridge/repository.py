@@ -9,8 +9,9 @@ import uuid
 from datetime import timedelta
 
 from .common import (OrderError, copy_json, fingerprint, iso_datetime,
-                     json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now)
+                     json_text, new_order_document, new_record_metadata, parse_timestamp, public_order, utc_now)
 from .storage_schema import repo_check_storage_schema
+from .evidence import evidence_page
 from .state import (apply_cancel_request, apply_observation, cancel_response,
                     is_order_active, observation_identifiers, observation_identity_valid, pending_cancellations,
                     reconcile_pending, recompute_order, mark_reconciled,
@@ -534,6 +535,77 @@ class PostgresRepository(object):
                                "event_seq": row[0], "event_type": row[2], "occurred_at": row[3], "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
+        return self.repo_run(listing)
+
+    def evidence_marker(self):
+        """HTTP thread bracketing marker, never called on QMT scheduler thread."""
+        def read(cur):
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id',event_seq,executor_epoch,executor_instance "
+                        "FROM " + self.repo_s + ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return None
+            return dict(stream_id=row[0], high_watermark=row[1], executor_epoch=row[2],
+                        executor_instance=row[3], observed_at=iso_datetime(), account_id=self.account_id,
+                        account_type=self.account_type)
+        return self.repo_run(read)
+
+    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False):
+        """One read-only repeatable-read transaction; no QMT calls or writer locks."""
+        def listing(cur):
+            cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id',event_seq,executor_epoch,executor_instance "
+                        "FROM " + self.repo_s + ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            row = cur.fetchone()
+            if not row or not row[0]:
+                raise OrderError(503, 'EVIDENCE_SCHEMA_REQUIRED', 'optional evidence stream migration has not been applied')
+            stream, current, epoch, instance = row
+            high = checkpoint['high_watermark'] if checkpoint else current
+            if checkpoint and (checkpoint['stream_id'] != stream or checkpoint['executor_epoch'] != epoch or
+                               checkpoint['executor_instance'] != instance or checkpoint['account_id'] != self.account_id or
+                               checkpoint['account_type'] != self.account_type):
+                raise OrderError(409, 'EVIDENCE_STREAM_CHANGED', 'account, stream, or executor changed; restart evidence query')
+            cur.execute('SELECT min(event_seq) FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s', self.repo_scope)
+            retained = cur.fetchone()[0]
+            retained = retained if retained is not None else current + 1
+            cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
+            tail = cur.fetchone()
+            anchor = fingerprint([repo_json(tail[0]), tail[1], tail[2]]) if tail else None
+            if checkpoint and checkpoint['anchor'] != anchor:
+                raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
+            cur.execute('SELECT count(*) FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s',
+                        self.repo_scope + (after, high))
+            count = cur.fetchone()[0]
+            cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
+                        'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
+            events = [dict(event_id=item[0], type=item[1], recorded_at=item[2], data=repo_json(item[3]))
+                      for item in cur.fetchall()]
+            meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
+                        executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
+                        account_type=self.account_type, range_count=count)
+            result = evidence_page(meta, events, after, high, limit)
+            result['anchor'] = anchor
+            if recovery:
+                cur.execute('SELECT document FROM ' + self.repo_s +
+                            '.orders WHERE account_type=%s AND account_id=%s AND '
+                            "(active OR reconcile_pending OR submission_status IN ('UNKNOWN','SUBMITTING') OR cancel_ready) "
+                            'ORDER BY order_id LIMIT %s', self.repo_scope + (limit + 1,))
+                pending = [repo_json(item[0]) for item in cur.fetchall()]
+                result['pending_requests'] = [dict(order_id=item['order_id'], client_order_id=item['client_order_id'],
+                    submission_status=item['submission_status'], order_version=item.get('version'),
+                    cancel_requests=public_order(item).get('cancel_requests', []),
+                    unresolved_attempts=[{key: attempt.get(key) for key in
+                        ('attempt_id', 'kind', 'status', 'executor_epoch', 'cancel_request_id', 'target_id')}
+                        for attempt in item.get('attempts', []) if attempt.get('status') in ('CALLING', 'UNKNOWN', 'RETURNED')])
+                    for item in pending[:limit]]
+                result['pending_truncated'] = len(pending) > limit
+                result['pending_as_of_high_watermark'] = current
+                result['pending_consistency'] = 'CURRENT_DATABASE_READ_SNAPSHOT'
+            return result
         return self.repo_run(listing)
 
     def work_orders(self, limit=100):

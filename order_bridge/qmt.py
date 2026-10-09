@@ -231,6 +231,26 @@ def _qmt_passorder_snapshot(raw):
     return result
 
 
+MAX_HISTORY_DATE_DAYS = 31
+
+
+def qmt_history_capabilities(apis):
+    """The supported local QMT does not provide broker-native historical details.
+
+    Public docs are not proof of this client capability. Do not promote an injected
+    function/mock to support; persistent Bridge records are a separate source.
+    """
+    return {"implemented": False, "function_available": False,
+            "availability": "UNSUPPORTED", "source": "QMT_NATIVE_HISTORY",
+            "reason": "NATIVE_HISTORY_NOT_PROVIDED_BY_SUPPORTED_QMT",
+            "qmt_function": "get_history_trade_detail_data", "runtime_verified": False,
+            "local_history": {"source": "BRIDGE_PERSISTED_RECORDS",
+                              "routes": ["/orders", "/order_events"],
+                              "scope": "BRIDGE_RETAINED_ONLY", "coverage": "UNVERIFIED",
+                              "retention_start": "UNVERIFIED", "fee_finality": "UNVERIFIED",
+                              "before_retention": "NOT_RECOVERABLE_FROM_LOCAL_STORE"}}
+
+
 class QmtAdapter(object):
     def __init__(self, apis, context, account_id=None, account_type="STOCK", logger=None):
         self.apis = apis
@@ -261,6 +281,8 @@ class QmtAdapter(object):
             pass
 
     def available(self, name):
+        if name == "get_history_trade_detail_data":
+            return False
         return callable(self.apis.get(name))
 
     def _require(self, name):
@@ -478,6 +500,12 @@ class QmtAdapter(object):
                             {"cancel_request_id": action.get("cancel_request_id"),
                              "qmt_order_id" if kind == "CANCEL_ORDER" else "qmt_task_id": identifier})
         return bool(result)
+
+    def history_query(self, params):
+        """Explicit unsupported response, never a successful empty native history."""
+        _qmt_error("NATIVE_HISTORY_UNSUPPORTED",
+                   "supported QMT does not provide native historical trade details; "
+                   "Bridge retained orders/events are a separate local history source", 501)
 
     def query(self, kind):
         if kind not in ("order", "deal", "task"):

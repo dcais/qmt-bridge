@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-09-28 17:31:52
+# Last modified (Asia/Shanghai): 2026-10-08 17:10:01
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -1493,6 +1493,111 @@ def repo_check_storage_schema(cur, schema, expected_version=3):
             raise repo_storage_error("missing or incorrect nonempty check: " + name)
     return {"schema_version": expected_version, "ready": True}
 
+# ---- order_bridge/evidence.py ----
+"""Conservative v1 evidence: local journal facts are not broker completeness."""
+import base64
+import hashlib
+import hmac
+import json
+import math
+import os
+import time
+
+
+
+def evidence_capabilities():
+    return dict(version=1, journal_paging='SUPPORTED_WITH_EVIDENCE_MIGRATION',
+                source='BRIDGE_PERSISTED_RECORDS', broker_event_completeness='UNSUPPORTED',
+                atomic_financial_snapshot='UNSUPPORTED', final_order_fees='UNSUPPORTED',
+                native_history='UNSUPPORTED', restore_lineage_proof='UNSUPPORTED',
+                sample_event_binding='NON_ATOMIC_BRACKET_ONLY',
+                logical_cash_allocation='TRADENEST_OWNED',
+                routes=['order_events_evidence_v1', 'account_evidence_v1',
+                        'positions_evidence_v1', 'recovery_evidence_v1', 'order_fee_evidence_v1'])
+
+
+def evidence_fee(document):
+    # No documented order-attributable actual fee source is currently available.
+    return dict(status='pending', currency=None, cumulative_amount=None,
+                revision=None, finality='unknown', source=None,
+                reason='ORDER_ATTRIBUTABLE_ACTUAL_FEE_SOURCE_UNAVAILABLE',
+                order_id=document.get('order_id'), order_version=document.get('version'),
+                fills=[dict(trade_id=row.get('trade_id'), status='pending', currency=None,
+                            cumulative_amount=None, revision=None, finality='unknown', source=None)
+                       for row in document.get('fills', [])])
+
+
+def evidence_sample(kind, account_id, account_type, raw, started_at, finished_at):
+    result = dict(evidence_version=1, sample_id=os.urandom(16).hex(),
+                  source='QMT_GET_TRADE_DETAIL_DATA', account_id=account_id, account_type=account_type,
+                  kind=kind, started_at=started_at, finished_at=finished_at,
+                  consistency='non_atomic', broker_as_of=None, event_watermark=None,
+                  clock_source='BRIDGE_HOST_UTC', account_identity='QUERY_ARGUMENT_ONLY',
+                  event_relation='unknown', completeness='unknown', raw=raw)
+    if kind == 'account':
+        result['assets'] = dict(
+            available=evidence_asset(raw, 'm_dAvailable', 'QMT available funds'),
+            frozen=evidence_asset(raw, 'm_dFrozenCash', 'QMT frozen funds'),
+            cash=dict(value=None, source_field=None, meaning='total cash is unverified; not inferred from balance or available'),
+            currency=None, logical_allocation='TRADENEST_OWNED')
+    return result
+
+
+def evidence_asset(raw, field, meaning):
+    value = raw.get(field)
+    valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(value, float):
+        valid = valid and math.isfinite(value)
+    return dict(value=value if valid else None, source_field=field, meaning=meaning,
+                status='observed' if valid else 'unknown')
+
+
+class EvidenceCursors(object):
+    """Ephemeral server MAC: restart invalidates cursors, never persistent secrets."""
+    def __init__(self):
+        self.key = os.urandom(32)
+
+    def encode(self, value):
+        payload = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return base64.urlsafe_b64encode(payload).decode('ascii') + '.' + hmac.new(self.key, payload, hashlib.sha256).hexdigest()
+
+    def decode(self, token):
+        try:
+            if not isinstance(token, str) or len(token) > 4096:
+                raise ValueError()
+            body, signature = token.split('.')
+            payload = base64.b64decode(body.encode('ascii'), altchars=b'-_', validate=True)
+            if not hmac.compare_digest(signature, hmac.new(self.key, payload, hashlib.sha256).hexdigest()):
+                raise ValueError()
+            value = json.loads(payload.decode('utf-8'))
+            if time.time() > value['expires_at']:
+                raise ValueError()
+            return value
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise OrderError(409, 'EVIDENCE_CURSOR_INVALID', 'cursor expired, altered, or belongs to another process; restart evidence query') from None
+
+
+def evidence_page(meta, rows, after, high, limit):
+    """Check the requested remaining range, not only the returned page."""
+    retained = meta['retained_from']
+    if high > meta['high_watermark'] or after > high:
+        raise OrderError(409, 'EVIDENCE_ROLLBACK_OR_INVALID_RANGE', 'journal watermark regressed or range is invalid')
+    if after < retained - 1:
+        raise OrderError(409, 'EVIDENCE_RETENTION_GAP', 'requested range precedes retained journal')
+    if meta['range_count'] != max(0, high - after):
+        raise OrderError(409, 'EVIDENCE_JOURNAL_GAP', 'requested journal range has missing events')
+    page = rows[:limit]
+    return dict(evidence_version=1, source='BRIDGE_PERSISTED_RECORDS', stream_id=meta['stream_id'],
+                stream_identity_origin='DATABASE_GENERATED', authenticity='DEPLOYMENT_TRUST_REQUIRED',
+                account_id=meta['account_id'], account_type=meta['account_type'],
+                executor_epoch=meta['executor_epoch'], executor_instance=meta['executor_instance'],
+                retained_from=retained, high_watermark=high,
+                coverage=dict(after_exclusive=after, through_inclusive=high, journal_contiguous=True,
+                              start_origin='CLIENT_REQUESTED_BOUND_ONLY',
+                              broker_complete='unknown', provable_broker_dates=None),
+                restore_lineage_proof='unsupported', events=page,
+                next_after=page[-1]['event_id'] if page else after, has_more=len(rows) > limit)
+
 # ---- order_bridge/repository.py ----
 """PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
 import hashlib
@@ -2022,6 +2127,77 @@ class PostgresRepository(object):
                                "event_seq": row[0], "event_type": row[2], "occurred_at": row[3], "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
+        return self.repo_run(listing)
+
+    def evidence_marker(self):
+        """HTTP thread bracketing marker, never called on QMT scheduler thread."""
+        def read(cur):
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id',event_seq,executor_epoch,executor_instance "
+                        "FROM " + self.repo_s + ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return None
+            return dict(stream_id=row[0], high_watermark=row[1], executor_epoch=row[2],
+                        executor_instance=row[3], observed_at=iso_datetime(), account_id=self.account_id,
+                        account_type=self.account_type)
+        return self.repo_run(read)
+
+    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False):
+        """One read-only repeatable-read transaction; no QMT calls or writer locks."""
+        def listing(cur):
+            cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id',event_seq,executor_epoch,executor_instance "
+                        "FROM " + self.repo_s + ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+            row = cur.fetchone()
+            if not row or not row[0]:
+                raise OrderError(503, 'EVIDENCE_SCHEMA_REQUIRED', 'optional evidence stream migration has not been applied')
+            stream, current, epoch, instance = row
+            high = checkpoint['high_watermark'] if checkpoint else current
+            if checkpoint and (checkpoint['stream_id'] != stream or checkpoint['executor_epoch'] != epoch or
+                               checkpoint['executor_instance'] != instance or checkpoint['account_id'] != self.account_id or
+                               checkpoint['account_type'] != self.account_type):
+                raise OrderError(409, 'EVIDENCE_STREAM_CHANGED', 'account, stream, or executor changed; restart evidence query')
+            cur.execute('SELECT min(event_seq) FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s', self.repo_scope)
+            retained = cur.fetchone()[0]
+            retained = retained if retained is not None else current + 1
+            cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
+            tail = cur.fetchone()
+            anchor = fingerprint([repo_json(tail[0]), tail[1], tail[2]]) if tail else None
+            if checkpoint and checkpoint['anchor'] != anchor:
+                raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
+            cur.execute('SELECT count(*) FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s',
+                        self.repo_scope + (after, high))
+            count = cur.fetchone()[0]
+            cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
+                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
+                        'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
+            events = [dict(event_id=item[0], type=item[1], recorded_at=item[2], data=repo_json(item[3]))
+                      for item in cur.fetchall()]
+            meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
+                        executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
+                        account_type=self.account_type, range_count=count)
+            result = evidence_page(meta, events, after, high, limit)
+            result['anchor'] = anchor
+            if recovery:
+                cur.execute('SELECT document FROM ' + self.repo_s +
+                            '.orders WHERE account_type=%s AND account_id=%s AND '
+                            "(active OR reconcile_pending OR submission_status IN ('UNKNOWN','SUBMITTING') OR cancel_ready) "
+                            'ORDER BY order_id LIMIT %s', self.repo_scope + (limit + 1,))
+                pending = [repo_json(item[0]) for item in cur.fetchall()]
+                result['pending_requests'] = [dict(order_id=item['order_id'], client_order_id=item['client_order_id'],
+                    submission_status=item['submission_status'], order_version=item.get('version'),
+                    cancel_requests=public_order(item).get('cancel_requests', []),
+                    unresolved_attempts=[{key: attempt.get(key) for key in
+                        ('attempt_id', 'kind', 'status', 'executor_epoch', 'cancel_request_id', 'target_id')}
+                        for attempt in item.get('attempts', []) if attempt.get('status') in ('CALLING', 'UNKNOWN', 'RETURNED')])
+                    for item in pending[:limit]]
+                result['pending_truncated'] = len(pending) > limit
+                result['pending_as_of_high_watermark'] = current
+                result['pending_consistency'] = 'CURRENT_DATABASE_READ_SNAPSHOT'
+            return result
         return self.repo_run(listing)
 
     def work_orders(self, limit=100):
@@ -2678,6 +2854,26 @@ def _qmt_passorder_snapshot(raw):
     return result
 
 
+MAX_HISTORY_DATE_DAYS = 31
+
+
+def qmt_history_capabilities(apis):
+    """The supported local QMT does not provide broker-native historical details.
+
+    Public docs are not proof of this client capability. Do not promote an injected
+    function/mock to support; persistent Bridge records are a separate source.
+    """
+    return {"implemented": False, "function_available": False,
+            "availability": "UNSUPPORTED", "source": "QMT_NATIVE_HISTORY",
+            "reason": "NATIVE_HISTORY_NOT_PROVIDED_BY_SUPPORTED_QMT",
+            "qmt_function": "get_history_trade_detail_data", "runtime_verified": False,
+            "local_history": {"source": "BRIDGE_PERSISTED_RECORDS",
+                              "routes": ["/orders", "/order_events"],
+                              "scope": "BRIDGE_RETAINED_ONLY", "coverage": "UNVERIFIED",
+                              "retention_start": "UNVERIFIED", "fee_finality": "UNVERIFIED",
+                              "before_retention": "NOT_RECOVERABLE_FROM_LOCAL_STORE"}}
+
+
 class QmtAdapter(object):
     def __init__(self, apis, context, account_id=None, account_type="STOCK", logger=None):
         self.apis = apis
@@ -2708,6 +2904,8 @@ class QmtAdapter(object):
             pass
 
     def available(self, name):
+        if name == "get_history_trade_detail_data":
+            return False
         return callable(self.apis.get(name))
 
     def _require(self, name):
@@ -2925,6 +3123,12 @@ class QmtAdapter(object):
                             {"cancel_request_id": action.get("cancel_request_id"),
                              "qmt_order_id" if kind == "CANCEL_ORDER" else "qmt_task_id": identifier})
         return bool(result)
+
+    def history_query(self, params):
+        """Explicit unsupported response, never a successful empty native history."""
+        _qmt_error("NATIVE_HISTORY_UNSUPPORTED",
+                   "supported QMT does not provide native historical trade details; "
+                   "Bridge retained orders/events are a separate local history source", 501)
 
     def query(self, kind):
         if kind not in ("order", "deal", "task"):
@@ -3279,6 +3483,8 @@ class OrderBackground(object):
         self.capacity = threading.BoundedSemaphore(128)
         self.grant = None
         self.db_ready = False
+        self.persistence_error = None
+        self.authority_error = None
         self.schema_ready = threading.Event()
         self.authority_stop = threading.Event()
         self.authority_done = threading.Event()
@@ -3351,6 +3557,7 @@ class OrderBackground(object):
                 except Exception as exc:
                     self.grant = None
                     r.last_error = getattr(exc, 'code', 'EXECUTOR_LOCK_LOST')
+                    self.authority_error = r.last_error
                     self._log('ERROR', 'Order authority lost', error_code=r.last_error)
                     break
                 self.authority_stop.wait(.15)
@@ -3360,6 +3567,7 @@ class OrderBackground(object):
                 r.repo.close()
             except Exception:
                 r.last_error = 'PERSISTENCE_CLOSE_ERROR'
+                self.authority_error = r.last_error
             finally:
                 self.authority_done.set()
 
@@ -3578,6 +3786,7 @@ class OrderBackground(object):
                         except Exception as exc:
                             self.db_ready = False
                             r.last_error = getattr(exc, 'code', 'PERSISTENCE_UNAVAILABLE')
+                            self.persistence_error = r.last_error
                     continue
                 except Exception as exc:
                     self.db_ready = False
@@ -3585,6 +3794,7 @@ class OrderBackground(object):
                     if r.last_error != code:
                         self._log('ERROR', 'Order persistence suspended', error_code=code)
                     r.last_error = code
+                    self.persistence_error = code
                     # retained 不移除；提交结果不明可幂等重写结果，认领异常则没有指令。
                     time.sleep(.05)
         finally:
@@ -3616,9 +3826,10 @@ class OrderBackground(object):
         self._reconcile_step()
         if r.recovery_complete and self.authorized():
             self._dispatch()
-        if r.clock() - self.last_sample >= 1:
+        if self.persistence_error is not None or r.clock() - self.last_sample >= 1:
             self.sample = r.repo.health()
             self.db_ready = True
+            self.persistence_error = None
             self.sampled_at = iso_datetime()
             self.last_sample = r.clock()
 
@@ -3872,7 +4083,9 @@ class OrderBackground(object):
                     last_reconcile_attempt_at=self.last_reconcile_attempt_at,
                     last_reconcile_finished_at=self.last_reconcile_finished_at,
                     next_reconcile_at=self.next_reconcile_at,
-                    last_reconcile_error=self.last_reconcile_error, error_code=r.last_error,
+                    last_reconcile_error=self.last_reconcile_error,
+                    error_code=self.authority_error or self.persistence_error,
+                    last_error=r.last_error,
                     observation_gap=r.observation_gap, sampled_at=self.sampled_at,
                     lifecycle=('STOPPED' if self.stopped else 'STOPPING' if r.stop_event.is_set() else 'RUNNING' if r.recovery_complete else 'RECOVERING' if r.initialized else 'STARTING'),
                     state='STOPPED' if self.stopped else ('STOPPING' if r.stop_event.is_set() else 'RUNNING'),
@@ -3989,6 +4202,9 @@ class OrderRuntime:
         self.local_lock = local_lock or (LocalExecutorLock(pg_config, account_id) if pg_config else None)
         self.clock = clock or time.monotonic
         self.instance_id = uuid.uuid4().hex
+        self.evidence_cursors = EvidenceCursors()
+        self.evidence_samples = {}
+        self.evidence_sample_lock = threading.Lock()
         self.host_id = socket.gethostname().lower()
         self.stop_event = threading.Event()
         self.stopped_event = threading.Event()
@@ -4030,7 +4246,8 @@ class OrderRuntime:
 
     def handle(self, method, params, verb):
         writes = ("submit_order", "cancel_order")
-        reads = ("order", "orders", "order_events", "capabilities", "health")
+        reads = ("order", "orders", "order_events", "capabilities", "health",
+                 "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1")
         if method in writes and verb != "POST" or method in reads and verb != "GET":
             raise OrderError(405, "METHOD_NOT_ALLOWED", "commands require POST; order queries require GET")
         if not isinstance(params, dict):
@@ -4041,8 +4258,10 @@ class OrderRuntime:
         if method == "capabilities":
             self._runtime_keys(params, ())
             result = capabilities()
+            result['evidence_v1'] = evidence_capabilities()
             result["qmt_functions"] = {name: self.adapter.available(name) for name in
-                ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket")}
+                ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket", "get_history_trade_detail_data")}
+            result["history_query"] = qmt_history_capabilities(self.adapter.apis)
             result["verification_status"] = "UNVERIFIED"
             result["trading_configured"] = self.repo is not None
             result["paths"] = [{"order_type": kind, "execution": execution, "implemented": True,
@@ -4053,6 +4272,57 @@ class OrderRuntime:
                                 for execution, function in (("DIRECT", "passorder"), ("SLICED", "algo_passorder"), ("SMART", "smart_algo_passorder"))]
             return 200, result
         self._runtime_require_store()
+        if method == 'order_fee_evidence_v1':
+            self._runtime_keys(params, ('client_order_id',))
+            value = params.get('client_order_id')
+            if not isinstance(value, str) or not value:
+                raise OrderError(400, 'INVALID_PARAMS', 'client_order_id is required')
+            result = evidence_fee(self.repo.get_order(value))
+            result.update(evidence_version=1, account_id=self.account_id, account_type='STOCK')
+            return 200, result
+        if method in ('order_events_evidence_v1', 'recovery_evidence_v1'):
+            self._runtime_keys(params, ('after', 'limit', 'cursor'))
+            if 'cursor' in params and 'after' in params:
+                raise OrderError(400, 'INVALID_PARAMS', 'cursor and after are mutually exclusive')
+            checkpoint = self.evidence_cursors.decode(params['cursor']) if 'cursor' in params else None
+            if checkpoint and checkpoint['route'] != method:
+                raise OrderError(409, 'EVIDENCE_CURSOR_INVALID', 'cursor belongs to another route')
+            after = checkpoint['after'] if checkpoint else self._runtime_integer(params.get('after', 0), 'after', 0, 9223372036854775807)
+            result = self.repo.evidence_events(after, self._runtime_limit(params.get('limit', 100)), checkpoint,
+                                               recovery=method == 'recovery_evidence_v1')
+            anchor = result.pop('anchor')
+            for event in result['events']:
+                event['data'] = public_order(event['data'])
+            token = {key: result[key] for key in ('stream_id', 'account_id', 'account_type', 'executor_epoch',
+                                                  'executor_instance', 'high_watermark')}
+            token.update(anchor=anchor, after=result['next_after'], route=method,
+                         expires_at=checkpoint['expires_at'] if checkpoint else time.time() + 900)
+            result['next_cursor'] = self.evidence_cursors.encode(token) if result['has_more'] else None
+            result['observed_at'] = iso_datetime()
+            result['runtime_health'] = self.health()
+            result['runtime_health_consistency'] = 'non_atomic'
+            if method == 'recovery_evidence_v1':
+                with self.evidence_sample_lock:
+                    samples = copy_json(self.evidence_samples)
+                matching = {}
+                for kind, sample in samples.items():
+                    markers = sample.get('event_watermark') or {}
+                    before, marker = markers.get('before'), markers.get('after')
+                    if (sample.get('event_relation') == 'non_atomic_bracket' and before and marker
+                            and before['high_watermark'] <= marker['high_watermark']
+                            and before['high_watermark'] >= result['coverage']['after_exclusive']
+                            and marker['high_watermark'] <= result['high_watermark']
+                            and all(before[key] == marker[key] == result[key] for key in
+                                    ('stream_id', 'account_id', 'account_type', 'executor_epoch', 'executor_instance'))):
+                        matching[kind] = sample
+                result.update(recovery_status='incomplete', sample_evidence=matching or None,
+                              sample_evidence_consistency='non_atomic', provable_broker_dates=None,
+                              instruction='QUERY_ORIGINAL_ORDER_ID_DO_NOT_RESUBMIT',
+                              blockers=['BROKER_COMPLETENESS_UNKNOWN', 'ATOMIC_SAMPLE_UNSUPPORTED',
+                                        'FINAL_FEES_UNKNOWN', 'RESTORE_LINEAGE_UNVERIFIED'])
+                if result['pending_truncated']:
+                    result['blockers'].append('PENDING_REQUEST_LIST_TRUNCATED')
+            return 200, result
         if method == "submit_order":
             request = normalize_order(params, self.account_id)
             # 已有订单允许在恢复期间查询重放；不能先因执行器未就绪而丢掉幂等结果。
@@ -4137,6 +4407,13 @@ class OrderRuntime:
 
     def health(self):
         return self.background.health()
+
+    def record_evidence_sample(self, sample):
+        """Keep only two latest native samples for this executor account, in memory."""
+        if sample['account_id'] != self.account_id or sample['account_type'] != 'STOCK':
+            return
+        with self.evidence_sample_lock:
+            self.evidence_samples[sample['kind']] = copy_json(sample)
 
     def observe(self, kind, value):
         if self.repo is None:
@@ -4256,7 +4533,8 @@ SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
 ACCOUNT_TYPES = frozenset((
     "STOCK", "CREDIT", "FUTURE", "HUGANGTONG", "SHENGANGTONG", "STOCK_OPTION",
 ))
-METHODS = frozenset(("account", "positions", "get_smart_algo_param"))
+METHODS = frozenset(("account", "positions", "account_evidence_v1", "positions_evidence_v1", "get_smart_algo_param",
+                     "get_history_trade_detail_data", "history_capabilities"))
 
 _ORDER_LOGGER = None
 _ORDER_STATE = None
@@ -4436,11 +4714,39 @@ def _normalize_algo_params(params, allow_string):
     return {"algoList": algo_list}
 
 
+def _normalize_history_params(params):
+    _reject_unknown(params, {"accountId", "accountType", "dataType", "startDate", "endDate"},
+                    "get_history_trade_detail_data")
+    scope = _normalize_account_params(
+        {k: v for k, v in params.items() if k in ("accountId", "accountType")}, "history")
+    kind = params.get("dataType", "DEAL")
+    if not isinstance(kind, str) or kind.upper() not in ("POSITION", "ORDER", "DEAL"):
+        raise OrderError(400, "INVALID_PARAMS", "dataType must be POSITION, ORDER or DEAL")
+    scope["dataType"] = kind.upper()
+    dates = []
+    for key in ("startDate", "endDate"):
+        value = params.get(key)
+        if not isinstance(value, str) or len(value) != 8 or any(c not in "0123456789" for c in value):
+            raise OrderError(400, "INVALID_PARAMS", key + " must be YYYYMMDD")
+        try:
+            dates.append(dt.datetime.strptime(value, "%Y%m%d").date())
+        except ValueError:
+            raise OrderError(400, "INVALID_PARAMS", key + " must be a valid date")
+        scope[key] = value
+    if dates[1] < dates[0] or (dates[1] - dates[0]).days + 1 > MAX_HISTORY_DATE_DAYS:
+        raise OrderError(400, "INVALID_PARAMS", "history range must be ordered and at most 31 calendar days")
+    return scope
+
+
 def normalize_request(method, params, allow_algo_string=True):
     if method not in METHODS:
         raise OrderError(404, "METHOD_NOT_FOUND", "unsupported method")
-    if method in ("account", "positions"):
+    if method in ("account", "positions", "account_evidence_v1", "positions_evidence_v1"):
         params = _normalize_account_params(params, method)
+    elif method == "get_history_trade_detail_data":
+        params = _normalize_history_params(params)
+    elif method == "history_capabilities":
+        _reject_unknown(params, set(), method)
     else:
         params = _normalize_algo_params(params, allow_algo_string)
     return {"method": method, "params": params}
@@ -4489,6 +4795,13 @@ def dispatch_request(ContextInfo, request, logger=None, correlation=None):
         raise OrderError(400, "INVALID_REQUEST", "request must be an object")
     method = request.get("method")
     params = request.get("params")
+    if method in ('account_evidence_v1', 'positions_evidence_v1'):
+        kind = method.replace('_evidence_v1', '')
+        normalized = _normalize_account_params(params, method)
+        started_at = iso_datetime()
+        raw = dispatch_request(ContextInfo, dict(method=kind, params=normalized), logger, correlation)
+        return evidence_sample(kind, normalized['accountId'], normalized['accountType'], raw,
+                               started_at, iso_datetime())
     if not isinstance(method, str) or not isinstance(params, dict):
         raise OrderError(400, "INVALID_REQUEST", "method and params are required")
     normalized = normalize_request(method, params)
@@ -4497,6 +4810,12 @@ def dispatch_request(ContextInfo, request, logger=None, correlation=None):
         state = _ORDER_STATE
         logger = state.logger if state is not None and state.logger is not None else log_message
     correlation = dict(correlation or {})
+    if method == "history_capabilities":
+        return qmt_history_capabilities(globals())
+    if method == "get_history_trade_detail_data":
+        adapter = QmtAdapter(globals(), ContextInfo, params["accountId"], params["accountType"], logger)
+        adapter.log_context = correlation
+        return adapter.history_query(params)
     if method in ("account", "positions"):
         detail_type = "account" if method == "account" else "position"
         correlation.update(account_id=params["accountId"], query_kind=detail_type)
@@ -4589,6 +4908,9 @@ def process_http_requests(ContextInfo):
                         state.scheduler_metrics["last_query_ms"] = (time.monotonic() - query_started) * 1000
                     queries += 1
                     progressed = True
+                    if job.request.get("method") == "get_history_trade_detail_data":
+                        # At most one potentially heavy historical query per callback.
+                        break
             idle_turns = 0 if progressed else idle_turns + 1
             if idle_turns >= 2:
                 break
@@ -4619,7 +4941,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             params = {}
             for name, values in parse_qs(parsed.query, keep_blank_values=True).items():
                 params[name] = values[0] if len(values) == 1 else values
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, True))
@@ -4629,6 +4951,8 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = self._begin_request()
         try:
+            if self.request_method in ("get_history_trade_detail_data", "history_capabilities"):
+                raise OrderError(405, "METHOD_NOT_ALLOWED", "history queries require GET")
             if parsed.query:
                 raise OrderError(400, "INVALID_PARAMS", "POST query params are unsupported")
             try:
@@ -4649,7 +4973,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
                 raise OrderError(400, "INVALID_JSON", "request body must be UTF-8 JSON")
             if not isinstance(params, dict):
                 raise OrderError(400, "INVALID_PARAMS", "JSON body must be an object")
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, False))
@@ -4675,6 +4999,10 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
     def _submit(self, request):
         state = self.server.order_state
+        evidence = request['method'] in ('account_evidence_v1', 'positions_evidence_v1')
+        if evidence and self.command != 'GET':
+            raise OrderError(405, 'METHOD_NOT_ALLOWED', 'evidence queries require GET')
+        before = self._evidence_marker(request) if evidence else None
         job = RequestJob(request)
         job.request_id = self.request_id
         with state.lifecycle_lock:
@@ -4697,7 +5025,26 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
         elif job.error is not None:
             self._send_json(job.error_status, {"error": job.error})
         else:
+            if evidence:
+                after = self._evidence_marker(request)
+                job.result['event_watermark'] = dict(before=before, after=after)
+                job.result['event_relation'] = 'non_atomic_bracket' if before and after and all(
+                    before[key] == after[key] for key in ('stream_id', 'executor_epoch', 'executor_instance')) and (
+                    before['high_watermark'] <= after['high_watermark']) else 'unknown'
+                if state.runtime is not None:
+                    state.runtime.record_evidence_sample(job.result)
             self._send_json(200, job.result)
+
+    def _evidence_marker(self, request):
+        runtime = self.server.order_state.runtime
+        if (runtime is None or runtime.repo is None or request['params']['accountId'] != runtime.account_id
+                or request['params']['accountType'] != 'STOCK'):
+            return None
+        try:
+            return runtime.repo.evidence_marker()
+        except Exception:
+            # A valid QMT sample does not become event proof when persistence fails.
+            return None
 
     def _bridge_submit(self, params):
         state = self.server.order_state

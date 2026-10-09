@@ -1,7 +1,9 @@
 import importlib.util
 import json
 import threading
+import tempfile
 import time
+import uuid
 import unittest
 import urllib.error
 import urllib.request
@@ -17,6 +19,7 @@ def load_strategy(parameters=None):
     module = importlib.util.module_from_spec(spec)
     module.__dict__.update(parameters or {})
     spec.loader.exec_module(module)
+    module.LOG_DIRECTORY = str(Path(tempfile.gettempdir()) / 'qmt-bridge-unit-logs' / uuid.uuid4().hex)
     return module
 
 

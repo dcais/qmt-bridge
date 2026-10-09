@@ -44,6 +44,8 @@ class OrderBackground(object):
         self.capacity = threading.BoundedSemaphore(128)
         self.grant = None
         self.db_ready = False
+        self.persistence_error = None
+        self.authority_error = None
         self.schema_ready = threading.Event()
         self.authority_stop = threading.Event()
         self.authority_done = threading.Event()
@@ -116,6 +118,7 @@ class OrderBackground(object):
                 except Exception as exc:
                     self.grant = None
                     r.last_error = getattr(exc, 'code', 'EXECUTOR_LOCK_LOST')
+                    self.authority_error = r.last_error
                     self._log('ERROR', 'Order authority lost', error_code=r.last_error)
                     break
                 self.authority_stop.wait(.15)
@@ -125,6 +128,7 @@ class OrderBackground(object):
                 r.repo.close()
             except Exception:
                 r.last_error = 'PERSISTENCE_CLOSE_ERROR'
+                self.authority_error = r.last_error
             finally:
                 self.authority_done.set()
 
@@ -343,6 +347,7 @@ class OrderBackground(object):
                         except Exception as exc:
                             self.db_ready = False
                             r.last_error = getattr(exc, 'code', 'PERSISTENCE_UNAVAILABLE')
+                            self.persistence_error = r.last_error
                     continue
                 except Exception as exc:
                     self.db_ready = False
@@ -350,6 +355,7 @@ class OrderBackground(object):
                     if r.last_error != code:
                         self._log('ERROR', 'Order persistence suspended', error_code=code)
                     r.last_error = code
+                    self.persistence_error = code
                     # retained 不移除；提交结果不明可幂等重写结果，认领异常则没有指令。
                     time.sleep(.05)
         finally:
@@ -381,9 +387,10 @@ class OrderBackground(object):
         self._reconcile_step()
         if r.recovery_complete and self.authorized():
             self._dispatch()
-        if r.clock() - self.last_sample >= 1:
+        if self.persistence_error is not None or r.clock() - self.last_sample >= 1:
             self.sample = r.repo.health()
             self.db_ready = True
+            self.persistence_error = None
             self.sampled_at = iso_datetime()
             self.last_sample = r.clock()
 
@@ -637,7 +644,9 @@ class OrderBackground(object):
                     last_reconcile_attempt_at=self.last_reconcile_attempt_at,
                     last_reconcile_finished_at=self.last_reconcile_finished_at,
                     next_reconcile_at=self.next_reconcile_at,
-                    last_reconcile_error=self.last_reconcile_error, error_code=r.last_error,
+                    last_reconcile_error=self.last_reconcile_error,
+                    error_code=self.authority_error or self.persistence_error,
+                    last_error=r.last_error,
                     observation_gap=r.observation_gap, sampled_at=self.sampled_at,
                     lifecycle=('STOPPED' if self.stopped else 'STOPPING' if r.stop_event.is_set() else 'RUNNING' if r.recovery_complete else 'RECOVERING' if r.initialized else 'STARTING'),
                     state='STOPPED' if self.stopped else ('STOPPING' if r.stop_event.is_set() else 'RUNNING'),

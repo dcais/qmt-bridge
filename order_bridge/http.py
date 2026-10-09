@@ -24,6 +24,9 @@ DEFAULT_HTTP_PORT = 8888
 from .common import OrderError, qmt_invoke
 from .runtime import OrderRuntime, read_pg_config
 from .async_log import AsyncOrderLogger
+from .evidence import evidence_sample
+from .common import iso_datetime
+from .qmt import QmtAdapter, qmt_history_capabilities, MAX_HISTORY_DATE_DAYS
 
 try:
     ACCOUNT_ID
@@ -48,7 +51,8 @@ SCHEDULE_INTERVAL = dt.timedelta(milliseconds=10)
 ACCOUNT_TYPES = frozenset((
     "STOCK", "CREDIT", "FUTURE", "HUGANGTONG", "SHENGANGTONG", "STOCK_OPTION",
 ))
-METHODS = frozenset(("account", "positions", "get_smart_algo_param"))
+METHODS = frozenset(("account", "positions", "account_evidence_v1", "positions_evidence_v1", "get_smart_algo_param",
+                     "get_history_trade_detail_data", "history_capabilities"))
 
 _ORDER_LOGGER = None
 _ORDER_STATE = None
@@ -228,11 +232,39 @@ def _normalize_algo_params(params, allow_string):
     return {"algoList": algo_list}
 
 
+def _normalize_history_params(params):
+    _reject_unknown(params, {"accountId", "accountType", "dataType", "startDate", "endDate"},
+                    "get_history_trade_detail_data")
+    scope = _normalize_account_params(
+        {k: v for k, v in params.items() if k in ("accountId", "accountType")}, "history")
+    kind = params.get("dataType", "DEAL")
+    if not isinstance(kind, str) or kind.upper() not in ("POSITION", "ORDER", "DEAL"):
+        raise OrderError(400, "INVALID_PARAMS", "dataType must be POSITION, ORDER or DEAL")
+    scope["dataType"] = kind.upper()
+    dates = []
+    for key in ("startDate", "endDate"):
+        value = params.get(key)
+        if not isinstance(value, str) or len(value) != 8 or any(c not in "0123456789" for c in value):
+            raise OrderError(400, "INVALID_PARAMS", key + " must be YYYYMMDD")
+        try:
+            dates.append(dt.datetime.strptime(value, "%Y%m%d").date())
+        except ValueError:
+            raise OrderError(400, "INVALID_PARAMS", key + " must be a valid date")
+        scope[key] = value
+    if dates[1] < dates[0] or (dates[1] - dates[0]).days + 1 > MAX_HISTORY_DATE_DAYS:
+        raise OrderError(400, "INVALID_PARAMS", "history range must be ordered and at most 31 calendar days")
+    return scope
+
+
 def normalize_request(method, params, allow_algo_string=True):
     if method not in METHODS:
         raise OrderError(404, "METHOD_NOT_FOUND", "unsupported method")
-    if method in ("account", "positions"):
+    if method in ("account", "positions", "account_evidence_v1", "positions_evidence_v1"):
         params = _normalize_account_params(params, method)
+    elif method == "get_history_trade_detail_data":
+        params = _normalize_history_params(params)
+    elif method == "history_capabilities":
+        _reject_unknown(params, set(), method)
     else:
         params = _normalize_algo_params(params, allow_algo_string)
     return {"method": method, "params": params}
@@ -281,6 +313,13 @@ def dispatch_request(ContextInfo, request, logger=None, correlation=None):
         raise OrderError(400, "INVALID_REQUEST", "request must be an object")
     method = request.get("method")
     params = request.get("params")
+    if method in ('account_evidence_v1', 'positions_evidence_v1'):
+        kind = method.replace('_evidence_v1', '')
+        normalized = _normalize_account_params(params, method)
+        started_at = iso_datetime()
+        raw = dispatch_request(ContextInfo, dict(method=kind, params=normalized), logger, correlation)
+        return evidence_sample(kind, normalized['accountId'], normalized['accountType'], raw,
+                               started_at, iso_datetime())
     if not isinstance(method, str) or not isinstance(params, dict):
         raise OrderError(400, "INVALID_REQUEST", "method and params are required")
     normalized = normalize_request(method, params)
@@ -289,6 +328,12 @@ def dispatch_request(ContextInfo, request, logger=None, correlation=None):
         state = _ORDER_STATE
         logger = state.logger if state is not None and state.logger is not None else log_message
     correlation = dict(correlation or {})
+    if method == "history_capabilities":
+        return qmt_history_capabilities(globals())
+    if method == "get_history_trade_detail_data":
+        adapter = QmtAdapter(globals(), ContextInfo, params["accountId"], params["accountType"], logger)
+        adapter.log_context = correlation
+        return adapter.history_query(params)
     if method in ("account", "positions"):
         detail_type = "account" if method == "account" else "position"
         correlation.update(account_id=params["accountId"], query_kind=detail_type)
@@ -381,6 +426,9 @@ def process_http_requests(ContextInfo):
                         state.scheduler_metrics["last_query_ms"] = (time.monotonic() - query_started) * 1000
                     queries += 1
                     progressed = True
+                    if job.request.get("method") == "get_history_trade_detail_data":
+                        # At most one potentially heavy historical query per callback.
+                        break
             idle_turns = 0 if progressed else idle_turns + 1
             if idle_turns >= 2:
                 break
@@ -411,7 +459,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             params = {}
             for name, values in parse_qs(parsed.query, keep_blank_values=True).items():
                 params[name] = values[0] if len(values) == 1 else values
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, True))
@@ -421,6 +469,8 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = self._begin_request()
         try:
+            if self.request_method in ("get_history_trade_detail_data", "history_capabilities"):
+                raise OrderError(405, "METHOD_NOT_ALLOWED", "history queries require GET")
             if parsed.query:
                 raise OrderError(400, "INVALID_PARAMS", "POST query params are unsupported")
             try:
@@ -441,7 +491,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
                 raise OrderError(400, "INVALID_JSON", "request body must be UTF-8 JSON")
             if not isinstance(params, dict):
                 raise OrderError(400, "INVALID_PARAMS", "JSON body must be an object")
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, False))
@@ -467,6 +517,10 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
 
     def _submit(self, request):
         state = self.server.order_state
+        evidence = request['method'] in ('account_evidence_v1', 'positions_evidence_v1')
+        if evidence and self.command != 'GET':
+            raise OrderError(405, 'METHOD_NOT_ALLOWED', 'evidence queries require GET')
+        before = self._evidence_marker(request) if evidence else None
         job = RequestJob(request)
         job.request_id = self.request_id
         with state.lifecycle_lock:
@@ -489,7 +543,26 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
         elif job.error is not None:
             self._send_json(job.error_status, {"error": job.error})
         else:
+            if evidence:
+                after = self._evidence_marker(request)
+                job.result['event_watermark'] = dict(before=before, after=after)
+                job.result['event_relation'] = 'non_atomic_bracket' if before and after and all(
+                    before[key] == after[key] for key in ('stream_id', 'executor_epoch', 'executor_instance')) and (
+                    before['high_watermark'] <= after['high_watermark']) else 'unknown'
+                if state.runtime is not None:
+                    state.runtime.record_evidence_sample(job.result)
             self._send_json(200, job.result)
+
+    def _evidence_marker(self, request):
+        runtime = self.server.order_state.runtime
+        if (runtime is None or runtime.repo is None or request['params']['accountId'] != runtime.account_id
+                or request['params']['accountType'] != 'STOCK'):
+            return None
+        try:
+            return runtime.repo.evidence_marker()
+        except Exception:
+            # A valid QMT sample does not become event proof when persistence fails.
+            return None
 
     def _bridge_submit(self, params):
         state = self.server.order_state

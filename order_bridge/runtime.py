@@ -11,8 +11,9 @@ import uuid
 
 from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, public_order, qmt_exception_details, utc_now
 from .contracts import normalize_order, normalize_cancel, capabilities
-from .qmt import QmtAdapter
+from .qmt import QmtAdapter, qmt_history_capabilities
 from .background import OrderBackground
+from .evidence import EvidenceCursors, evidence_capabilities, evidence_fee
 from .repository import PostgresRepository
 from .state import pending_cancellations, recompute_order, mark_reconciled, observation_identifiers
 
@@ -109,6 +110,9 @@ class OrderRuntime:
         self.local_lock = local_lock or (LocalExecutorLock(pg_config, account_id) if pg_config else None)
         self.clock = clock or time.monotonic
         self.instance_id = uuid.uuid4().hex
+        self.evidence_cursors = EvidenceCursors()
+        self.evidence_samples = {}
+        self.evidence_sample_lock = threading.Lock()
         self.host_id = socket.gethostname().lower()
         self.stop_event = threading.Event()
         self.stopped_event = threading.Event()
@@ -150,7 +154,8 @@ class OrderRuntime:
 
     def handle(self, method, params, verb):
         writes = ("submit_order", "cancel_order")
-        reads = ("order", "orders", "order_events", "capabilities", "health")
+        reads = ("order", "orders", "order_events", "capabilities", "health",
+                 "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1")
         if method in writes and verb != "POST" or method in reads and verb != "GET":
             raise OrderError(405, "METHOD_NOT_ALLOWED", "commands require POST; order queries require GET")
         if not isinstance(params, dict):
@@ -161,8 +166,10 @@ class OrderRuntime:
         if method == "capabilities":
             self._runtime_keys(params, ())
             result = capabilities()
+            result['evidence_v1'] = evidence_capabilities()
             result["qmt_functions"] = {name: self.adapter.available(name) for name in
-                ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket")}
+                ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket", "get_history_trade_detail_data")}
+            result["history_query"] = qmt_history_capabilities(self.adapter.apis)
             result["verification_status"] = "UNVERIFIED"
             result["trading_configured"] = self.repo is not None
             result["paths"] = [{"order_type": kind, "execution": execution, "implemented": True,
@@ -173,6 +180,57 @@ class OrderRuntime:
                                 for execution, function in (("DIRECT", "passorder"), ("SLICED", "algo_passorder"), ("SMART", "smart_algo_passorder"))]
             return 200, result
         self._runtime_require_store()
+        if method == 'order_fee_evidence_v1':
+            self._runtime_keys(params, ('client_order_id',))
+            value = params.get('client_order_id')
+            if not isinstance(value, str) or not value:
+                raise OrderError(400, 'INVALID_PARAMS', 'client_order_id is required')
+            result = evidence_fee(self.repo.get_order(value))
+            result.update(evidence_version=1, account_id=self.account_id, account_type='STOCK')
+            return 200, result
+        if method in ('order_events_evidence_v1', 'recovery_evidence_v1'):
+            self._runtime_keys(params, ('after', 'limit', 'cursor'))
+            if 'cursor' in params and 'after' in params:
+                raise OrderError(400, 'INVALID_PARAMS', 'cursor and after are mutually exclusive')
+            checkpoint = self.evidence_cursors.decode(params['cursor']) if 'cursor' in params else None
+            if checkpoint and checkpoint['route'] != method:
+                raise OrderError(409, 'EVIDENCE_CURSOR_INVALID', 'cursor belongs to another route')
+            after = checkpoint['after'] if checkpoint else self._runtime_integer(params.get('after', 0), 'after', 0, 9223372036854775807)
+            result = self.repo.evidence_events(after, self._runtime_limit(params.get('limit', 100)), checkpoint,
+                                               recovery=method == 'recovery_evidence_v1')
+            anchor = result.pop('anchor')
+            for event in result['events']:
+                event['data'] = public_order(event['data'])
+            token = {key: result[key] for key in ('stream_id', 'account_id', 'account_type', 'executor_epoch',
+                                                  'executor_instance', 'high_watermark')}
+            token.update(anchor=anchor, after=result['next_after'], route=method,
+                         expires_at=checkpoint['expires_at'] if checkpoint else time.time() + 900)
+            result['next_cursor'] = self.evidence_cursors.encode(token) if result['has_more'] else None
+            result['observed_at'] = iso_datetime()
+            result['runtime_health'] = self.health()
+            result['runtime_health_consistency'] = 'non_atomic'
+            if method == 'recovery_evidence_v1':
+                with self.evidence_sample_lock:
+                    samples = copy_json(self.evidence_samples)
+                matching = {}
+                for kind, sample in samples.items():
+                    markers = sample.get('event_watermark') or {}
+                    before, marker = markers.get('before'), markers.get('after')
+                    if (sample.get('event_relation') == 'non_atomic_bracket' and before and marker
+                            and before['high_watermark'] <= marker['high_watermark']
+                            and before['high_watermark'] >= result['coverage']['after_exclusive']
+                            and marker['high_watermark'] <= result['high_watermark']
+                            and all(before[key] == marker[key] == result[key] for key in
+                                    ('stream_id', 'account_id', 'account_type', 'executor_epoch', 'executor_instance'))):
+                        matching[kind] = sample
+                result.update(recovery_status='incomplete', sample_evidence=matching or None,
+                              sample_evidence_consistency='non_atomic', provable_broker_dates=None,
+                              instruction='QUERY_ORIGINAL_ORDER_ID_DO_NOT_RESUBMIT',
+                              blockers=['BROKER_COMPLETENESS_UNKNOWN', 'ATOMIC_SAMPLE_UNSUPPORTED',
+                                        'FINAL_FEES_UNKNOWN', 'RESTORE_LINEAGE_UNVERIFIED'])
+                if result['pending_truncated']:
+                    result['blockers'].append('PENDING_REQUEST_LIST_TRUNCATED')
+            return 200, result
         if method == "submit_order":
             request = normalize_order(params, self.account_id)
             # 已有订单允许在恢复期间查询重放；不能先因执行器未就绪而丢掉幂等结果。
@@ -257,6 +315,13 @@ class OrderRuntime:
 
     def health(self):
         return self.background.health()
+
+    def record_evidence_sample(self, sample):
+        """Keep only two latest native samples for this executor account, in memory."""
+        if sample['account_id'] != self.account_id or sample['account_type'] != 'STOCK':
+            return
+        with self.evidence_sample_lock:
+            self.evidence_samples[sample['kind']] = copy_json(sample)
 
     def observe(self, kind, value):
         if self.repo is None:
