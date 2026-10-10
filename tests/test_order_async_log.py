@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from order_bridge.async_log import AsyncOrderLogger
+from service.ipc_bridge.order.async_log import AsyncOrderLogger
 
 
 class AsyncOrderLoggerTests(unittest.TestCase):
@@ -128,7 +128,7 @@ class AsyncOrderLoggerTests(unittest.TestCase):
             console = []
             logger = AsyncOrderLogger(directory)
             with patch("builtins.print", side_effect=lambda *args, **kwargs: console.append(args[0])):
-                with patch("order_bridge.async_log.order_log_os.makedirs", side_effect=OSError("disk failed")):
+                with patch("service.ipc_bridge.order.async_log.order_log_os.makedirs", side_effect=OSError("disk failed")):
                     logger.start()
                     logger("ERROR", "console survives")
                     logger.request_stop()
@@ -147,7 +147,7 @@ class AsyncOrderLoggerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             logger = AsyncOrderLogger(directory, sink=sink)
-            with patch("order_bridge.async_log.order_log_time.time", return_value=fixed):
+            with patch("service.ipc_bridge.order.async_log.order_log_time.time", return_value=fixed):
                 logger("INFO", "clock")
             logger.start()
             logger.request_stop()

@@ -7,8 +7,8 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from order_bridge.common import OrderError, public_order
-from order_bridge.runtime import LocalExecutorLock, OrderRuntime, read_pg_config
+from service.ipc_bridge.order.common import OrderError, public_order
+from service.ipc_bridge.order.runtime import LocalExecutorLock, OrderRuntime, read_pg_config
 
 
 class LifecycleTests(unittest.TestCase):

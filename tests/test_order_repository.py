@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from order_bridge.common import OrderError, iso_datetime, json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now
-from order_bridge.repository import PostgresRepository
+from service.ipc_bridge.order.common import OrderError, iso_datetime, json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now
+from service.ipc_bridge.order.repository import PostgresRepository
 from tools.order_schema import initialize_schema
 
 
@@ -578,7 +578,7 @@ class PostgresRepositoryTests(unittest.TestCase):
             "trading_day": "20260926", "market": "SH", "symbol": "510300.SH",
             "side": "BUY", "quantity": 100, "filled_quantity": 0, "status": 50})
         fixed = utc_now()
-        with patch("order_bridge.repository.utc_now", return_value=fixed):
+        with patch("service.ipc_bridge.order.repository.utc_now", return_value=fixed):
             batch = self.repo.begin_reconcile_batch(round_id="custom-round", interval_seconds=17)
             self.assertEqual(len(batch["orders"]), 1)
             self.assertEqual(parse_timestamp(batch["orders"][0]["reconcile_due_at"]),
@@ -611,10 +611,10 @@ class PostgresRepositoryTests(unittest.TestCase):
         for round_id in ("checkpoint-one", "checkpoint-two"):
             if round_id == "checkpoint-two":
                 # 推进候选查询的时间，避免测试依赖墙钟等待。
-                clock = patch("order_bridge.repository.iso_datetime",
+                clock = patch("service.ipc_bridge.order.repository.iso_datetime",
                               side_effect=lambda value=None: iso_datetime(value or (utc_now() + dt.timedelta(seconds=5))))
             else:
-                clock = patch("order_bridge.repository.iso_datetime", wraps=iso_datetime)
+                clock = patch("service.ipc_bridge.order.repository.iso_datetime", wraps=iso_datetime)
             with clock:
                 batch = self.repo.begin_reconcile_batch(limit=1, round_id=round_id, interval_seconds=1)
                 self.assertEqual(len(batch["orders"]), 1)
@@ -838,7 +838,7 @@ class PostgresRepositoryTests(unittest.TestCase):
                                                    "side": "BUY", "quantity": 100, "status": 50})
             self.repo.request_cancel({"client_order_id": live["client_order_id"], "cancel_request_id": "cancel-one"})
             action = self.repo.cancellation_orders(limit=1)[0]
-            from order_bridge.state import pending_cancellations
+            from service.ipc_bridge.order.state import pending_cancellations
             target = pending_cancellations(action)[0]
             claimed, current = self.repo.claim_cancel(live["order_id"], target, authority=authority)
             self.assertTrue(claimed)

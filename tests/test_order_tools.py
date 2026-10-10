@@ -25,57 +25,31 @@ def load_tool(name):
 
 
 class BuildTests(unittest.TestCase):
-    def setUp(self):
-        self.tool = load_tool("build_order_strategy")
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.source = Path(self.temp.name) / "order_bridge"
-        self.source.mkdir()
-        self.output = Path(self.temp.name) / "http_order.py"
-        for name in self.tool.MODULES:
-            (self.source / (name + ".py")).write_text(
-                "# -*- coding: utf-8 -*-\nfrom .common import (\n    OrderError,\n    utc_now,\n)\nimport os\n\ndef {0}_function():\n    return os.name\n".format(name), encoding="utf-8")
+    def test_embedded_strategies_are_python36_gbk_and_reproducible(self):
+        import ast
+        tool = load_tool("build_ipc_strategies")
+        for role in ("feed", "order"):
+            rendered = tool.render(role)
+            self.assertEqual(rendered, tool.render(role))
+            text = rendered.decode("gbk")
+            self.assertTrue(text.startswith("# -*- coding: gbk -*-"))
+            ast.parse(text, feature_version=(3, 6))
+            tree = ast.parse(text)
+            embedded = next(ast.literal_eval(node.value) for node in tree.body
+                            if isinstance(node, ast.Assign) and any(
+                                isinstance(target, ast.Name) and target.id == '_IPC_SOURCES'
+                                for target in node.targets))
+            for name, source in embedded:
+                tool.audit(source, name)
+                self.assertNotIn('.repository', name)
+                self.assertNotIn('.async_log', name)
 
-    def test_build_check_and_timestamp_preservation(self):
-        args = ["--source-dir", str(self.source), "--output", str(self.output)]
-        self.assertEqual(self.tool.main(args + ["--check"]), 1)
-        self.assertFalse(self.output.exists())
-        self.assertEqual(self.tool.main(args), 0)
-        original = self.output.read_bytes()
-        rendered = original.decode("gbk")
-        self.assertTrue(rendered.startswith("# -*- coding: gbk -*-\n# Last modified (Asia/Shanghai): "))
-        self.assertNotIn("from .common import", rendered)
-        self.assertEqual(rendered.count("import os"), len(self.tool.MODULES))
-        self.assertEqual(self.tool.main(args + ["--check"]), 0)
-        with patch.object(self.tool.dt, "datetime") as mocked:
-            mocked.now.return_value.strftime.return_value = "2099-01-01 00:00:00"
-            self.assertEqual(self.tool.main(args), 0)
-        self.assertEqual(self.output.read_bytes(), original)
-        with (self.source / "http.py").open("a", encoding="utf-8") as stream:
-            stream.write("\nNEW_VALUE = 1\n")
-        self.assertEqual(self.tool.main(args + ["--check"]), 1)
-
-    def test_duplicate_top_level_definition_fails(self):
-        with (self.source / "http.py").open("a", encoding="utf-8") as stream:
-            stream.write("\ndef common_function():\n    pass\n")
-        with self.assertRaisesRegex(ValueError, "common.*http"):
-            self.tool.render(self.source, "2026-01-01 00:00:00")
-
-
-class DependencyInstallerTests(unittest.TestCase):
-    def test_dry_run_does_not_install(self):
-        tool = load_tool("install_order_dependencies")
-        output = io.StringIO()
-        with patch.object(tool.subprocess, "call") as call:
-            with redirect_stdout(output):
-                self.assertEqual(tool.main(["--dry-run", "--python36"]), 0)
-            call.assert_not_called()
-        command = output.getvalue()
-        self.assertIn("--abi cp36m", command)
-        self.assertIn("--platform win_amd64", command)
-        self.assertIn("-r " + str(ROOT / "requirements-order.txt"), command)
-        self.assertEqual((ROOT / "requirements-order.txt").read_text(encoding="utf-8").strip(),
-                         "psycopg2-binary==2.9.5")
+    def test_source_audit_rejects_qmt_file_network_and_database_work(self):
+        tool = load_tool("build_ipc_strategies")
+        for source in ('import socket', 'import psycopg2', 'open("state.json")',
+                       'import pathlib', 'os.makedirs("logs")'):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                tool.audit(source, 'unsafe.py')
 
 
 class SchemaInstallerTests(unittest.TestCase):
@@ -140,7 +114,7 @@ class SchemaInstallerTests(unittest.TestCase):
         self.assertFalse(any(".account_runtime" in sql for sql, _ in cursor.statements))
 
     def test_existing_incompatible_version_blocks_all_ddl(self):
-        from order_bridge.common import OrderError
+        from service.ipc_bridge.order.common import OrderError
         tool = load_tool("order_schema")
         cursor = self.Cursor(existing_version=1)
         with self.assertRaises(OrderError) as caught:
@@ -177,7 +151,10 @@ class SchemaInstallerTests(unittest.TestCase):
 class AdminSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool("order_admin")
-        from order_bridge.common import new_order_document
+        dotenv_patch = patch.object(self.tool, 'dotenv_values', return_value={})
+        dotenv_patch.start()
+        self.addCleanup(dotenv_patch.stop)
+        from service.ipc_bridge.order.common import new_order_document
         request = {"client_order_id": "client-1", "account_id": "12345", "order_type": "SINGLE",
                    "sizing_type": "QUANTITY", "symbol": "600000.SH", "side": "BUY", "quantity": 100,
                    "execution": {"type": "DIRECT"}, "price_type": "LIMIT", "limit_price": "10"}
@@ -234,6 +211,49 @@ class AdminSafetyTests(unittest.TestCase):
             with patch.dict(self.tool.os.environ, {"ORDER_PG_SCHEMA": "legacy"}, clear=True):
                 with self.assertRaisesRegex(ValueError, "ORDER_PG_SCHEMA"):
                     self.tool.config_from_args(args)
+            with patch.dict(self.tool.os.environ, {"QMT_BRIDGE_PG_SCHEMA": "legacy"}, clear=True):
+                with self.assertRaisesRegex(ValueError, "QMT_BRIDGE_PG_SCHEMA"):
+                    self.tool.config_from_args(args)
+
+    def test_dotenv_service_names_defaults_and_explicit_precedence(self):
+        from dotenv import dotenv_values
+        with tempfile.TemporaryDirectory() as temp:
+            env_path = Path(temp) / '.env'
+            env_path.write_text('QMT_BRIDGE_PG_DATABASE=dotenv_db\n'
+                                'QMT_BRIDGE_PG_USER=dotenv_user\n'
+                                'QMT_BRIDGE_PG_PASSWORD=dotenv_password\n'
+                                'QMT_BRIDGE_ACCOUNT_ID=dotenv_account\n', encoding='utf-8')
+            args = SimpleNamespace(config=None, account_id=None, command='unknown')
+            with patch.object(self.tool, 'dotenv_values', wraps=dotenv_values), \
+                    patch.dict(self.tool.os.environ, {}, clear=True):
+                result = self.tool.config_from_args(args, env_path)
+                self.assertEqual((result['pg_host'], result['pg_port']), ('127.0.0.1', 5432))
+                self.assertEqual(result['account_id'], 'dotenv_account')
+                self.assertEqual(result['pg_database'], 'dotenv_db')
+                config_path = Path(temp) / 'config.json'
+                config_path.write_text(json.dumps(dict(pg_database='json_db', pg_user='json_user',
+                                                      pg_password='json_password', account_id='json_account')),
+                                       encoding='utf-8')
+                args.config = config_path
+                self.assertEqual(self.tool.config_from_args(args, env_path)['pg_database'], 'dotenv_db')
+                with patch.dict(self.tool.os.environ, {'QMT_BRIDGE_PG_DATABASE': 'process_db',
+                                                       'ORDER_PG_DATABASE': 'legacy_db'}):
+                    result = self.tool.config_from_args(args, env_path)
+                    self.assertEqual(result['pg_database'], 'process_db')
+                args.account_id = 'flag_account'
+                self.assertEqual(self.tool.config_from_args(args, env_path)['account_id'], 'flag_account')
+                env_path.write_text('QMT_BRIDGE_PG_SCHEMA=alternate\n', encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'QMT_BRIDGE_PG_SCHEMA'):
+                    self.tool.config_from_args(args, env_path)
+
+    def test_legacy_environment_remains_fallback_to_service_names(self):
+        args = SimpleNamespace(config=None, account_id=None, command='schema')
+        legacy = {'ORDER_PG_DATABASE': 'legacy_db', 'ORDER_PG_USER': 'legacy_user',
+                  'ORDER_PG_PASSWORD': 'legacy_password'}
+        with patch.dict(self.tool.os.environ, legacy, clear=True):
+            self.assertEqual(self.tool.config_from_args(args)['pg_database'], 'legacy_db')
+            with patch.dict(self.tool.os.environ, {'QMT_BRIDGE_PG_DATABASE': 'service_db'}):
+                self.assertEqual(self.tool.config_from_args(args)['pg_database'], 'service_db')
 
     def test_schema_commands_accept_db_only_config_but_unknown_requires_account(self):
         config = {"pg_host": "localhost", "pg_port": 5432, "pg_database": "order_test",
@@ -345,7 +365,7 @@ class AdminSafetyTests(unittest.TestCase):
 
 class DocumentedContractTests(unittest.TestCase):
     def test_http_order_examples_match_normalizer(self):
-        from order_bridge.contracts import normalize_order, normalize_cancel
+        from service.ipc_bridge.order.contracts import normalize_order, normalize_cancel
         body = (ROOT / "HTTP_ORDER.md").read_text(encoding="utf-8")
         fences = re.findall(r"```(?:json|http)\n(.*?)\n```", body, re.DOTALL)
         examples = []

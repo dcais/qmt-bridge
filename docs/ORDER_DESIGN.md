@@ -1,20 +1,36 @@
 # ORDER 设计与验收边界
 
-Last modified: 2026-09-28
+Last modified: 2026-10-10
 
 对账查询统一使用 `get_trade_detail_data(account_id, "STOCK", kind)`，每轮依次查询 `task`、`order`、`deal`，不再调用 `get_history_trade_detail_data`。三份当日快照按订单独立判定覆盖：当日提交且没有已知旧事实的订单可完成核对；尚未结案的历史订单、委托或成交日期缺失的订单保留同步缺口，不自动重发。已完整对账结案的历史订单在正常重启时保持结案。任务回报可能没有交易日，以持久提交时间为界。查询过程跨上海零点时不确认完整；查询完成后的数据库分页使用同一份快照日期。当前查询成功不代表漏采的历史已补齐。
 
 ## 责任与部署
 
-`order_bridge/*.py` 是 UTF-8 开发源码。`python tools/build_order_strategy.py` 按 common、contracts、state、repository、qmt、async_log、background、runtime、http 顺序生成 `strategies/http_order.py`，交给 QMT 的是单份 GBK 文件。`--check` 仅检查是否与源码一致，忽略生成时间。策略不依赖运行时可导入 `order_bridge` 包，但 QMT Python 环境需要 PostgreSQL 驱动。`tools/install_order_dependencies.py` 默认把锁定的 wheel 装到 `%USERPROFILE%\qmt-bridge\vendor`，支持 `--wheel-dir` 离线安装与 `--python36` 目标兼容选择；不修改系统 site-packages。
+新增 IPC 方案的 UTF-8 源码在 `service/ipc_bridge/order`。外部进程通过
+`python -m service.ipc_bridge` 提供统一 `127.0.0.1:8888` HTTP 服务、PostgreSQL
+持久化、执行权、恢复、对账和文件日志。`python tools/build_ipc_strategies.py`
+生成 `strategies/ipc_feed.py` 与 `strategies/ipc_order.py`；`--check` 核对产物与源码。
+QMT 部署文件为 Python 3.6 兼容的 GBK 单文件，安全模块内嵌，不读取应用源码、
+不监听 HTTP、不连接数据库、不写文件日志；QMT 仅做非阻塞 named pipe IPC、
+定时原生调用、回报快照和 console 输出。外部依赖使用 `requirements-service.txt`，
+IPC 策略无需 PostgreSQL 驱动。原 HTTP 方案继续保留在 `order_bridge` 与
+`strategies/http_*.py`，使用原构建器和依赖清单，部署见 `../HTTP_ORDER.md`。
+`tests/fixtures/legacy_http_*.py` 仅作为 IPC 兼容性测试基线。
 
-配置通过 `pg_database` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。只维护一份当前结构，不设常驻历史升级框架。`tools/order_admin.py schema init` 仅初始化全新或兼容版本 3 的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
+外部 `.env` 通过 `QMT_BRIDGE_PG_DATABASE` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。只维护一份当前结构，不设常驻历史升级框架。`tools/order_admin.py schema init` 仅初始化全新或兼容版本 3 的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
 
 后台启动先检查既有关键表、字段、生成表达式、索引及当前结构版本，再按配置的账户 ID 幂等插入缺失的 `account_runtime` 行；已有行的 `event_seq`、执行主机、代次和创建时间保持原值。当前结构版本为 3；版本 2 不能由 `schema init` 或启动自动升级，不兼容版本在初始化 DDL 前即被拒绝。运行时只读写业务状态，不执行 DDL。固定 schema 和按账户动态补行互不冲突。
 
 已停写的版本 2 库先由 `tools/order_storage_backfill.py` 只读预检，另行完成 `pg_dump` 备份，再显式迁移。默认入口只读；提供 `--apply` 和现有备份文件的 `--backup` 后，在一次事务中补齐内部 UUID、时间与查询列并切换版本，提交前失败整体回滚。保留可证明的首次时间，无法证明的旧记录统一使用该库的 `migration_at`；当前订单文档和关系投影同步，历史事件快照与原始观察不改。多个业务库逐库备份、迁移和验收；本文不表示业务库已实际迁移。命令及配置见 `HTTP_ORDER.md`。
 
-QMT 面板在启动时读取并冻结 `submit_batch_size=10`、`cancel_batch_size=10`、`reconcile_batch_size=100`、`schedule_budget_ms=50`、`reconcile_interval_seconds=30`；小写优先，兼容大写，非法值启动失败。提交上限按业务订单计，篮子算一笔；撤单上限按实际 QMT 任务/子委托动作计；对账上限按进入该批的业务订单计；预算从 `process_http_requests` 入口覆盖整个回调。数量只是上限，剩余工作跨 tick 继续；已开始的同步 QMT 调用不能强制中断。
+外部 `.env` 冻结 `QMT_BRIDGE_SUBMIT_BATCH_SIZE=10`、
+`QMT_BRIDGE_CANCEL_BATCH_SIZE=10`、`QMT_BRIDGE_RECONCILE_BATCH_SIZE=100`、
+`QMT_BRIDGE_SCHEDULE_BUDGET_MS=50`、`QMT_BRIDGE_RECONCILE_INTERVAL_SECONDS=30`。
+QMT 面板仅配置与外部一致的 `bridge_id`、`account_id` 及 QMT 调度参数
+`schedule_interval_ms=10`、`schedule_budget_ms=50`。外部环境变量覆盖 `.env`，
+PG 凭据只在外部环境，HTTP 端口只由 `QMT_BRIDGE_PORT` 指定。
+提交上限按业务订单计，篮子算一笔；撤单上限按原生动作计；对账上限按业务订单计。
+数量与调度预算只限制下一项是否开始，已开始的同步 QMT 调用不能强制中断。
 
 ## 合同与 QMT 映射
 
@@ -62,7 +78,7 @@ flowchart TD
 2. QMT 调用已开始、尚无任务/委托号：保留取消意图；获得标识或对账后再处理，不盲目重下原单。
 3. 已有委托但成交与撤单交错：只对未成交余量发撤单；继续吸收成交和撤单回报，展示已成交、剩余和各子委托结果。全部成交时取消可结束为无余量可撤，原订单仍是已成交。
 
-HTTP 线程负责参数校验、持久受理、幂等和订单数据库查询，允许等待自己的事务；只有事务提交确认后才返回 202。数据库后台线程读取候选、认领、保存调用结果、归并回报并执行恢复。执行权后台线程用专用连接持有 PostgreSQL advisory lock，定期核验并发放短期授权；HTTP/QMT 线程不共享该连接。QMT 调度线程仅执行下单、撤单、交易查询、SMART 参数、篮子操作和原生对象快照，不执行 SQL、等待数据库结果或持有跨 I/O 的共享锁。线程间传递有界普通数据队列；交易前预留结果缓冲容量，未落库结果保留，数据库故障暂停新调用。回报溢出记录缺口，随后按时间范围补查。日志后台线程按上海时区异步写 console 和每日文件；满队列记录丢弃数，不让 QMT 线程同步补写。
+外部 HTTP 线程负责参数校验、持久受理、幂等和订单数据库查询，允许等待自己的事务；只有事务提交确认后才返回 202。数据库后台线程读取候选、认领、保存调用结果、归并回报并执行恢复。执行权后台线程用专用连接持有 PostgreSQL advisory lock，定期核验并发放短期授权；HTTP/QMT 线程不共享该连接。QMT 调度线程仅执行下单、撤单、交易查询、SMART 参数、篮子操作和原生对象快照，不执行 SQL、等待数据库结果或持有跨 I/O 的共享锁。外部线程间使用有界普通数据队列，QMT 与外部之间通过 IPC 帧传递 JSON 快照；交易前预留结果缓冲容量，未落库结果保留，数据库故障暂停新调用。回报溢出记录缺口，随后按时间范围补查。文件日志只由外部后台线程按上海时区写入；QMT 诊断只输出 console。日志丢弃不通过 QMT 同步写盘补偿。
 
 QMT 侧检查停止标志、实例代次及短期授权。授权过期、失权或数据库异常时暂停交易，不无限复用缓存；PG 与 QMT 不构成原子提交。重启先扫描未执行命令、取消意图及回报缺口；崩溃于 `SUBMITTING` 的订单先与 QMT 记录核对，不能盲目重放。执行器同一数据库/账户只能有一个活跃实例。撤单优先，但提交、对账和旧查询通过跨 tick 轮转获得服务机会；`WAITING_QMT_ID` 不占据可执行撤单候选首页，大篮子的撤单动作按配额拆开。
 
@@ -76,7 +92,7 @@ QMT 侧检查停止标志、实例代次及短期授权。授权过期、失权�
 
 账户对账首轮立即执行；后续每轮结束后以单调时钟等待 `reconcile_interval_seconds`，失败同样等待，且不与 `last_reconciled_at` 的成功时间绑定。该间隔同时用于逐单选中和归并后的持久 `reconcile_due_at`。对账等待不阻塞命令派发或回报归并，轮次仍不重叠。QMT 查询/回调失败记录异常类型、正文和有界堆栈；只读取 traceback 元数据，不在 QMT 线程查源码文件或局部变量。查询失败不伪造成空结果，也不写成成功事实。
 
-后台初始化、账户补行、执行权取得和恢复期间，`lifecycle` 为 `STARTING` 或 `RECOVERING`，不接受新订单；未配置 PG 仍保留旧查询模式。运行中 `/health` 缓存采样时间、后台状态、`pending_count`、`unknown_order_count`、队列积压/溢出、最近完整对账、tick/QMT 耗时及授权剩余时间，HTTP 层附 `schedule_settings`、`scheduler`、`logging`。对账诊断另区分最近尝试、最近结束、下次轮次时间和最近查询异常摘要；失败不更新成功时间，HTTP 不返回堆栈。`accepting_orders` 需恢复完成、数据库和短期授权有效且调度存活。`stop` 先关闭受理/派发并取消定时任务，QMT 回调只发停止信号；后台等待在途工作收尾后释放连接、本机锁和日志资源，完成前维持 `STOPPING`。停止 bridge 不自动撤销 QMT 中的订单或算法任务。
+后台初始化、账户补行、执行权取得和恢复期间，`lifecycle` 为 `STARTING` 或 `RECOVERING`，不接受新订单；未配置 PG 仍保留旧查询模式。运行中 `/health` 缓存采样时间、后台状态、`pending_count`、`unknown_order_count`、队列积压/溢出、最近完整对账、tick/QMT 耗时及授权剩余时间，HTTP 层附 `schedule_settings`、`logging`、`feed` / `order` IPC 状态及 `bridge` 实例状态。对账诊断另区分最近尝试、最近结束、下次轮次时间和最近查询异常摘要；失败不更新成功时间，HTTP 不返回堆栈。`accepting_orders` 需恢复完成、数据库和短期授权有效且调度存活。外部停止先关闭受理与派发，后台等待在途工作收尾后释放数据库连接、执行权和外部日志资源。QMT `stop` 取消定时任务并关闭 IPC，不等待外部数据库。停止 bridge 不自动撤销 QMT 中的订单或算法任务。
 
 `tools/order_admin.py unknown` 是离线管理入口，绝不直接调用 QMT。`list/inspect` 读取持久记录与同账户候选观察；`reconcile` 仅写入 `reconcile_requested` 供调度器查询。`resolve` 要求 `--expected-version`、理由和证据文件，事务内校验版本，并保存操作者、证据内容/hash、前后状态。`observed` 只能从已采集的原始 QMT 观察记录中选择；事务内核对账户、证券、方向、remark、任务/委托标识及是否已关联其他订单。观察原文不修改；缺 remark 时必须有明确指向订单和观察 ID 的人工归属凭据。`not-submitted` 要有能证明 QMT 调用没有发生的正面证据及明确声明；查询无记录、超时、回调缺失均不足以证明。人工处置不把旧订单重新变为 `QUEUED`。证据不足时继续保持 `UNKNOWN`。
 
@@ -84,6 +100,9 @@ QMT 侧检查停止标志、实例代次及短期授权。授权过期、失权�
 
 原生对象快照在读取属性前排除已知不可转换的内部字段 `m_xtTag`，其他字段转换失败仍阻断该快照，不能用部分数据完成对账。错误诊断保存有界可读值及字段错误，首次成功排除内部属性写一次警告；诊断和业务事实分离，原生对象不传给后台日志线程。
 
-主动 QMT 调用统一经过 `qmt_invoke`，INFO 记录调用前、原始返回后或异常，并以 `qmt_call_id` 关联。参数为有界普通值快照；返回仅记录标量值或集合条数，不为日志遍历原生属性。执行器将持久化尝试 ID、业务订单和撤单 ID 附加到该次调用，离开指令时恢复上下文，避免串单。日志故障不改变返回值、异常或引发重发；账户绑定、定时器及旧查询也采用同一入口。
+交易 IPC 请求带实例与短期执行权，QMT 原生调用只在 schedule 回调执行。
+外部持久化尝试、业务订单、撤单 ID 与 IPC 请求关联；结果不明不重发。
+回报仅在外部持久化事务成功后确认，连接重建、回报缓存溢出或序列缺口需恢复对账。
+日志只接收有界普通值，不能为日志读取原生属性或把日志异常视作券商拒单。
 
 自动测试覆盖老查询兼容、合同参数、持久幂等、断连/超时、提交崩溃恢复、三类取消竞态、部分成交、`UNKNOWN` 单单冻结及三路线单票/篮子的 QMT 模拟函数调用。另需隔离 PostgreSQL 集成测试，验证 schema 初始化、事务、重启与并发；不得使用 TradeNest 数据库。最后在模拟盘逐条检验 DIRECT/SLICED/SMART 的单票与篮子路径，包括 remark、父任务、子委托、成交和撤单关联。代码测试通过不代表完成 QMT 实盘或模拟盘交易验收。

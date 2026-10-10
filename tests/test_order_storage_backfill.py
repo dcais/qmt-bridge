@@ -8,7 +8,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from order_bridge.common import fingerprint, json_text
+from service.ipc_bridge.order.common import fingerprint, json_text
 from tools import order_storage_backfill as migration
 from tools.order_schema import DEFAULT_SCHEMA, DEFAULT_SQL_PATH, sql_statements
 

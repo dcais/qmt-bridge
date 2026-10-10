@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from order_bridge.common import qmt_invoke
+from service.ipc_bridge.order.common import qmt_invoke
 
 
 class QmtInvokeTests(unittest.TestCase):

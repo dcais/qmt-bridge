@@ -13,11 +13,11 @@ import datetime as dt
 from pathlib import Path
 from unittest.mock import patch
 
-from order_bridge.common import OrderError
-from order_bridge.contracts import capabilities
-from order_bridge.repository import PostgresRepository
+from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.order.contracts import capabilities
+from service.ipc_bridge.order.repository import PostgresRepository
 from tools.order_schema import initialize_schema
-from order_bridge.runtime import OrderRuntime
+from service.ipc_bridge.order.runtime import OrderRuntime
 
 
 class _LocalLock(object):
@@ -425,7 +425,7 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         qmt = _FakeQmt()
         restarted = self._new_runtime(qmt)
         expired_clock = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)
-        from order_bridge import runtime as runtime_module
+        from service.ipc_bridge.order import runtime as runtime_module
         with patch.object(runtime_module, "utc_now", return_value=expired_clock):
             restarted.initialize()
             self._until_order("single-one", lambda row: row["submission_status"] == "EXPIRED", restarted)
@@ -585,8 +585,8 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(qmt.side_effects("cancel_task"), [])
 
     def test_real_http_routes_use_durable_runtime(self):
-        # 使用实际部署的 GBK 单文件，发现打包后导入别名、顶层名称冲突。
-        strategy = Path(__file__).resolve().parents[1] / "strategies" / "http_order.py"
+        # 冻结的旧 GBK 单文件仅验证兼容性，不代表当前 IPC 部署产物。
+        strategy = Path(__file__).resolve().parent / "fixtures" / "legacy_http_order.py"
         spec = importlib.util.spec_from_file_location("qmt_order_generated_runtime_test", strategy)
         http_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(http_module)

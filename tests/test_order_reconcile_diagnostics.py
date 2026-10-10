@@ -4,9 +4,9 @@ import datetime as dt
 import unittest
 from unittest.mock import Mock, patch
 
-from order_bridge.common import parse_timestamp
-from order_bridge.background import _background_current_day_covered
-from order_bridge.runtime import OrderRuntime
+from service.ipc_bridge.order.common import parse_timestamp
+from service.ipc_bridge.order.background import _background_current_day_covered
+from service.ipc_bridge.order.runtime import OrderRuntime
 
 
 class _Clock(object):
@@ -34,10 +34,10 @@ class _Qmt(object):
 class ReconcileDiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self.now = parse_timestamp('2026-09-28T02:00:00+00:00')
-        clock_patch = patch('order_bridge.background.utc_now', return_value=self.now)
+        clock_patch = patch('service.ipc_bridge.order.background.utc_now', return_value=self.now)
         clock_patch.start()
         self.addCleanup(clock_patch.stop)
-        stamp_patch = patch('order_bridge.background.iso_datetime', side_effect=lambda value=None:
+        stamp_patch = patch('service.ipc_bridge.order.background.iso_datetime', side_effect=lambda value=None:
                             (value or self.now).isoformat())
         stamp_patch.start()
         self.addCleanup(stamp_patch.stop)

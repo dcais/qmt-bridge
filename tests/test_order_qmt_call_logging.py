@@ -3,8 +3,8 @@
 import copy
 import unittest
 
-from order_bridge.contracts import normalize_order
-from order_bridge.qmt import QmtAdapter
+from service.ipc_bridge.order.contracts import normalize_order
+from service.ipc_bridge.order.qmt import QmtAdapter
 
 
 class QmtCallLoggingTests(unittest.TestCase):

@@ -7,8 +7,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from order_bridge.runtime import OrderRuntime
-from order_bridge.common import OrderError, iso_datetime, utc_now
+from service.ipc_bridge.order.runtime import OrderRuntime
+from service.ipc_bridge.order.common import OrderError, iso_datetime, utc_now
 
 
 class NonblockingRuntimeTests(unittest.TestCase):
@@ -303,7 +303,7 @@ class NonblockingRuntimeTests(unittest.TestCase):
         def claim(order_id, action, authority):
             return True, {'order_id': order_id, 'attempts': [dict(action, attempt_id='attempt' + order_id)]}
         runtime.repo.claim_cancel.side_effect = claim
-        with patch('order_bridge.background.pending_cancellations', return_value=[{'kind': 'CANCEL_ORDER', 'target_id': 'target'}]):
+        with patch('service.ipc_bridge.order.background.pending_cancellations', return_value=[{'kind': 'CANCEL_ORDER', 'target_id': 'target'}]):
             for unused in range(7):
                 background._dispatch()
         self.assertEqual(runtime.repo.claim_cancel.call_count, 65)

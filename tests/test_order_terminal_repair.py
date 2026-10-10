@@ -8,8 +8,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from order_bridge.common import OrderError, new_order_document
-from order_bridge.state import recompute_order
+from service.ipc_bridge.order.common import OrderError, new_order_document
+from service.ipc_bridge.order.state import recompute_order
 
 
 ROOT = Path(__file__).resolve().parents[1]

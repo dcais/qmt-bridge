@@ -3,3 +3,10 @@
 __pycache__/
 *.py[cod]
 .idea/
+.venv/
+.env
+.env.*
+!.env.example
+!.env.*.example
+var/
+.pytest_cache/

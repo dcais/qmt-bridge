@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from order_bridge.common import fingerprint, iso_datetime, json_text, parse_timestamp  # noqa: E402
-from order_bridge.repository import repo_schema  # noqa: E402
+from service.ipc_bridge.order.common import fingerprint, iso_datetime, json_text, parse_timestamp  # noqa: E402
+from service.ipc_bridge.order.repository import repo_schema  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
 from tools.order_schema import DEFAULT_SCHEMA, DEFAULT_SQL_PATH, sql_statements  # noqa: E402
 
@@ -367,7 +367,7 @@ def _verify(cur, schema, before, migration_at, business_rows):
             cur.execute("SELECT count(*) FROM " + _table(schema, table) + " WHERE created_at IS NULL")
             if cur.fetchone()[0]:
                 raise MigrationError("null created_at in " + table)
-    from order_bridge.storage_schema import repo_check_storage_schema
+    from service.ipc_bridge.order.storage_schema import repo_check_storage_schema
     repo_check_storage_schema(cur, schema, expected_version=3)
     return after
 
@@ -387,7 +387,7 @@ def run(config, schema_name="qmt_order", apply=False, backup=None):
                       "before_version": before["version"], "counts": before["counts"],
                       "time_sources": before["sources"], "committed": False}
             if before["version"] == 3:
-                from order_bridge.storage_schema import repo_check_storage_schema
+                from service.ipc_bridge.order.storage_schema import repo_check_storage_schema
                 repo_check_storage_schema(cur, schema, expected_version=3)
                 report["result"] = "already_v3"
             else:

@@ -4,10 +4,10 @@ import copy
 import json
 import unittest
 
-from order_bridge.common import OrderError
-from order_bridge.contracts import normalize_order, capabilities
-from order_bridge.qmt import QmtAdapter
-from order_bridge.state import observation_identifiers
+from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.order.contracts import normalize_order, capabilities
+from service.ipc_bridge.order.qmt import QmtAdapter
+from service.ipc_bridge.order.state import observation_identifiers
 
 
 class QmtAdapterTests(unittest.TestCase):

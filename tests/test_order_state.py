@@ -1,8 +1,8 @@
 import copy
 import unittest
 import uuid
-from order_bridge.common import OrderError, new_order_document, new_record_metadata, public_order
-from order_bridge.state import (apply_observation, apply_cancel_request, cancel_response,
+from service.ipc_bridge.order.common import OrderError, new_order_document, new_record_metadata, public_order
+from service.ipc_bridge.order.state import (apply_observation, apply_cancel_request, cancel_response,
                                 pending_cancellations, mark_reconciled, recompute_order,
                                 is_order_active, observation_identifiers,
                                 observation_identity_valid, reconcile_pending)

@@ -1,8 +1,8 @@
 import copy
 import unittest
 
-from order_bridge.common import new_order_document
-from order_bridge.state import apply_observation, mark_reconciled, recompute_order
+from service.ipc_bridge.order.common import new_order_document
+from service.ipc_bridge.order.state import apply_observation, mark_reconciled, recompute_order
 
 
 ACCOUNT = 'test-account'

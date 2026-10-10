@@ -9,44 +9,54 @@ import json
 import os
 from pathlib import Path
 import sys
+from dotenv import dotenv_values
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from order_bridge.common import OrderError, iso_datetime, public_order  # noqa: E402
-from order_bridge.repository import PostgresRepository  # noqa: E402
-from order_bridge.state import recompute_order  # noqa: E402
+from service.ipc_bridge.order.common import OrderError, iso_datetime, public_order  # noqa: E402
+from service.ipc_bridge.order.repository import PostgresRepository  # noqa: E402
+from service.ipc_bridge.order.state import recompute_order  # noqa: E402
 from tools.order_schema import initialize_schema  # noqa: E402
 
 
-ENV_CONFIG = {"pg_host": "ORDER_PG_HOST", "pg_port": "ORDER_PG_PORT",
-              "pg_database": "ORDER_PG_DATABASE", "pg_user": "ORDER_PG_USER",
-              "pg_password": "ORDER_PG_PASSWORD", "account_id": "ORDER_ACCOUNT_ID"}
+ENV_CONFIG = {"pg_host": "PG_HOST", "pg_port": "PG_PORT",
+              "pg_database": "PG_DATABASE", "pg_user": "PG_USER",
+              "pg_password": "PG_PASSWORD", "account_id": "ACCOUNT_ID"}
 
 
-def config_from_args(args):
-    config = {}
+def config_from_args(args, dotenv_path=".env"):
+    """JSON < dotenv/process environment < --account-id; QMT_BRIDGE wins legacy names."""
+    config = {"pg_host": "127.0.0.1", "pg_port": 5432}
     if args.config:
-        config = json.loads(args.config.read_text(encoding="utf-8-sig"))
-        if not isinstance(config, dict):
+        explicit = json.loads(args.config.read_text(encoding="utf-8-sig"))
+        if not isinstance(explicit, dict):
             raise ValueError("config must be a JSON object")
-    if "pg_schema" in config or "PG_SCHEMA" in config or "ORDER_PG_SCHEMA" in os.environ:
-        raise ValueError("remove pg_schema / PG_SCHEMA / ORDER_PG_SCHEMA; ORDER uses fixed schema qmt_order, "
+        config.update(explicit)
+    environment = {**dotenv_values(dotenv_path), **os.environ}
+    forbidden = ("pg_schema", "PG_SCHEMA", "ORDER_PG_SCHEMA", "QMT_BRIDGE_PG_SCHEMA")
+    if any(key in config or key in environment for key in forbidden):
+        raise ValueError("remove pg_schema / PG_SCHEMA / ORDER_PG_SCHEMA / QMT_BRIDGE_PG_SCHEMA; ORDER uses fixed schema qmt_order, "
                          "select separate pg_database values for simulated and live accounts")
-    for key, env_name in ENV_CONFIG.items():
-        if os.environ.get(env_name) is not None:
-            config[key] = os.environ[env_name]
+    for key, suffix in ENV_CONFIG.items():
+        for prefix in ("ORDER_", "QMT_BRIDGE_"):
+            value = environment.get(prefix + suffix)
+            if value is not None:
+                config[key] = value
     if args.account_id:
         config["account_id"] = args.account_id
     required = ("pg_host", "pg_port", "pg_database", "pg_user", "pg_password")
     if getattr(args, "command", None) != "schema":
         required += ("account_id",)
-    missing = [key for key in required if key not in config or str(config[key]) == ""]
+    missing = [key for key in required if config.get(key) is None or str(config[key]).strip() == ""]
     if missing:
         raise ValueError("missing config keys: " + ", ".join(missing))
-    config["pg_port"] = int(config["pg_port"])
+    raw_port = config['pg_port']
+    if isinstance(raw_port, bool) or isinstance(raw_port, float) and not raw_port.is_integer():
+        raise ValueError("pg_port must be 1..65535")
+    config["pg_port"] = int(raw_port)
     if not 1 <= config["pg_port"] <= 65535:
         raise ValueError("pg_port must be 1..65535")
     config["pg_schema"] = "qmt_order"  # Internal repository setting; not a CLI option.

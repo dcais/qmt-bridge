@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from order_bridge.async_log import AsyncOrderLogger
-from order_bridge.common import new_order_document
-from order_bridge.runtime import OrderRuntime
-from order_bridge.state import apply_observation
+from service.ipc_bridge.order.async_log import AsyncOrderLogger
+from service.ipc_bridge.order.common import new_order_document
+from service.ipc_bridge.order.runtime import OrderRuntime
+from service.ipc_bridge.order.state import apply_observation
 
 
 class COrderDetail(object):

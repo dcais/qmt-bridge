@@ -7,10 +7,10 @@ import unittest
 import uuid
 from unittest.mock import Mock, patch
 
-from order_bridge.common import OrderError, new_order_document
-from order_bridge.evidence import evidence_fee, evidence_sample
-from order_bridge.repository import PostgresRepository
-from order_bridge.runtime import OrderRuntime
+from service.ipc_bridge.order.common import OrderError, new_order_document
+from service.ipc_bridge.order.evidence import evidence_fee, evidence_sample
+from service.ipc_bridge.order.repository import PostgresRepository
+from service.ipc_bridge.order.runtime import OrderRuntime
 from tests import test_http_order as http_tests
 Record = http_tests.Record
 
@@ -178,7 +178,7 @@ class JournalEvidenceTests(unittest.TestCase):
         first = self.query(limit=1)
         token = first['next_cursor']
         self.assert_code('EVIDENCE_CURSOR_INVALID', lambda: self.query(cursor=token[:-1] + ('a' if token[-1] != 'a' else 'b')))
-        with patch('order_bridge.evidence.time.time', return_value=time.time() + 901):
+        with patch('service.ipc_bridge.order.evidence.time.time', return_value=time.time() + 901):
             self.assert_code('EVIDENCE_CURSOR_INVALID', lambda: self.query(cursor=token))
         self.assert_code('EVIDENCE_CURSOR_INVALID', lambda: self.runtime.handle('recovery_evidence_v1', dict(cursor=token), 'GET'))
         self.assert_code('INVALID_PARAMS', lambda: self.query(cursor=token, after=0))

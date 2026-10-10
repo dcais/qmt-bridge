@@ -6,14 +6,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 
-SOURCE = Path(__file__).resolve().parents[1] / "order_bridge" / "http.py"
+# Frozen legacy lifecycle tests; current query contracts also have IPC coverage.
+from test_http_order import load_strategy
 
 
 def load_http():
-    spec = importlib.util.spec_from_file_location("order_bridge.http_logging_test", SOURCE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_strategy()
 
 
 class NativeRow:

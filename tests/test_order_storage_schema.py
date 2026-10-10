@@ -5,9 +5,9 @@ import os
 import unittest
 import uuid
 
-from order_bridge.common import OrderError
-from order_bridge.repository import repo_SCHEMA_VERSION
-from order_bridge.storage_schema import repo_check_storage_schema
+from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.order.repository import repo_SCHEMA_VERSION
+from service.ipc_bridge.order.storage_schema import repo_check_storage_schema
 from tools.order_schema import initialize_schema
 
 

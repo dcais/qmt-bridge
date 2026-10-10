@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import unittest
 
-from order_bridge.common import OrderError, fingerprint
-from order_bridge.contracts import normalize_order, normalize_cancel, capabilities
+from service.ipc_bridge.order.common import OrderError, fingerprint
+from service.ipc_bridge.order.contracts import normalize_order, normalize_cancel, capabilities
 
 
 class OrderContractTests(unittest.TestCase):

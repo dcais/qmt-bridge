@@ -1,5 +1,39 @@
 # ORDER 本地验收记录
 
+## 当前部署与验证入口（2026-10-10）
+
+新增 IPC 方案源码为 `service/ipc_bridge`，外部启动命令为 `python -m service.ipc_bridge`，
+统一根路径端口默认 8888。配置来自仓库根目录 `.env` / `QMT_BRIDGE_*` 环境变量；
+PostgreSQL 驱动、凭据和文件日志只存在外部 Python 进程。
+QMT 部署 `strategies/ipc_feed.py` 与 `strategies/ipc_order.py`，通过
+`tools/build_ipc_strategies.py` 生成并以 `--check` 核对。QMT 只做 IPC、调度、
+原生调用与回报快照，console 输出，不读取应用源文件、不访问数据库、不写日志文件。
+
+```powershell
+python -m pip install -r requirements-service.txt
+python tools/build_ipc_strategies.py --check
+python -m unittest discover -s tests -p "test_ipc_*.py" -v
+```
+
+启动及 schema 准备见 [IPC_ORDER.md](../IPC_ORDER.md)，架构见
+[ORDER_DESIGN.md](ORDER_DESIGN.md)。原 HTTP 策略、源码与构建工具继续保留；`tests/fixtures/legacy_http_*.py`
+是额外的离线合同基线，其通过结果不能替代 IPC 实现的测试或真实 QMT 验收。
+
+## IPC 提交准备验证（2026-10-10）
+
+- Windows / Python 3.14.6，最终提交准备回归：451 passed、71 skipped、197 subtests passed（49.33 秒）。本轮未配置测试数据库，数据库相关用例跳过；不能表述为数据库全量验收。
+- 前一轮隔离 PostgreSQL 16 验证：数据库相关 104 passed、30 subtests；最终 QMT 执行端与新增真实管道/数据库用例 17 passed。原全量首轮有一个迁移期间旧断言失败，最终对应切片通过，保留此区别。临时数据库容器已清理，没有连接现有交易库做测试。
+- 本轮传输目录整理后的聚焦验证：80 passed、19 subtests，包含 Windows 实际命名管道及 QMT 替身执行器。
+- 原 HTTP ORDER 与新增 IPC 两个策略构建一致性检查通过；QMT 编码和 Python 3.6 语法由构建检查验证，本轮没有以实际 Python 3.6 解释器跑完整回归。
+- staging 的 7777 现场只读检查：health、account、沪深300成分股接口均 200；返回 bridge.id=staging，Feed/Order ready，成分股 300 条。该检查发生在传输目录整理前，未执行下单或撤单，后续源码调整未代替用户重启策略。
+- 已知测试警告：Starlette TestClient 的 httpx 弃用提示；旧 backfill test_config 返回 dict。两者不是本轮测试失败。
+
+## 历史验收记录
+
+以下日期、计数、日志路径和 SHA256 是 2026-09 的旧 HTTP 运行时证据，保留原样。
+HTTP 方案仍使用 `order_bridge`、QMT PostgreSQL 驱动和原策略构建命令；IPC 方案使用上方独立部署入口。
+当前 IPC 验证结果须单独记录，不能用这些旧结果声明已完成当前部署或账户验收。
+
 验证日期：2026-09-26，Asia/Shanghai。以下是代码、HTTP 和 PostgreSQL 验收，不是券商模拟盘交易验收。
 
 ## 当前改动：缺委托号回报关联后解除对账缺口
@@ -120,7 +154,7 @@
 
 尚未向真实 QMT 账户提交订单、撤单或创建篮子。没有部署 PostgreSQL 生产配置；未配置 PG 时仍为查询模式。
 
-部署前须安装私有驱动、用 `order_admin.py schema init` 从独立 SQL 文件初始化选定数据库内固定的 qmt_order schema，并填写策略的 `pg_host/pg_port/pg_database/pg_user/pg_password`。`account_id/http_port` 继续使用策略运行参数。
+当前部署前在外部 Python 环境安装 `requirements-service.txt`，对选定隔离数据库执行 `order_admin.py schema init/check`。数据库和端口在外部 `.env` 设置，QMT 只配置一致的桥名、账户和调度参数；QMT 不安装私有 PostgreSQL 驱动。
 
 模拟盘应分别记录 SINGLE/BASKET × DIRECT/SLICED/SMART 六条路径的原始请求、HTTP 响应、数据库记录、QMT 回报和时间，核对关联、成交、撤单及重启恢复。`/capabilities` 的六条路径均保留 `locally_verified=false`，代码测试不会将它改为已验证。
 
