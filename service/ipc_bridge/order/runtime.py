@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""持久命令与 QMT 调度器；Last modified: 2026-09-26。"""
+"""外部持久命令与 IPC 调度器；Last modified: 2026-09-26。"""
 import datetime as dt
 import os
 import queue
@@ -8,9 +8,9 @@ import threading
 import time
 import uuid
 
-from .common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, public_order, qmt_exception_details, utc_now
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, fingerprint, iso_datetime, parse_timestamp, public_order, qmt_exception_details, utc_now
 from .contracts import normalize_order, normalize_cancel, capabilities
-from .qmt import QmtAdapter, qmt_history_capabilities
+from service.ipc_bridge.ipc_protocol.order_queries import qmt_history_capabilities
 from .background import OrderBackground
 from .evidence import EvidenceCursors, evidence_capabilities, evidence_fee
 from .repository import PostgresRepository
@@ -99,8 +99,9 @@ class OrderRuntime:
         self.account_id = account_id
         self.config = pg_config
         self.logger = logger or (lambda *args, **kwargs: None)
-        self.adapter = adapter or QmtAdapter(apis, context, account_id=account_id, account_type="STOCK",
-                                  logger=self.logger)
+        if adapter is None:
+            raise ValueError("OrderRuntime requires an explicit IPC adapter")
+        self.adapter = adapter
         self.repo = repository or (PostgresRepository(pg_config, account_id) if pg_config else None)
         self.local_lock = local_lock or (LocalExecutorLock(pg_config, account_id) if pg_config else None)
         self.clock = clock or time.monotonic

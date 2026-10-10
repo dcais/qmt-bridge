@@ -7,8 +7,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from service.ipc_bridge.order.runtime import OrderRuntime
-from service.ipc_bridge.order.common import OrderError, iso_datetime, utc_now
+from tests.order_runtime_helpers import OrderRuntime
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, iso_datetime, utc_now
 
 
 class NonblockingRuntimeTests(unittest.TestCase):

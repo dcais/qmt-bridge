@@ -7,7 +7,7 @@ import unittest
 import uuid
 
 from service.ipc_bridge.transport.pipe.client import BridgeLink, RemoteError
-from service.ipc_bridge.qmt.executor import QmtRuntime
+from service.ipc_bridge.qmt_runtime.executor import QmtRuntime
 
 
 def wait_for(predicate, timeout=4):

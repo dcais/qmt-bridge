@@ -4,7 +4,7 @@ import queue
 import threading
 from collections import OrderedDict
 
-from .qmt_api import FeedError, normalize_download_history_params, normalize_download_task_id
+from service.ipc_bridge.ipc_protocol.feed_contracts import FeedError, normalize_download_history_params, normalize_download_task_id
 from .requests import FEED_METHODS, normalize_request
 from .tasks import (
     create_download_task, get_download_task_snapshot, mark_download_task_failed,

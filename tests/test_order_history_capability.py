@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from test_http_order import load_strategy
-from service.ipc_bridge.order.qmt import QmtAdapter, qmt_history_capabilities
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter, qmt_history_capabilities
 
 
 class HistoryCapabilityTests(unittest.TestCase):

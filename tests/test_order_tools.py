@@ -34,15 +34,15 @@ class BuildTests(unittest.TestCase):
             text = rendered.decode("gbk")
             self.assertTrue(text.startswith("# -*- coding: gbk -*-"))
             ast.parse(text, feature_version=(3, 6))
-            tree = ast.parse(text)
-            embedded = next(ast.literal_eval(node.value) for node in tree.body
-                            if isinstance(node, ast.Assign) and any(
-                                isinstance(target, ast.Name) and target.id == '_IPC_SOURCES'
-                                for target in node.targets))
-            for name, source in embedded:
-                tool.audit(source, name)
-                self.assertNotIn('.repository', name)
-                self.assertNotIn('.async_log', name)
+            tool.audit(text, role)
+            self.assertNotIn('_IPC_SOURCES', text)
+            self.assertNotIn('exec(', text)
+            self.assertNotIn('ModuleType', text)
+            for name in tool.modules(role):
+                self.assertIn('# ---- ' + name + '.py ----', text)
+                self.assertTrue(name.startswith(('service/ipc_bridge/ipc_protocol/', 'service/ipc_bridge/qmt_runtime/')))
+            self.assertEqual(tool.normalized(text),
+                             tool.normalized(tool.render(role, '2099-01-01 00:00:00').decode('gbk')))
 
     def test_source_audit_rejects_qmt_file_network_and_database_work(self):
         tool = load_tool("build_ipc_strategies")
@@ -114,7 +114,7 @@ class SchemaInstallerTests(unittest.TestCase):
         self.assertFalse(any(".account_runtime" in sql for sql, _ in cursor.statements))
 
     def test_existing_incompatible_version_blocks_all_ddl(self):
-        from service.ipc_bridge.order.common import OrderError
+        from service.ipc_bridge.ipc_protocol.order_common import OrderError
         tool = load_tool("order_schema")
         cursor = self.Cursor(existing_version=1)
         with self.assertRaises(OrderError) as caught:
@@ -154,7 +154,7 @@ class AdminSafetyTests(unittest.TestCase):
         dotenv_patch = patch.object(self.tool, 'dotenv_values', return_value={})
         dotenv_patch.start()
         self.addCleanup(dotenv_patch.stop)
-        from service.ipc_bridge.order.common import new_order_document
+        from service.ipc_bridge.ipc_protocol.order_common import new_order_document
         request = {"client_order_id": "client-1", "account_id": "12345", "order_type": "SINGLE",
                    "sizing_type": "QUANTITY", "symbol": "600000.SH", "side": "BUY", "quantity": 100,
                    "execution": {"type": "DIRECT"}, "price_type": "LIMIT", "limit_price": "10"}

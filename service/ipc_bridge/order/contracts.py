@@ -5,7 +5,7 @@ import math
 import sys
 from decimal import Decimal, InvalidOperation
 
-from .common import OrderError, parse_timestamp
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, parse_timestamp
 
 
 _contracts_symbol = re.compile(r"^[0-9]{6}\.(SH|SZ|BJ)$")

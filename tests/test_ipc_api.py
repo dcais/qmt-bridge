@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from service.ipc_bridge.app import BridgeHost, create_app
 from service.ipc_bridge.config import Config
 from service.ipc_bridge.transport.pipe.client import RemoteError
-from service.ipc_bridge.qmt.executor import QmtRuntime
+from service.ipc_bridge.qmt_runtime.executor import QmtRuntime
 
 
 class FakeHost:

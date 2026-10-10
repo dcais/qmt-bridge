@@ -3,7 +3,7 @@
 import time
 import uuid
 
-from .qmt_api import FeedError
+from service.ipc_bridge.ipc_protocol.feed_contracts import FeedError
 
 MAX_DOWNLOAD_TASKS = 1000
 

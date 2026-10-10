@@ -33,8 +33,10 @@ QMT 参数变化需停止并重启策略；QMT 参数面板不再配置 HTTP 端
 外部服务应使用单 worker，避免重复创建管道实例和执行器。
 
 原 HTTP ORDER 策略和 `order_bridge` 源码继续保留，使用 `tools/build_order_strategy.py` 构建，部署见 `HTTP_ORDER.md`。
-IPC 源模块在 `service/ipc_bridge/order`，构建器只打包
-QMT 所需的安全模块；持久化与 HTTP 模块只运行在外部 Python 环境。
+IPC 原生调用与查询源模块在 `service/ipc_bridge/qmt_runtime/order`，共享纯契约在 `service/ipc_bridge/ipc_protocol`，
+持久化、对账和业务源模块在 `service/ipc_bridge/order`。构建器直接合并 QMT 所需安全源码，
+生成按文件分节的可读 GBK 策略；时间戳仅在内容变更时更新，`--check` 忽略时间戳。
+持久化与 HTTP 模块只运行在外部 Python 环境。
 
 对账每轮只调用 `get_trade_detail_data(account_id, "STOCK", "task"/"order"/"deal")`，不调用历史交易查询函数。`/health` 的 `reconcile_query_scope="CURRENT_DAY"`、`history_query_available=false` 明确当前范围；`last_reconciled_at` 表示最近一轮当日查询成功时间，不证明跨日历史完整。历史缺口不会阻断当天订单完成对账，也不会触发原订单重发；尚未结案或证据不完整的旧单仍可保留 `sync_status=INCOMPLETE` 和 `reconcile_pending=true`。已完整对账结案的订单在正常重启时保持结案。`history_coverage_complete` 对更早创建的待核对订单保守提示缺口，不能单独用它判断当日查询是否失败。`RECONCILE_FINISHED` 日志附查询日期、范围及 `HISTORY_NOT_COVERED` 原因。
 

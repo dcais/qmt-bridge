@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
 
-from service.ipc_bridge.order.common import OrderError, fingerprint
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, fingerprint
 from service.ipc_bridge.order.contracts import normalize_order, normalize_cancel, capabilities
 
 

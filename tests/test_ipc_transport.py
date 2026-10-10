@@ -7,8 +7,8 @@ import time
 import unittest
 import uuid
 
-from service.ipc_bridge.transport.pipe.wire import Framer, ProtocolError, encode_frame
-from service.ipc_bridge.transport.pipe.winpipe import PipeEndpoint, PipeDisconnected, QueueFull
+from service.ipc_bridge.ipc_protocol.wire import Framer, ProtocolError, encode_frame
+from service.ipc_bridge.ipc_protocol.winpipe import PipeEndpoint, PipeDisconnected, QueueFull
 
 
 def _echo_child(name):
@@ -50,7 +50,7 @@ class WireTests(unittest.TestCase):
             encode_frame({"x": "long"}, 2)
 
     def test_python36_inline_source(self):
-        root = Path(__file__).resolve().parents[1] / "service/ipc_bridge/transport/pipe"
+        root = Path(__file__).resolve().parents[1] / "service/ipc_bridge/ipc_protocol"
         wire = (root / "wire.py").read_text(encoding="utf-8")
         pipe = (root / "winpipe.py").read_text(encoding="utf-8")
         pipe = "\n".join(line for line in pipe.splitlines() if not line.startswith("from .wire import "))

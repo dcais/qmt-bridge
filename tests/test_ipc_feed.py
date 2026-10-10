@@ -5,10 +5,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from service.ipc_bridge.feed import FEED_METHODS, FeedService, parse_query_params
-from service.ipc_bridge.feed import qmt_api, tasks
+from service.ipc_bridge.qmt_runtime.feed import api as qmt_api
+from service.ipc_bridge.feed import tasks
 
 
 # Reuse the existing QMT-shaped fixtures without starting the legacy HTTP server.
@@ -53,7 +54,8 @@ class FeedExtractionContractTest(unittest.TestCase):
                 )
 
     def test_sector_global_is_resolved_at_call_time(self):
-        with patch.object(qmt_api, "get_sector_list", return_value=[["行业"], ["node"]], create=True) as native:
+        native = Mock(return_value=[["行业"], ["node"]])
+        with patch.dict(qmt_api._FEED_APIS, {"get_sector_list": native}):
             self.assertEqual([["行业"], ["node"]], qmt_api.dispatch_request(None, {"method": "get_sector_list", "params": {}}))
             native.assert_called_once_with("")
 
@@ -110,7 +112,8 @@ class FeedExtractionContractTest(unittest.TestCase):
 
     def test_native_download_preserves_omitted_and_explicit_null_incrementally(self):
         params = {"stockcode": "600000.sh", "period": "1d"}
-        with patch.object(qmt_api, "download_history_data", create=True) as native:
+        native = Mock()
+        with patch.dict(qmt_api._FEED_APIS, {"download_history_data": native}):
             qmt_api.dispatch_request(None, {"method": "download_history_data", "params": params})
             native.assert_called_once_with("600000.sh", "1d", "", "")
             native.reset_mock()
@@ -122,7 +125,8 @@ class FeedExtractionContractTest(unittest.TestCase):
         tree = ast.parse(source, feature_version=(3, 6))
         imports = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
         self.assertEqual(["datetime", "math"], imports)
-        self.assertFalse(any(isinstance(node, ast.ImportFrom) for node in ast.walk(tree)))
+        from tools.build_ipc_strategies import audit
+        audit(source, str(qmt_api.__file__), project_imports=True)
         forbidden = {"open", "eval", "exec", "compile", "__import__"}
         self.assertFalse(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden for node in ast.walk(tree)))
 

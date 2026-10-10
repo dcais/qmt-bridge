@@ -1,28 +1,3 @@
-# -*- coding: utf-8 -*-
-# QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
-# 参数名       默认值           用途
-# account_id   "66027616"       绑定的股票账户；建议使用字符串，保留账户号前导零。
-# http_port    8888             HTTP 监听端口，整数 1..65535；模拟盘和实盘可用不同端口。
-# submit_batch_size    10       每轮实际派发业务订单上限；篮子算一笔。
-# cancel_batch_size    10       每轮实际 QMT 撤单动作上限；任务和子委托分别计数。
-# reconcile_batch_size 100      每批对账业务订单数；同一轮快照复用，剩余批次跨 tick 推进。
-# reconcile_interval_seconds 30  对账间隔秒数；每轮成功或失败后等待此间隔，也用于逐单 due_at。
-# schedule_budget_ms  50        整个调度回调的毫秒预算；已开始的同步 QMT 调用不可强制中断。
-# 以上批量、预算和间隔参数均为正整数，支持面板整数浮点值；与账户、端口一起在启动时冻结。
-# pg_host      "127.0.0.1"      PostgreSQL 服务器地址。
-# pg_port      5432             PostgreSQL 端口，整数 1..65535。
-# pg_database  未配置           数据库名称；启用交易必填，模拟盘/实盘分别连接不同数据库。
-# pg_user      未配置           数据库用户名；启用交易接口时必填。
-# pg_password  未配置           数据库密码；启用交易接口时必填，不打印或通过 HTTP 返回。
-# 上述参数均优先读取小写名称，也兼容同名全大写参数；小写值非法时不回退。
-# pg_database、pg_user、pg_password 全部未配置或为空时，仅开放查询模式；启用交易须完整填写。
-# 每个数据库内部固定使用 qmt_order schema，不接受 pg_schema 运行参数。
-# DDL 统一存放在 sql/order_init.sql；仅维护当前初始化结构，不提供历史版本升级。
-# 策略启动检查关键表、字段和版本，再按 account_id 自动补齐账户运行记录；已有记录不重置。
-# 不自动建表或升级，无需在部署前手工注册账户。
-# 不同数据库隔离订单与幂等记录，http_port 不参与幂等身份。
-# HTTP_HOST 固定为 127.0.0.1，交易账户类型固定为 STOCK；日志和队列设置是代码常量。
-#
 """订单共用类型及调用诊断；导入时不连接数据库或调用 QMT。Last modified: 2026-09-28。"""
 import copy
 import datetime as dt

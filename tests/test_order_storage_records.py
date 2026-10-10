@@ -5,7 +5,7 @@ import os
 import unittest
 import uuid
 
-from service.ipc_bridge.order.common import OrderError, new_record_metadata
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, new_record_metadata
 from service.ipc_bridge.order.repository import PostgresRepository
 from tests.test_order_repository import repo_test_config
 from tools.order_schema import initialize_schema

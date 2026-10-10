@@ -9,10 +9,10 @@ import uuid
 from unittest.mock import patch
 
 from service.ipc_bridge.transport.pipe.client import BridgeLink
-from service.ipc_bridge.order.qmt import QmtAdapter
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter
 from service.ipc_bridge.order.repository import PostgresRepository
 from service.ipc_bridge.order.service import OrderService
-from service.ipc_bridge.qmt.entrypoint import _submit_document
+from service.ipc_bridge.qmt_runtime.order.entrypoint import _submit_document
 from tests.test_ipc_link import RuntimeThread, wait_for
 from tests.test_order_repository import repo_test_config
 from tests.test_order_runtime import _FakeQmt, _LocalLock

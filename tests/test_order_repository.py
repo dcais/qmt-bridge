@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from service.ipc_bridge.order.common import OrderError, iso_datetime, json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, iso_datetime, json_text, new_order_document, new_record_metadata, parse_timestamp, utc_now
 from service.ipc_bridge.order.repository import PostgresRepository
 from tools.order_schema import initialize_schema
 

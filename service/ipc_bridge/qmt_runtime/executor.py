@@ -7,7 +7,7 @@ import math
 import uuid
 import threading
 
-from ..transport.pipe.winpipe import PipeEndpoint
+from service.ipc_bridge.ipc_protocol.winpipe import PipeEndpoint
 
 
 def console_log(level, message, **fields):

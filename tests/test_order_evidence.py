@@ -7,10 +7,10 @@ import unittest
 import uuid
 from unittest.mock import Mock, patch
 
-from service.ipc_bridge.order.common import OrderError, new_order_document
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, new_order_document
 from service.ipc_bridge.order.evidence import evidence_fee, evidence_sample
 from service.ipc_bridge.order.repository import PostgresRepository
-from service.ipc_bridge.order.runtime import OrderRuntime
+from tests.order_runtime_helpers import OrderRuntime
 from tests import test_http_order as http_tests
 Record = http_tests.Record
 

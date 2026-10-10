@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
 from decimal import Decimal, InvalidOperation
-from .common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
 
 state_ORDER_STATUS = {48: 'WORKING', 49: 'WORKING', 50: 'WORKING',

@@ -3,8 +3,8 @@
 import unittest
 from unittest.mock import Mock
 
-from service.ipc_bridge.order.runtime import OrderRuntime
-from service.ipc_bridge.order.common import iso_datetime
+from tests.order_runtime_helpers import OrderRuntime
+from service.ipc_bridge.ipc_protocol.order_common import iso_datetime
 
 
 class Clock(object):

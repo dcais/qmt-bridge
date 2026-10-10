@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import Mock
 
 from service.ipc_bridge.order.async_log import AsyncOrderLogger
-from service.ipc_bridge.order.common import new_order_document
-from service.ipc_bridge.order.runtime import OrderRuntime
+from service.ipc_bridge.ipc_protocol.order_common import new_order_document
+from tests.order_runtime_helpers import OrderRuntime
 from service.ipc_bridge.order.state import apply_observation
 
 

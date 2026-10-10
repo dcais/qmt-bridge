@@ -4,9 +4,9 @@ import datetime as dt
 import unittest
 from unittest.mock import Mock, patch
 
-from service.ipc_bridge.order.common import parse_timestamp
+from service.ipc_bridge.ipc_protocol.order_common import parse_timestamp
 from service.ipc_bridge.order.background import _background_current_day_covered
-from service.ipc_bridge.order.runtime import OrderRuntime
+from tests.order_runtime_helpers import OrderRuntime
 
 
 class _Clock(object):

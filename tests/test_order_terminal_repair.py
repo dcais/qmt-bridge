@@ -8,7 +8,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from service.ipc_bridge.order.common import OrderError, new_order_document
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, new_order_document
 from service.ipc_bridge.order.state import recompute_order
 
 

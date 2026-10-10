@@ -697,7 +697,7 @@ QMT IPC 读写使用非阻塞 Windows API，由 `schedule_run` 默认每 10 毫�
 
 ## 增加新 method
 
-在 `service/ipc_bridge/feed/qmt_api.py` 增加有界参数校验、结果序列化和明确的
+在 `service/ipc_bridge/ipc_protocol/feed_contracts.py` 维护纯参数校验；在 `service/ipc_bridge/qmt_runtime/feed/api.py` 增加结果序列化和明确的
 `dispatch_request` 分支，并更新 `feed/requests.py` 的白名单。普通请求继续使用现有
 HTTP 与 IPC 通道，不开放任意函数名、表达式或脚本执行。修改源模块后重新生成并检查：
 

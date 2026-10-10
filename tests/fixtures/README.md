@@ -6,4 +6,6 @@ Do not import them from production modules, deploy them to QMT, or regenerate th
 
 The deployable HTTP strategies remain in `strategies/http_feed.py` and
 `strategies/http_order.py`. The additional IPC QMT strategies are `strategies/ipc_feed.py` and `strategies/ipc_order.py`,
-generated from `service/ipc_bridge` by `tools/build_ipc_strategies.py`.
+generated as readable Python from `service/ipc_bridge/qmt_runtime` and `service/ipc_bridge/ipc_protocol` by
+`tools/build_ipc_strategies.py`. External HTTP, persistence and file logging stay
+in `service/ipc_bridge` and are excluded from the QMT strategies.

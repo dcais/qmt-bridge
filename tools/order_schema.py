@@ -4,7 +4,7 @@
 """Explicit PostgreSQL ORDER schema installation, outside QMT."""
 from pathlib import Path
 
-from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
 from service.ipc_bridge.order.repository import repo_SCHEMA_VERSION, repo_schema
 from service.ipc_bridge.order.storage_schema import repo_check_storage_schema
 

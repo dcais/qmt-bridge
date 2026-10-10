@@ -4,8 +4,8 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from service.ipc_bridge.order.common import OrderError
-from service.ipc_bridge.order.common import fingerprint
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import fingerprint
 from service.ipc_bridge.order.contracts import normalize_order
 from service.ipc_bridge.order.service import OrderService
 

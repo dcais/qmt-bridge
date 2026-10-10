@@ -1,8 +1,9 @@
 import datetime as dt
 import math
-from .common import OrderError, qmt_invoke
-from .qmt import QmtAdapter, qmt_history_capabilities
-from .api_contracts import normalize_request
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, qmt_invoke
+from .adapter import QmtAdapter
+from service.ipc_bridge.ipc_protocol.order_queries import qmt_history_capabilities
+from service.ipc_bridge.ipc_protocol.order_queries import normalize_request
 
 def qmt_json_value(value):
     if value is None or isinstance(value, (bool, int, str)):

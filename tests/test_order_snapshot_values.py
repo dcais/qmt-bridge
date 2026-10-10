@@ -4,8 +4,8 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from service.ipc_bridge.order.common import OrderError, qmt_exception_details
-from service.ipc_bridge.order.qmt import QmtAdapter
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, qmt_exception_details
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter
 
 
 class SnapshotValuesTests(unittest.TestCase):

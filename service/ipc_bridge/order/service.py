@@ -2,8 +2,8 @@
 import queue
 import threading
 
-from .api_contracts import METHODS, normalize_request
-from .common import OrderError, copy_json, iso_datetime
+from service.ipc_bridge.ipc_protocol.order_queries import METHODS, normalize_request
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, iso_datetime
 from .evidence import evidence_sample
 from .runtime import OrderRuntime
 

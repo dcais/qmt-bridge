@@ -8,7 +8,7 @@ import math
 import os
 import time
 
-from .common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
 
 
 def evidence_capabilities():

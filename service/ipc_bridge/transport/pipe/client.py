@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 
-from .winpipe import PipeEndpoint
+from service.ipc_bridge.ipc_protocol.winpipe import PipeEndpoint
 
 
 class RemoteError(Exception):

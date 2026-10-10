@@ -1,7 +1,7 @@
 import copy
 import unittest
 import uuid
-from service.ipc_bridge.order.common import OrderError, new_order_document, new_record_metadata, public_order
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, new_order_document, new_record_metadata, public_order
 from service.ipc_bridge.order.state import (apply_observation, apply_cancel_request, cancel_response,
                                 pending_cancellations, mark_reconciled, recompute_order,
                                 is_order_active, observation_identifiers,

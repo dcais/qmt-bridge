@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from service.ipc_bridge.order.common import OrderError, iso_datetime, public_order  # noqa: E402
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, iso_datetime, public_order  # noqa: E402
 from service.ipc_bridge.order.repository import PostgresRepository  # noqa: E402
 from service.ipc_bridge.order.state import recompute_order  # noqa: E402
 from tools.order_schema import initialize_schema  # noqa: E402

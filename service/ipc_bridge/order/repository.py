@@ -8,7 +8,7 @@ import threading
 import uuid
 from datetime import timedelta
 
-from .common import (OrderError, copy_json, fingerprint, iso_datetime,
+from service.ipc_bridge.ipc_protocol.order_common import (OrderError, copy_json, fingerprint, iso_datetime,
                      json_text, new_order_document, new_record_metadata, parse_timestamp, public_order, utc_now)
 from .storage_schema import repo_check_storage_schema
 from .evidence import evidence_page

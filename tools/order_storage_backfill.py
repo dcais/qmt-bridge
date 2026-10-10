@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from service.ipc_bridge.order.common import fingerprint, iso_datetime, json_text, parse_timestamp  # noqa: E402
+from service.ipc_bridge.ipc_protocol.order_common import fingerprint, iso_datetime, json_text, parse_timestamp  # noqa: E402
 from service.ipc_bridge.order.repository import repo_schema  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
 from tools.order_schema import DEFAULT_SCHEMA, DEFAULT_SQL_PATH, sql_statements  # noqa: E402

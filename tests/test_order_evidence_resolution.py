@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from service.ipc_bridge.order.common import new_order_document
+from service.ipc_bridge.ipc_protocol.order_common import new_order_document
 from service.ipc_bridge.order.state import apply_observation, mark_reconciled, recompute_order
 
 

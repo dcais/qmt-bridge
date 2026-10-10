@@ -16,9 +16,14 @@ ORDER 源码仍在 `order_bridge`，构建器为 `tools/build_order_strategy.py`
 ## IPC 传输目录
 
 ```text
-service/ipc_bridge/transport/
-├── pipe/    # 当前命名管道：消息帧、Windows 管道、bridge 连接管理
-└── smem/    # 预留共享内存实现，尚未实现或启用
+service/ipc_bridge/
+├── ipc_protocol/             # 共享消息帧、Windows 管道及纯参数契约
+├── qmt_runtime/              # 打包到 QMT 策略
+│   ├── feed/                 # Feed 原生调用
+│   └── order/                # Order 原生调用
+└── transport/
+    ├── pipe/client.py        # 外部 bridge 连接管理
+    └── smem/                 # 预留共享内存实现，尚未实现或启用
 ```
 
 当前服务和 QMT 策略均使用 `pipe`。`smem` 仅预留目录，没有切换配置。
@@ -73,8 +78,11 @@ CMD 中可使用 `start_ipc_bridge staging` / `start_ipc_bridge prd`。
 - [strategies/ipc_feed.py](strategies/ipc_feed.py)：行情查询与下载。
 - [strategies/ipc_order.py](strategies/ipc_order.py)：账户查询、交易调用及回报。
 
-QMT 策略兼容 Python 3.6，源模块在 `service/ipc_bridge`。
-构建器将安全模块内嵌到策略中；运行时不读取应用源文件、不监听 HTTP、不连接数据库、
+QMT 策略兼容 Python 3.6，QMT 源模块在 `service/ipc_bridge/qmt_runtime`，共享协议与纯契约在 `service/ipc_bridge/ipc_protocol`；
+外部 HTTP、数据库、文件日志与订单业务在 `service/ipc_bridge`。
+生成文件直接合并可读 Python 源码，按源文件标注章节，含上海时区更新时间；
+重复构建保留时间戳，`--check` 忽略时间戳。
+构建器将安全源码直接合并到策略中；运行时不读取应用源文件、不监听 HTTP、不连接数据库、
 不写日志文件。QMT 只做非阻塞 IPC、定时调度、原生调用和回报快照，诊断打印 console。
 外部 Python 环境负责持久受理、幂等、执行权、恢复、对账、HTTP 和 UTF-8 文件日志。
 

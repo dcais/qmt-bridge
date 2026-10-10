@@ -171,15 +171,23 @@ QMT 两个策略只输出 console，不写应用文件、不连接数据库、�
 ## 7. 实现位置与构建
 
 ```text
-service/ipc_bridge/
-├── app.py                  # HTTP 路由
-├── config.py               # 外部配置
-├── feed/                   # 行情业务及 QMT 调用源码
-├── order/                  # 订单业务、持久化及 QMT 调用源码
-├── qmt/                    # QMT 入口与执行器
-└── transport/
-    ├── pipe/               # 当前命名管道
-    └── smem/               # 预留共享内存，未实现、不可切换
+service/ipc_bridge/            # 外部服务及独立的 QMT 策略源码
+├── app.py                    # HTTP 路由
+├── config.py                 # 外部配置
+├── feed/                     # 行情请求、任务管理
+├── order/                    # 订单业务、持久化、对账与外部日志
+├── transport/
+│   ├── pipe/client.py        # 外部连接与管道所有者
+│   └── smem/                 # 预留共享内存，未实现、不可切换
+├── qmt_runtime/              # 打包到策略，仅在 QMT 内执行
+│   ├── entrypoint.py         # 共用参数、调度、回调与停止
+│   ├── executor.py           # 共用有界内存执行器
+│   ├── feed/                # 行情原生调用与角色入口
+│   └── order/               # 原生适配器、查询与角色入口
+└── ipc_protocol/             # 双方共享，不依赖外部业务或 QMT 运行时
+    ├── wire.py, winpipe.py   # 消息帧与 Windows 管道
+    ├── feed_contracts.py     # 行情纯参数校验及错误
+    └── order_common.py, order_queries.py  # 订单类型、调用诊断及纯查询契约
 ```
 
 ```powershell
@@ -188,5 +196,9 @@ python tools/build_ipc_strategies.py --check
 ```
 
 生成 `strategies/ipc_feed.py` 与 `strategies/ipc_order.py`，为 GBK 单文件。
-QMT 所需源模块内嵌于策略并在内存加载，不在运行时读取项目源文件。
+生成器将固定顺序的安全源文件直接合并为可读 Python，按源文件分节；不包含源码字符串、`exec` 或模块重建。
+QMT 运行时不读取项目源文件，也不进行 HTTP、数据库或普通文件 I/O。
+文件头的 `Last modified (Asia/Shanghai)` 仅在内容改变时更新，重复构建保持原文件，`--check` 忽略时间戳。
+构建时检查 Python 3.6 语法、GBK 编码、禁用 I/O 与动态执行，以及不同源模块的全局名字冲突。
+Feed 入口显式绑定 QMT 注入的全局 API；外部订单运行器必须注入 IPC 适配器，不能自行调用 QMT。
 修改相关源模块后须重新构建并更新 QMT 中的策略；不要直接修改生成文件长期维护。

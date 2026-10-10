@@ -1,6 +1,25 @@
 import datetime as dt
-from .common import OrderError
-from .qmt import MAX_HISTORY_DATE_DAYS
+from .order_common import OrderError
+MAX_HISTORY_DATE_DAYS = 31
+
+
+def qmt_history_capabilities(apis):
+    """The supported local QMT does not provide broker-native historical details.
+
+    Public docs are not proof of this client capability. Do not promote an injected
+    function/mock to support; persistent Bridge records are a separate source.
+    """
+    return {"implemented": False, "function_available": False,
+            "availability": "UNSUPPORTED", "source": "QMT_NATIVE_HISTORY",
+            "reason": "NATIVE_HISTORY_NOT_PROVIDED_BY_SUPPORTED_QMT",
+            "qmt_function": "get_history_trade_detail_data", "runtime_verified": False,
+            "local_history": {"source": "BRIDGE_PERSISTED_RECORDS",
+                              "routes": ["/orders", "/order_events"],
+                              "scope": "BRIDGE_RETAINED_ONLY", "coverage": "UNVERIFIED",
+                              "retention_start": "UNVERIFIED", "fee_finality": "UNVERIFIED",
+                              "before_retention": "NOT_RECOVERABLE_FROM_LOCAL_STORE"}}
+
+
 
 ACCOUNT_TYPE = 'STOCK'
 ACCOUNT_TYPES = frozenset((

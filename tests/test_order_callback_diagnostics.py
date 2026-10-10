@@ -4,9 +4,9 @@ import queue
 import unittest
 from unittest.mock import Mock, patch
 
-from service.ipc_bridge.order.common import qmt_exception_details
-from service.ipc_bridge.order.qmt import QmtAdapter
-from service.ipc_bridge.order.runtime import OrderRuntime
+from service.ipc_bridge.ipc_protocol.order_common import qmt_exception_details
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter
+from tests.order_runtime_helpers import OrderRuntime
 
 
 class CallbackDiagnosticTests(unittest.TestCase):

@@ -3,7 +3,7 @@
 import re
 from datetime import datetime, timezone
 
-from .common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
 
 
 def repo_column(kind, required=True, default=None, generated=None):

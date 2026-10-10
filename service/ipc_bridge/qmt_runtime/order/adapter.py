@@ -5,8 +5,9 @@ import math
 import re
 from decimal import Decimal, InvalidOperation
 
-from .common import OrderError, copy_json, parse_timestamp, qmt_invoke
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, parse_timestamp, qmt_invoke
 
+from service.ipc_bridge.ipc_protocol.order_queries import MAX_HISTORY_DATE_DAYS, qmt_history_capabilities
 
 _qmt_quote = {"LATEST": 5, "OWN_BEST": 13, "OPPONENT_BEST": 14, "FAR_LIMIT": 12}
 _qmt_market = {"SH": {"BEST5_IOC": 42, "BEST5_TO_LIMIT": 43,
@@ -229,26 +230,6 @@ def _qmt_passorder_snapshot(raw):
     if isinstance(strategy, str) and strategy.startswith(prefix) and len(strategy) > len(prefix):
         result["remark"] = strategy[len(prefix):]
     return result
-
-
-MAX_HISTORY_DATE_DAYS = 31
-
-
-def qmt_history_capabilities(apis):
-    """The supported local QMT does not provide broker-native historical details.
-
-    Public docs are not proof of this client capability. Do not promote an injected
-    function/mock to support; persistent Bridge records are a separate source.
-    """
-    return {"implemented": False, "function_available": False,
-            "availability": "UNSUPPORTED", "source": "QMT_NATIVE_HISTORY",
-            "reason": "NATIVE_HISTORY_NOT_PROVIDED_BY_SUPPORTED_QMT",
-            "qmt_function": "get_history_trade_detail_data", "runtime_verified": False,
-            "local_history": {"source": "BRIDGE_PERSISTED_RECORDS",
-                              "routes": ["/orders", "/order_events"],
-                              "scope": "BRIDGE_RETAINED_ONLY", "coverage": "UNVERIFIED",
-                              "retention_start": "UNVERIFIED", "fee_finality": "UNVERIFIED",
-                              "before_retention": "NOT_RECOVERABLE_FROM_LOCAL_STORE"}}
 
 
 class QmtAdapter(object):

@@ -4,9 +4,9 @@ import copy
 import json
 import unittest
 
-from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
 from service.ipc_bridge.order.contracts import normalize_order, capabilities
-from service.ipc_bridge.order.qmt import QmtAdapter
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter
 from service.ipc_bridge.order.state import observation_identifiers
 
 

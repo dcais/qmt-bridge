@@ -4,7 +4,7 @@ import copy
 import unittest
 
 from service.ipc_bridge.order.contracts import normalize_order
-from service.ipc_bridge.order.qmt import QmtAdapter
+from service.ipc_bridge.qmt_runtime.order.adapter import QmtAdapter
 
 
 class QmtCallLoggingTests(unittest.TestCase):

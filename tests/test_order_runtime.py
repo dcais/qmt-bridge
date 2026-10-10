@@ -13,11 +13,11 @@ import datetime as dt
 from pathlib import Path
 from unittest.mock import patch
 
-from service.ipc_bridge.order.common import OrderError
+from service.ipc_bridge.ipc_protocol.order_common import OrderError
 from service.ipc_bridge.order.contracts import capabilities
 from service.ipc_bridge.order.repository import PostgresRepository
 from tools.order_schema import initialize_schema
-from service.ipc_bridge.order.runtime import OrderRuntime
+from tests.order_runtime_helpers import OrderRuntime
 
 
 class _LocalLock(object):

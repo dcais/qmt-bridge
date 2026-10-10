@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from .common import OrderError, copy_json, iso_datetime, parse_timestamp, qmt_exception_details, utc_now
+from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, iso_datetime, parse_timestamp, qmt_exception_details, utc_now
 from .state import pending_cancellations, recompute_order, observation_identifiers
 
 

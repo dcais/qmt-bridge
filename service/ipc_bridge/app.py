@@ -15,7 +15,7 @@ from .config import Config
 from .feed.requests import FEED_METHODS
 from .feed.service import FeedService
 from .transport.pipe.client import BridgeLink, RemoteError
-from .order.api_contracts import METHODS as ORDER_QUERIES
+from service.ipc_bridge.ipc_protocol.order_queries import METHODS as ORDER_QUERIES
 from .order.async_log import AsyncOrderLogger
 from .order.service import OrderService
 

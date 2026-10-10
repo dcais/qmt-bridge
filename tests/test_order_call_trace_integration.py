@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock
 
 from service.ipc_bridge.order.async_log import AsyncOrderLogger
-from service.ipc_bridge.order.runtime import OrderRuntime
+from tests.order_runtime_helpers import OrderRuntime
 
 
 class CallTraceIntegrationTests(unittest.TestCase):

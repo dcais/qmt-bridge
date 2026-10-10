@@ -1,4 +1,4 @@
-"""External Feed service and QMT-safe query execution."""
+"""External Feed service and request handling."""
 
 from .requests import FEED_METHODS, parse_query_params
 from .service import FeedService

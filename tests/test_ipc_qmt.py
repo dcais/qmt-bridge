@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 import unittest
 from pathlib import Path
 
-from service.ipc_bridge.qmt.executor import QmtRuntime, DeferredResult
+from service.ipc_bridge.qmt_runtime.executor import QmtRuntime, DeferredResult
 
 
 class Endpoint:
@@ -27,7 +27,7 @@ class Endpoint:
 
 class QmtRuntimeTests(unittest.TestCase):
     def setUp(self):
-        quiet = patch('service.ipc_bridge.qmt.executor.console_log')
+        quiet = patch('service.ipc_bridge.qmt_runtime.executor.console_log')
         quiet.start()
         self.addCleanup(quiet.stop)
         self.now = [0.0]
@@ -150,7 +150,7 @@ class QmtRuntimeTests(unittest.TestCase):
 
 class EntryTests(unittest.TestCase):
     def test_console_metadata_excludes_payload_and_bounds_strings(self):
-        from service.ipc_bridge.qmt.executor import console_log
+        from service.ipc_bridge.qmt_runtime.executor import console_log
         output = io.StringIO()
         with redirect_stdout(output):
             console_log('INFO', 'QMT call returned', request_id='x'*1000,
@@ -163,7 +163,7 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(1.235, record['elapsed_ms'])
 
     def test_panel_parameter_normalization(self):
-        from service.ipc_bridge.qmt.entrypoint import _account_id, _positive_integer, start
+        from service.ipc_bridge.qmt_runtime.entrypoint import _account_id, _positive_integer, start
         self.assertEqual('66027616', _account_id(66027616.0))
         self.assertEqual('00003', _account_id(' 00003 '))
         self.assertEqual(10, _positive_integer(10.0, 'interval'))
@@ -174,13 +174,13 @@ class EntryTests(unittest.TestCase):
                 _positive_integer(value, 'interval')
         for role in ('feed', 'order'):
             with self.assertRaises(ValueError):
-                start(Mock(), {'account_id': '', 'bridge_id': 'ok'}, role)
+                start(Mock(), {'account_id': '', 'bridge_id': 'ok'}, role, None)
             with self.assertRaises(ValueError):
-                start(Mock(), {'account_id': '1', 'bridge_id': 'bad.name'}, role)
+                start(Mock(), {'account_id': '1', 'bridge_id': 'bad.name'}, role, None)
 
     def test_business_deadlines_at_submit_boundary(self):
-        from service.ipc_bridge.qmt.entrypoint import _submit_document
-        from service.ipc_bridge.order.common import OrderError
+        from service.ipc_bridge.qmt_runtime.order.entrypoint import _submit_document
+        from service.ipc_bridge.ipc_protocol.order_common import OrderError
         adapter = Mock()
         now = dt.datetime(2026, 10, 10, 1, 0, tzinfo=dt.timezone.utc)
         cases = [
@@ -200,7 +200,7 @@ class EntryTests(unittest.TestCase):
         adapter.submit.assert_called_once_with(document)
 
     def test_stop_signals_before_cancel_then_releases(self):
-        from service.ipc_bridge.qmt import entrypoint
+        from service.ipc_bridge.qmt_runtime import entrypoint
         runtime = QmtRuntime('feed', 'b', 'a', 'pipe', lambda *args: None,
                              endpoint_factory=Endpoint)
         runtime.tick()
@@ -224,7 +224,8 @@ class BundleTests(unittest.TestCase):
         spec.loader.exec_module(builder)
         for role in ('feed', 'order'):
             content = builder.render(role)
-            self.assertEqual(content, (root / 'strategies' / ('ipc_' + role + '.py')).read_bytes())
+            self.assertEqual(builder.normalized(content.decode('gbk')),
+                             builder.normalized((root / 'strategies' / ('ipc_' + role + '.py')).read_bytes().decode('gbk')))
             namespace = {}
             exec(compile(content, '<bundle>', 'exec'), namespace)
             self.assertTrue(callable(namespace['init']))
