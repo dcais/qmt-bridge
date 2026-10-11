@@ -1,6 +1,6 @@
 # QMT IPC ORDER bridge
 
-Last modified: 2026-10-10
+Last modified: 2026-10-11
 
 ORDER 与 Feed 共用外部进程 `service.ipc_bridge` 和根路径
 `http://127.0.0.1:8888/{method}`。账户、持仓、算法配置、健康和持久订单 API
@@ -38,7 +38,14 @@ IPC 原生调用与查询源模块在 `service/ipc_bridge/qmt_runtime/order`，�
 生成按文件分节的可读 GBK 策略；时间戳仅在内容变更时更新，`--check` 忽略时间戳。
 持久化与 HTTP 模块只运行在外部 Python 环境。
 
-对账每轮只调用 `get_trade_detail_data(account_id, "STOCK", "task"/"order"/"deal")`，不调用历史交易查询函数。`/health` 的 `reconcile_query_scope="CURRENT_DAY"`、`history_query_available=false` 明确当前范围；`last_reconciled_at` 表示最近一轮当日查询成功时间，不证明跨日历史完整。历史缺口不会阻断当天订单完成对账，也不会触发原订单重发；尚未结案或证据不完整的旧单仍可保留 `sync_status=INCOMPLETE` 和 `reconcile_pending=true`。已完整对账结案的订单在正常重启时保持结案。`history_coverage_complete` 对更早创建的待核对订单保守提示缺口，不能单独用它判断当日查询是否失败。`RECONCILE_FINISHED` 日志附查询日期、范围及 `HISTORY_NOT_COVERED` 原因。
+对账每轮只调用 `get_trade_detail_data(account_id, "STOCK", "task"/"order"/"deal")`，不调用历史交易查询函数。
+`/health` 的 `reconcile_query_scope="CURRENT_DAY"`、`history_query_available=false` 明确当前范围；
+`last_reconciled_at` 表示最近成功查询或订单原成功对账时间，不证明跨日历史完整。
+已完整对账的终态订单跨日复用持久结案事实，正常重启和普通回报缺口都不会将其批量重开；
+新的成交、委托、撤单变化或引用冲突仍须核验。未结案或证据不完整的旧单保持待核对，不自动重发。
+`history_coverage_complete` 仍如实提示历史查询覆盖情况，不是所有订单共同的完成开关。
+TradeNest 继续检查逐笔未完成请求及账户资金、持仓；不因接口仅支持当日查询而要求全历史证明，
+也不因某笔显示 FILLED 就忽略其尚未解决的关联冲突。
 
 ## 请求及返回约定
 
@@ -288,17 +295,33 @@ GET /health
 
 若早期回报缺委托号，而后续正式委托可通过账户、交易日、市场及两项原生委托引用唯一核对，bridge 会自动解除该项关联缺口，原始回报保存在 `resolved_evidence` 和 `qmt_observations` 中。旧版留下的此类记录也在启动恢复或下次对账时处理。拒单仍须确认相关任务停止、委托终态、成交一致且完整对账成功，才返回 `execution_status=REJECTED`、`sync_status=COMPLETE`、`reconcile_pending=false` 并退出逐单周期对账；有歧义或缺失成交的记录继续核对。
 
-正常启动只重新安排未结案或明确要求核对的订单；已有成功对账时间、所有任务/委托已结束、无待关联证据和未决撤单、且没有待对账请求的订单保持结案，包括跨交易日重启。运行中真实回报丢失仍会触发缺口核查；账户级查询也继续运行。查询失败或覆盖不足时，若终态所依据的业务事实未变，保留已确认的执行结果，仅将同步标为不完整；新的成交、子委托或冲突证据仍可重新推导状态。失败查询不会刷新订单的 `last_reconciled_at`。
+正常启动和运行中缺口扫描只重新安排未结案或明确要求核对的订单；已完整对账结案且没有新问题的
+订单保持结案，包括跨交易日恢复。账户级查询继续运行，已知成交不会因历史查询不可用而消失。
+新完成对账的完整终态会保存内部结案检查点，覆盖请求、委托、任务、成交、调用尝试及撤单事实。
+后续历史覆盖不足时，仅当这些事实仍与检查点严格一致且没有关联冲突，才可复用原结案结果；
+恢复时保留原成功对账时间，不用今天的时间冒充历史查询成功。写入前在订单锁下再次核对事实代次。
+日志使用 `reconciliation_basis=PERSISTED_TERMINAL_CHECKPOINT` 和 `outcome=RETAINED_TERMINAL`
+区分这种恢复与当日查询，同时保留 `coverage_gap=HISTORY_NOT_COVERED`。
+没有有效检查点的旧单不会自动生成结案证明；日志提示 `action_required=HISTORICAL_EVIDENCE_REVIEW`。
 
-旧版重启误打开的已拒单记录可用 `tools/order_terminal_repair.py` 定向修复。先从 `order_events` 选定先前成功的 `RECONCILE_STATE_CHANGED` 事件，提供最新订单版本与原因；默认只读校验。工具要求之后仅发生对账缺口/状态检查点变化，QMT 身份、任务、委托、成交和请求不变；后续观察逐条验证，存在新事实或歧义即拒绝。
+旧版误重开的完整终态记录可用 `tools/order_terminal_repair.py` 定向核验和修复，支持
+`FILLED`、`CANCELLED`、`PARTIALLY_CANCELLED`、`REJECTED`。先从 `order_events` 选定先前成功的
+`RECONCILE_STATE_CHANGED` 事件，提供最新订单版本与原因；默认只读校验。
+工具依靠当时已持久保存的完整结案事件，不要求当前 QMT 能查询那个历史交易日。
+它要求之后仅发生允许的对账检查点变化，QMT 身份、任务、委托、成交、请求和调用事实不变；
+后续观察逐条验证，存在新事实、未解决的撤单或关联歧义即拒绝。
 
 ```powershell
-python tools/order_terminal_repair.py --config config.json --order-id <order_id> --expected-version <version> --checkpoint-event-seq <event_seq> --reason "恢复被启动缺口误打开的已拒单终态"
+python tools/order_terminal_repair.py --config config.json --order-id <order_id> --expected-version <version> --checkpoint-event-seq <event_seq> --reason "恢复被历史覆盖缺口误打开的已对账终态"
 # 校验通过后使用相同参数，追加下列选项写入；备份路径必须尚不存在。
 # --apply --evidence-out C:\evidence\terminal-repair-before.json
 ```
 
-配置沿用管理工具的 `ORDER_*` 环境变量或外部配置文件。写入事务锁定账户与订单、再次校验版本和证据，先落盘完整写前快照，再追加 `MANUAL_TERMINAL_REPAIR` 审计事件并同步订单/成员投影。修复保持原成功对账时间，修复时间单独记录；提高事实代次使修复前的在途对账失效。重复执行会因版本或状态不符而拒绝，不重复追加审计。此工具仅处理已完整确认拒单的误重开，不用于把未知历史伪装成完整对账。
+配置沿用管理工具的共享环境配置或外部配置文件。写入事务锁定账户与订单、再次校验版本和证据，
+先落盘完整写前快照，再追加 `MANUAL_TERMINAL_REPAIR` 审计事件并同步订单/成员投影。
+修复保持原成功对账时间，修复时间单独记录；提高事实代次使修复前的在途对账失效。
+重复执行会因版本或状态不符而拒绝，不重复追加审计。未曾完整结案、结案后有新事实或存在引用冲突的
+记录不适用；仍需核对原始回报或券商历史记录，不能用当天空查询替代。
 
 `/health` 另返回 `last_reconcile_attempt_at`（最近轮次开始）、`last_reconcile_finished_at`（最近轮次结束，包括失败）、`next_reconcile_at`（预计下次轮次，执行中为空）及 `last_reconcile_error`（最近查询异常摘要）。`last_reconciled_at` 只表示成功完成对账的时间，失败不得刷新它。调度使用单调时钟，展示时间使用带时区的 UTC 时间戳；这些轮次诊断字段在策略重启后重新采样。
 

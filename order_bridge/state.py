@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-11。"""
 from decimal import Decimal, InvalidOperation
 from .common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
@@ -325,6 +325,33 @@ def state_terminal_facts(doc):
                         'resolved_evidence': doc.get('resolved_evidence')})
 
 
+def state_reconciliation_facts(doc):
+    """Closure evidence includes call outcomes and cancel intent, excluding derived status."""
+    return fingerprint({'terminal_facts': state_terminal_facts(doc),
+                        'attempts': doc.get('attempts', []),
+                        'cancel_requested': doc.get('cancel_requested'),
+                        'active_cancel_request_id': doc.get('active_cancel_request_id'),
+                        'cancel_requests': [{key: value for key, value in row.items() if key != 'status'}
+                                            for row in doc.get('cancel_requests', [])]})
+
+
+def restore_terminal_reconciliation(doc):
+    """Restore only an unchanged, persisted full closure; never infer historical coverage."""
+    checkpoint = doc.get('terminal_reconciliation_checkpoint') or {}
+    if (not checkpoint.get('reconciled_at') or doc.get('unassociated_evidence')
+            or checkpoint.get('facts_fingerprint') != state_reconciliation_facts(doc)):
+        return False
+    candidate = copy_json(doc)
+    candidate['reconciliation_complete'] = True
+    candidate['reconcile_requested'] = False
+    candidate['last_reconciled_at'] = checkpoint['reconciled_at']
+    recompute_order(candidate)
+    if candidate['execution_status'] not in state_TERMINAL or not state_execution_finished(candidate):
+        return False
+    doc.update(candidate)
+    return True
+
+
 def recompute_order(doc, now=None, reconciled=False):
     before = copy_json(doc)
     resolve_missing_order_evidence(doc)
@@ -546,4 +573,8 @@ def mark_reconciled(doc, complete=True, now=None):
         doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
         doc['reconcile_requested'] = False
     recompute_order(doc, now=now)
+    if complete and doc['execution_status'] in state_TERMINAL and state_execution_finished(doc):
+        doc['terminal_reconciliation_checkpoint'] = {
+            'facts_fingerprint': state_reconciliation_facts(doc),
+            'reconciled_at': doc['last_reconciled_at']}
     return before != doc

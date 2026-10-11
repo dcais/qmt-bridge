@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ORDER 后台事务与短期授权；Last modified: 2026-09-28。
+"""ORDER 后台事务与短期授权；Last modified: 2026-10-11。
 
 队列只承载普通快照。容量令牌覆盖排队、QMT 在途和待持久结果整个生命期。
 """
@@ -10,7 +10,7 @@ import time
 import uuid
 
 from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, iso_datetime, parse_timestamp, qmt_exception_details, utc_now
-from .state import pending_cancellations, recompute_order, observation_identifiers
+from .state import pending_cancellations, recompute_order, observation_identifiers, restore_terminal_reconciliation
 
 
 def _background_current_day_covered(document, day):
@@ -604,13 +604,17 @@ class OrderBackground(object):
             covered = _background_current_day_covered(document, current['query_day'])
             if not covered:
                 current['history_complete'] = False
-            order_complete = complete and covered
+            # CURRENT_DAY cannot re-query history. A durable unchanged closure is a
+            # separate basis, checked again under the repository lock.
+            retained = not covered and restore_terminal_reconciliation(copy_json(document))
+            order_complete = (complete and covered) or retained
+            finish_options = {'restore_terminal': True} if retained else {}
             checkpoint_applied = r.repo.finish_reconcile(
                 document['order_id'], document.get('reconcile_round_fact_version', -1),
-                order_complete, stamp, interval_seconds=interval)
+                order_complete, stamp, interval_seconds=interval, **finish_options)
             # False 表示查询期间事实已更新，旧快照未写入；不得记录为对账完成。
             outcome = ('STALE_FACT_VERSION' if not checkpoint_applied else
-                       'COMPLETE' if order_complete else 'INCOMPLETE')
+                       'RETAINED_TERMINAL' if retained else 'COMPLETE' if order_complete else 'INCOMPLETE')
             self._log('INFO', 'RECONCILE_FINISHED', account_id=r.account_id,
                       order_id=document['order_id'], client_order_id=document.get('client_order_id'),
                       round_id=current['id'], source_version=document.get('version'),
@@ -619,6 +623,8 @@ class OrderBackground(object):
                       complete=bool(order_complete) if checkpoint_applied else None,
                       query_scope='CURRENT_DAY', query_day=current['query_day'].isoformat(),
                       coverage_gap=None if covered else 'HISTORY_NOT_COVERED',
+                      reconciliation_basis='PERSISTED_TERMINAL_CHECKPOINT' if retained else 'CURRENT_DAY_QUERY',
+                      action_required='HISTORICAL_EVIDENCE_REVIEW' if not covered and not retained else None,
                       outcome=outcome)
         current['cursor'] = batch['next_cursor']
         if batch['has_more']:

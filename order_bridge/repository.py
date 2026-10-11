@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
+"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-10-11。"""
 import hashlib
 import json
 import math
@@ -15,7 +15,7 @@ from .evidence import evidence_page
 from .state import (apply_cancel_request, apply_observation, cancel_response,
                     is_order_active, observation_identifiers, observation_identity_valid, pending_cancellations,
                     reconcile_pending, recompute_order, mark_reconciled,
-                    state_execution_finished)
+                    state_execution_finished, state_TERMINAL, restore_terminal_reconciliation)
 
 
 repo_SCHEMA_VERSION = 3
@@ -716,7 +716,7 @@ class PostgresRepository(object):
                     "has_more": len(docs) > limit}
         return self.repo_run(listing)
 
-    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None, interval_seconds=30):
+    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None, interval_seconds=30, restore_terminal=False):
         """旧快照只能记录尝试，不能清除其后回报/缺口设下的门闩。"""
         if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int) or not 1 <= interval_seconds <= 2147483647:
             raise ValueError("reconcile interval must be a positive integer")
@@ -725,7 +725,11 @@ class PostgresRepository(object):
             if int(doc.get("fact_version", 0)) != int(expected_fact_version):
                 return False
             before = copy_json(doc)
-            mark_reconciled(doc, complete=complete, now=stamp)
+            if restore_terminal:
+                if not restore_terminal_reconciliation(doc):
+                    return False
+            else:
+                mark_reconciled(doc, complete=complete, now=stamp)
             doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=interval_seconds))
             doc["reconcile_priority"] = False
             changed_children = tuple(field for field in repo_CHILD_TABLES.values()
@@ -737,7 +741,7 @@ class PostgresRepository(object):
         return self.repo_run(finish, mutation=True)
 
     def mark_reconcile_gap(self, since, limit=100, cursor=None, startup=False):
-        """按 order_id 有界重开进入过 QMT 的记录；启动时保留已完整对账的终态。"""
+        """按 order_id 有界重开进入过 QMT 的记录；任何覆盖缺口均保留已完整对账的终态。"""
         since = since if isinstance(since, str) else iso_datetime(since)
         limit = max(1, min(int(limit), 1000))
         def mark(cur):
@@ -758,7 +762,8 @@ class PostgresRepository(object):
                 doc = repo_json(raw)
                 if doc.get("last_reconcile_gap_since") == since:
                     continue
-                if (startup and state_execution_finished(doc) and doc.get("last_reconciled_at")
+                if (doc.get("execution_status") in state_TERMINAL
+                        and state_execution_finished(doc) and doc.get("last_reconciled_at")
                         and not doc.get("reconcile_pending") and not doc.get("reconcile_requested")
                         and not doc.get("unassociated_evidence")):
                     continue

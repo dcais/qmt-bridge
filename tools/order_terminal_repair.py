@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Last modified (Asia/Shanghai): 2026-09-28
-"""凭完整证据修复被 RECONCILE_GAP 错误重开的 REJECTED 订单。
+"""凭完整事件证据恢复被 RECONCILE_GAP 重开的已闭合终态订单。
 
 默认干运行；不调用 QMT。
 """
@@ -22,7 +22,8 @@ if str(ROOT) not in sys.path:
 from service.ipc_bridge.ipc_protocol.order_common import OrderError, iso_datetime  # noqa: E402
 from service.ipc_bridge.order.repository import PostgresRepository, repo_json  # noqa: E402
 from service.ipc_bridge.order.state import (apply_observation, observation_identifiers,
-                                recompute_order, reconcile_pending)  # noqa: E402
+                                mark_reconciled, reconcile_pending, recompute_order,
+                                state_execution_finished, state_reconciliation_facts)  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
 
 
@@ -32,7 +33,9 @@ NON_BUSINESS = frozenset((
     "reconcile_round_fact_version", "last_reconcile_attempt_at", "last_reconciled_at",
     "reconcile_due_at", "reconcile_priority", "reconcile_requested", "reconcile_pending",
     "last_reconcile_gap_since", "reconciliation_complete", "sync_status",
-    "execution_status", "terminal_facts_fingerprint", "basket_cleanup_eligible"))
+    "execution_status", "terminal_facts_fingerprint", "basket_cleanup_eligible",
+    "cancel_status", "terminal_reconciliation_checkpoint"))
+TERMINAL = frozenset(("FILLED", "CANCELLED", "PARTIALLY_CANCELLED", "REJECTED"))
 
 
 def require(condition, message):
@@ -44,27 +47,61 @@ def business_facts(doc):
     result = {key: copy.deepcopy(value) for key, value in doc.items() if key not in NON_BUSINESS}
     for item in result.get("items", []):
         item.pop("execution_status", None)
+    for request in result.get("cancel_requests", []):
+        request.pop("status", None)
     return result
 
 
 def successful_terminal(doc):
-    return (doc.get("submission_status") == "CONFIRMED"
-            and doc.get("execution_status") == "REJECTED"
-            and doc.get("reconciliation_complete") is True
-            and doc.get("sync_status") == "COMPLETE"
-            and not doc.get("reconcile_pending") and not doc.get("reconcile_requested")
-            and not doc.get("unassociated_evidence")
-            and not doc.get("cancel_requested")
-            and not doc.get("fills")
-            and bool(doc.get("last_reconciled_at"))
-            and bool(doc.get("qmt_orders")) and bool(doc.get("qmt_tasks"))
-            and all(item.get("execution_status") == "REJECTED" for item in doc.get("items", []))
-            and all(row.get("terminal") and row.get("status") == "REJECTED"
-                    for row in doc.get("qmt_orders", []))
-            and all(row.get("terminal") for row in doc.get("qmt_tasks", []))
-            and not any(row.get("kind") in ("CANCEL", "CANCEL_ORDER", "CANCEL_TASK")
-                        and row.get("status") in ("CALLING", "RETURNED", "UNKNOWN")
-                        for row in doc.get("attempts", [])))
+    if (doc.get("execution_status") not in TERMINAL
+            or doc.get("reconciliation_complete") is not True
+            or doc.get("sync_status") != "COMPLETE"
+            or doc.get("reconcile_pending") or doc.get("reconcile_requested")
+            or not doc.get("last_reconciled_at") or not state_execution_finished(doc)):
+        return False
+    if any(row.get("status") not in ("CONFIRMED", "NOT_NEEDED", "REJECTED")
+           for row in doc.get("cancel_requests", [])):
+        return False
+    for attempt in doc.get("attempts", []):
+        if attempt.get("kind") not in ("CANCEL", "CANCEL_ORDER", "CANCEL_TASK"):
+            continue
+        if attempt.get("status") == "CALLING":
+            return False
+        if attempt.get("status") not in ("RETURNED", "UNKNOWN"):
+            continue
+        kind = attempt.get("kind")
+        if kind == "CANCEL":
+            return False
+        if not doc.get("cancel_requested") or not any(
+                attempt.get("cancel_request_id") in (
+                    row.get("cancel_request_id"), row.get("canonical_cancel_request_id"))
+                and attempt.get("cancel_request_id")
+                for row in doc.get("cancel_requests", [])):
+            return False
+        field, collection = (("qmt_order_id", "qmt_orders") if kind == "CANCEL_ORDER"
+                             else ("qmt_task_id", "qmt_tasks"))
+        if not attempt.get("target_id") or not any(
+                str(row.get(field)) == str(attempt["target_id"]) and row.get("terminal")
+                for row in doc.get(collection, [])):
+            return False
+    candidate = copy.deepcopy(doc)
+    recompute_order(candidate)
+    return (candidate.get("execution_status") == doc["execution_status"]
+            and state_execution_finished(candidate)
+            and not reconcile_pending(candidate)
+            and business_facts(candidate) == business_facts(doc))
+
+
+def validate_internal_checkpoint(doc):
+    """An internal proof is checked, but never substitutes for the audited event."""
+    if "terminal_reconciliation_checkpoint" not in doc:
+        return
+    checkpoint = doc["terminal_reconciliation_checkpoint"]
+    require(isinstance(checkpoint, dict)
+            and checkpoint.get("facts_fingerprint") == state_reconciliation_facts(doc)
+            and checkpoint.get("reconciled_at") == doc.get("last_reconciled_at")
+            and bool(checkpoint.get("reconciled_at")),
+            "internal terminal checkpoint differs from audited facts")
 
 
 def relevant_observation(doc, kind, raw, order_id):
@@ -95,8 +132,8 @@ def validate(current, events, observations, checkpoint_seq):
     seq, event_type, occurred_at, checkpoint = events[0]
     require(event_type == "RECONCILE_STATE_CHANGED", "checkpoint is not a successful reconciliation event")
     require(checkpoint.get("order_id") == current.get("order_id") and successful_terminal(checkpoint),
-            "checkpoint is not a complete REJECTED terminal order")
-    require(current.get("version") is not None and current.get("execution_status") == "INCOMPLETE"
+            "checkpoint is not a complete terminal order")
+    require(current.get("version") is not None and current.get("execution_status") in TERMINAL | {"INCOMPLETE"}
             and current.get("reconciliation_complete") is False
             and current.get("sync_status") == "INCOMPLETE",
             "current order is not the reopened INCOMPLETE state")
@@ -105,12 +142,15 @@ def validate(current, events, observations, checkpoint_seq):
             "successful reconciliation timestamp or submission changed")
     expected = business_facts(checkpoint)
     require(business_facts(current) == expected, "current business facts differ from terminal checkpoint")
+    validate_internal_checkpoint(current)
+    validate_internal_checkpoint(checkpoint)
     require(any(row[1] == "RECONCILE_GAP" for row in events[1:]), "no intervening RECONCILE_GAP")
     previous_fact_version = checkpoint.get("fact_version", 0)
     for event_seq, kind, _, doc in events[1:]:
         require(kind in ("RECONCILE_GAP", "RECONCILE_STATE_CHANGED"),
                 "unexpected intervening event at seq {}".format(event_seq))
         require(business_facts(doc) == expected, "business facts changed at seq {}".format(event_seq))
+        validate_internal_checkpoint(doc)
         expected_fact_version = previous_fact_version + (kind == "RECONCILE_GAP")
         require(doc.get("fact_version") == expected_fact_version,
                 "fact version changed outside RECONCILE_GAP at seq {}".format(event_seq))
@@ -183,13 +223,11 @@ def repair(repo, args):
         before_state = {key: current.get(key) for key in
                         ("version", "fact_version", "execution_status", "sync_status",
                          "reconciliation_complete", "reconcile_pending", "reconcile_requested")}
-        current["reconciliation_complete"] = True
-        current["reconcile_requested"] = False
         current["reconcile_priority"] = False
         # 让修复前启动的旧对账轮次失效。
         current["fact_version"] += 1
-        recompute_order(current)
-        require(current["execution_status"] == "REJECTED" and not reconcile_pending(current)
+        mark_reconciled(current, now=events[0][3]["last_reconciled_at"])
+        require(current["execution_status"] == events[0][3]["execution_status"] and not reconcile_pending(current)
                 and current["sync_status"] == "COMPLETE", "recomputed order is not terminal")
         current["reconcile_pending"] = False
         after_state = {key: current.get(key) for key in before_state}

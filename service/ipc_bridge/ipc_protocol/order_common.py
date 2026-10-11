@@ -267,7 +267,7 @@ def new_order_document(request):
 def public_order(document, replayed=None):
     result = copy_json(document)
     for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
-                "manual_resolutions", "terminal_facts_fingerprint"):
+                "manual_resolutions", "terminal_facts_fingerprint", "terminal_reconciliation_checkpoint"):
         result.pop(key, None)
     for field in ("items", "attempts", "cancel_requests", "qmt_tasks", "qmt_orders", "fills"):
         for record in result.get(field, []):

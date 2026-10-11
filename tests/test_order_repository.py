@@ -778,10 +778,10 @@ class PostgresRepositoryTests(unittest.TestCase):
             current = self.repo.get_by_id(doc["order_id"])
             self.assertTrue(current["reconcile_pending"])
             self.assertTrue(current["reconcile_requested"])
-        # 相同扫描标记不能重复计数；真实回报缺口仍会重开已完成的拒单。
+        # 相同扫描标记不能重复计数；普通覆盖缺口同样保留已闭合终态。
         self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:00:00Z", startup=True)["marked"], 0)
-        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:01:00Z")["marked"], 4)
-        self.assertTrue(self.repo.get_by_id(settled[1]["order_id"])["reconcile_pending"])
+        self.assertEqual(self.repo.mark_reconcile_gap("2026-09-25T00:01:00Z")["marked"], 2)
+        self.assertFalse(self.repo.get_by_id(settled[1]["order_id"])["reconcile_pending"])
 
     def test_late_child_after_startup_skip_still_reopens_reconciliation(self):
         doc = self.order("startup-late")
