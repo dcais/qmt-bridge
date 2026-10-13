@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-10-08 17:10:01
+# Last modified (Asia/Shanghai): 2026-10-13 23:11:19
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -295,7 +295,7 @@ def new_order_document(request):
 def public_order(document, replayed=None):
     result = copy_json(document)
     for key in ("request_hash", "remark", "contract_version", "attempts", "reconcile_requested",
-                "manual_resolutions", "terminal_facts_fingerprint"):
+                "manual_resolutions", "terminal_facts_fingerprint", "terminal_reconciliation_checkpoint"):
         result.pop(key, None)
     for field in ("items", "attempts", "cancel_requests", "qmt_tasks", "qmt_orders", "fills"):
         for record in result.get(field, []):
@@ -715,7 +715,7 @@ def capabilities():
             "quantity_unit": "shares or ETF units; no multiplication", "amount_unit": "CNY, stocks only"}
 
 # ---- order_bridge/state.py ----
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-09-28。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-13。"""
 from decimal import Decimal, InvalidOperation
 
 
@@ -818,6 +818,22 @@ def state_evidence(doc, kind, raw, source, reason, observed_at):
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
     if any(row.get('evidence_id') == key for row in doc.get('resolved_evidence', [])):
         return
+    # Ignore only an explicitly adjudicated query duplicate; retain its raw observation.
+    # m_nOrderStrategyType is the sole varying field in these approved snapshots.
+    if kind == 'order' and source == 'query' and reason == 'CONFLICTING_ORDER_REFERENCE':
+        semantic = {name: value for name, value in raw.items() if name != 'm_nOrderStrategyType'}
+        for row in doc.get('resolved_evidence', []):
+            resolution = row.get('resolution')
+            known = row.get('raw') or {}
+            if (row.get('kind') == kind and row.get('source') == source and row.get('reason') == reason
+                    and isinstance(resolution, dict)
+                    and resolution.get('kind') == 'MANUAL_NATIVE_REFERENCE_BINDING'
+                    and resolution.get('order_id') == doc.get('order_id')
+                    and resolution.get('decision_id') and resolution.get('evidence_sha256')
+                    and known.get('m_strAccountID') == doc.get('account_id')
+                    and known.get('m_strRemark') == doc.get('remark')
+                    and {name: value for name, value in known.items() if name != 'm_nOrderStrategyType'} == semantic):
+                return
     if not any(row['evidence_id'] == key for row in evidence):
         evidence.append({'evidence_id': key, 'kind': kind, 'raw': copy_json(raw),
                          'source': source, 'reason': reason, 'observed_at': observed_at})
@@ -964,6 +980,10 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                                              zip(previous_refs, (native_ref, native_order_ref)))
                     if reference_conflict:
                         state_evidence(doc, kind, raw, source, 'CONFLICTING_ORDER_REFERENCE', stamp)
+                        record.clear()
+                        record.update(previous_record)
+                        recompute_order(doc)
+                        return doc != before
                     elif native_ref and native_order_ref:
                         record['native_ref'] = native_ref
                         record['native_order_ref'] = native_order_ref
@@ -1038,6 +1058,33 @@ def state_terminal_facts(doc):
                         'fills': doc['fills'], 'error': doc.get('error'),
                         'unassociated_evidence': doc.get('unassociated_evidence'),
                         'resolved_evidence': doc.get('resolved_evidence')})
+
+
+def state_reconciliation_facts(doc):
+    """Closure evidence includes call outcomes and cancel intent, excluding derived status."""
+    return fingerprint({'terminal_facts': state_terminal_facts(doc),
+                        'attempts': doc.get('attempts', []),
+                        'cancel_requested': doc.get('cancel_requested'),
+                        'active_cancel_request_id': doc.get('active_cancel_request_id'),
+                        'cancel_requests': [{key: value for key, value in row.items() if key != 'status'}
+                                            for row in doc.get('cancel_requests', [])]})
+
+
+def restore_terminal_reconciliation(doc):
+    """Restore only an unchanged, persisted full closure; never infer historical coverage."""
+    checkpoint = doc.get('terminal_reconciliation_checkpoint') or {}
+    if (not checkpoint.get('reconciled_at') or doc.get('unassociated_evidence')
+            or checkpoint.get('facts_fingerprint') != state_reconciliation_facts(doc)):
+        return False
+    candidate = copy_json(doc)
+    candidate['reconciliation_complete'] = True
+    candidate['reconcile_requested'] = False
+    candidate['last_reconciled_at'] = checkpoint['reconciled_at']
+    recompute_order(candidate)
+    if candidate['execution_status'] not in state_TERMINAL or not state_execution_finished(candidate):
+        return False
+    doc.update(candidate)
+    return True
 
 
 def recompute_order(doc, now=None, reconciled=False):
@@ -1261,6 +1308,10 @@ def mark_reconciled(doc, complete=True, now=None):
         doc['last_reconciled_at'] = now if isinstance(now, str) else iso_datetime(now)
         doc['reconcile_requested'] = False
     recompute_order(doc, now=now)
+    if complete and doc['execution_status'] in state_TERMINAL and state_execution_finished(doc):
+        doc['terminal_reconciliation_checkpoint'] = {
+            'facts_fingerprint': state_reconciliation_facts(doc),
+            'reconciled_at': doc['last_reconciled_at']}
     return before != doc
 
 # ---- order_bridge/storage_schema.py ----
@@ -1599,7 +1650,7 @@ def evidence_page(meta, rows, after, high, limit):
                 next_after=page[-1]['event_id'] if page else after, has_more=len(rows) > limit)
 
 # ---- order_bridge/repository.py ----
-"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-09-28。"""
+"""PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-10-11。"""
 import hashlib
 import json
 import math
@@ -2308,7 +2359,7 @@ class PostgresRepository(object):
                     "has_more": len(docs) > limit}
         return self.repo_run(listing)
 
-    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None, interval_seconds=30):
+    def finish_reconcile(self, order_id, expected_fact_version, complete, stamp=None, interval_seconds=30, restore_terminal=False):
         """旧快照只能记录尝试，不能清除其后回报/缺口设下的门闩。"""
         if isinstance(interval_seconds, bool) or not isinstance(interval_seconds, int) or not 1 <= interval_seconds <= 2147483647:
             raise ValueError("reconcile interval must be a positive integer")
@@ -2317,7 +2368,11 @@ class PostgresRepository(object):
             if int(doc.get("fact_version", 0)) != int(expected_fact_version):
                 return False
             before = copy_json(doc)
-            mark_reconciled(doc, complete=complete, now=stamp)
+            if restore_terminal:
+                if not restore_terminal_reconciliation(doc):
+                    return False
+            else:
+                mark_reconciled(doc, complete=complete, now=stamp)
             doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=interval_seconds))
             doc["reconcile_priority"] = False
             changed_children = tuple(field for field in repo_CHILD_TABLES.values()
@@ -2329,7 +2384,7 @@ class PostgresRepository(object):
         return self.repo_run(finish, mutation=True)
 
     def mark_reconcile_gap(self, since, limit=100, cursor=None, startup=False):
-        """按 order_id 有界重开进入过 QMT 的记录；启动时保留已完整对账的终态。"""
+        """按 order_id 有界重开进入过 QMT 的记录；任何覆盖缺口均保留已完整对账的终态。"""
         since = since if isinstance(since, str) else iso_datetime(since)
         limit = max(1, min(int(limit), 1000))
         def mark(cur):
@@ -2350,7 +2405,8 @@ class PostgresRepository(object):
                 doc = repo_json(raw)
                 if doc.get("last_reconcile_gap_since") == since:
                     continue
-                if (startup and state_execution_finished(doc) and doc.get("last_reconciled_at")
+                if (doc.get("execution_status") in state_TERMINAL
+                        and state_execution_finished(doc) and doc.get("last_reconciled_at")
                         and not doc.get("reconcile_pending") and not doc.get("reconcile_requested")
                         and not doc.get("unassociated_evidence")):
                     continue
@@ -3440,7 +3496,7 @@ class AsyncOrderLogger(object):
                 self._sampled_at = order_log_datetime.datetime.now(self._ZONE).isoformat()
 
 # ---- order_bridge/background.py ----
-"""ORDER 后台事务与短期授权；Last modified: 2026-09-28。
+"""ORDER 后台事务与短期授权；Last modified: 2026-10-11。
 
 队列只承载普通快照。容量令牌覆盖排队、QMT 在途和待持久结果整个生命期。
 """
@@ -4038,13 +4094,17 @@ class OrderBackground(object):
             covered = _background_current_day_covered(document, current['query_day'])
             if not covered:
                 current['history_complete'] = False
-            order_complete = complete and covered
+            # CURRENT_DAY cannot re-query history. A durable unchanged closure is a
+            # separate basis, checked again under the repository lock.
+            retained = not covered and restore_terminal_reconciliation(copy_json(document))
+            order_complete = (complete and covered) or retained
+            finish_options = {'restore_terminal': True} if retained else {}
             checkpoint_applied = r.repo.finish_reconcile(
                 document['order_id'], document.get('reconcile_round_fact_version', -1),
-                order_complete, stamp, interval_seconds=interval)
+                order_complete, stamp, interval_seconds=interval, **finish_options)
             # False 表示查询期间事实已更新，旧快照未写入；不得记录为对账完成。
             outcome = ('STALE_FACT_VERSION' if not checkpoint_applied else
-                       'COMPLETE' if order_complete else 'INCOMPLETE')
+                       'RETAINED_TERMINAL' if retained else 'COMPLETE' if order_complete else 'INCOMPLETE')
             self._log('INFO', 'RECONCILE_FINISHED', account_id=r.account_id,
                       order_id=document['order_id'], client_order_id=document.get('client_order_id'),
                       round_id=current['id'], source_version=document.get('version'),
@@ -4053,6 +4113,8 @@ class OrderBackground(object):
                       complete=bool(order_complete) if checkpoint_applied else None,
                       query_scope='CURRENT_DAY', query_day=current['query_day'].isoformat(),
                       coverage_gap=None if covered else 'HISTORY_NOT_COVERED',
+                      reconciliation_basis='PERSISTED_TERMINAL_CHECKPOINT' if retained else 'CURRENT_DAY_QUERY',
+                      action_required='HISTORICAL_EVIDENCE_REVIEW' if not covered and not retained else None,
                       outcome=outcome)
         current['cursor'] = batch['next_cursor']
         if batch['has_more']:
