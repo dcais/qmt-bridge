@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-11。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-13。"""
 from decimal import Decimal, InvalidOperation
 from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
@@ -103,6 +103,22 @@ def state_evidence(doc, kind, raw, source, reason, observed_at):
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
     if any(row.get('evidence_id') == key for row in doc.get('resolved_evidence', [])):
         return
+    # Ignore only an explicitly adjudicated query duplicate; retain its raw observation.
+    # m_nOrderStrategyType is the sole varying field in these approved snapshots.
+    if kind == 'order' and source == 'query' and reason == 'CONFLICTING_ORDER_REFERENCE':
+        semantic = {name: value for name, value in raw.items() if name != 'm_nOrderStrategyType'}
+        for row in doc.get('resolved_evidence', []):
+            resolution = row.get('resolution')
+            known = row.get('raw') or {}
+            if (row.get('kind') == kind and row.get('source') == source and row.get('reason') == reason
+                    and isinstance(resolution, dict)
+                    and resolution.get('kind') == 'MANUAL_NATIVE_REFERENCE_BINDING'
+                    and resolution.get('order_id') == doc.get('order_id')
+                    and resolution.get('decision_id') and resolution.get('evidence_sha256')
+                    and known.get('m_strAccountID') == doc.get('account_id')
+                    and known.get('m_strRemark') == doc.get('remark')
+                    and {name: value for name, value in known.items() if name != 'm_nOrderStrategyType'} == semantic):
+                return
     if not any(row['evidence_id'] == key for row in evidence):
         evidence.append({'evidence_id': key, 'kind': kind, 'raw': copy_json(raw),
                          'source': source, 'reason': reason, 'observed_at': observed_at})
@@ -249,6 +265,10 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                                              zip(previous_refs, (native_ref, native_order_ref)))
                     if reference_conflict:
                         state_evidence(doc, kind, raw, source, 'CONFLICTING_ORDER_REFERENCE', stamp)
+                        record.clear()
+                        record.update(previous_record)
+                        recompute_order(doc)
+                        return doc != before
                     elif native_ref and native_order_ref:
                         record['native_ref'] = native_ref
                         record['native_order_ref'] = native_order_ref
