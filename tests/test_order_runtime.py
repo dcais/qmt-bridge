@@ -497,12 +497,20 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
                        "params": {"m_dLimitOverRate": 0.1}}, "smart_algo_passorder"),
         ]
         for client, execution, qmt_name in executions:
-            self._until(lambda: self.runtime.health()["accepting_orders"])
-            try:
-                self.runtime.handle("submit_order", self.basket(client, execution), "POST")
-            except OrderError as exc:
-                self.fail("basket acceptance failed: client={!r}, error={!r}, health={!r}, grant={!r}".format(
-                    client, exc.code, self.runtime.health(), self.runtime.background.grant))
+            request = self.basket(client, execution)
+
+            def accept():
+                # Background result merging can revoke readiness after a health read.
+                # Retry only the pre-acceptance readiness rejection, with the same key.
+                try:
+                    self.runtime.handle("submit_order", request, "POST")
+                    return True
+                except OrderError as exc:
+                    if exc.code != "EXECUTOR_NOT_READY":
+                        raise
+                    return False
+
+            self._until(accept)
             try:
                 self._until_call(qmt, qmt_name)
             except AssertionError:
@@ -585,8 +593,8 @@ class OrderRuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(qmt.side_effects("cancel_task"), [])
 
     def test_real_http_routes_use_durable_runtime(self):
-        # 冻结的旧 GBK 单文件仅验证兼容性，不代表当前 IPC 部署产物。
-        strategy = Path(__file__).resolve().parent / "fixtures" / "legacy_http_order.py"
+        # 当前 HTTP 生成产物必须与当前数据库结构配套；旧夹具保持冻结。
+        strategy = Path(__file__).resolve().parents[1] / "strategies" / "http_order.py"
         spec = importlib.util.spec_from_file_location("qmt_order_generated_runtime_test", strategy)
         http_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(http_module)

@@ -67,7 +67,7 @@ class StorageSchemaTests(unittest.TestCase):
         with self.connection.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             self.assertEqual(repo_check_storage_schema(cur, self.repo_s),
-                             {"schema_version": 3, "ready": True})
+                             {"schema_version": 4, "ready": True})
         self.connection.rollback()
         with self.connection.cursor() as cur:
             cur.execute("UPDATE " + self.repo_s + ".schema_version SET version=2")

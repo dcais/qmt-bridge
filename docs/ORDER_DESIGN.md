@@ -17,7 +17,7 @@ IPC 策略无需 PostgreSQL 驱动。原 HTTP 方案继续保留在 `order_bridg
 `strategies/http_*.py`，使用原构建器和依赖清单，部署见 `../HTTP_ORDER.md`。
 `tests/fixtures/legacy_http_*.py` 仅作为 IPC 兼容性测试基线。
 
-外部 `.env` 通过 `QMT_BRIDGE_PG_DATABASE` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。只维护一份当前结构，不设常驻历史升级框架。`tools/order_admin.py schema init` 仅初始化全新或兼容版本 3 的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
+外部 `.env` 通过 `QMT_BRIDGE_PG_DATABASE` 选择 PostgreSQL 数据库；模拟盘与实盘使用不同数据库，每个库内部固定 `qmt_order` schema，不提供 `pg_schema` 配置。表不另加 `namespace_id` 或 `broker_environment_id`。账户类型目前固定 `STOCK`，策略绑定一个账户；HTTP 回环端口仅是监听端口，不代表交易环境或访问隔离。初始化 DDL 统一在 `sql/order_init.sql`，不创建外键，保留主键、幂等唯一约束和索引。只维护一份当前结构，不设常驻历史升级框架。`tools/order_admin.py schema init` 仅初始化全新或兼容版本 4 的库，`schema check` 只读；两个命令只需数据库配置，不要求账户 ID。`unknown` 人工管理命令仍须指定账户。生成的策略不包含安装工具或 DDL，也不自动变更业务库结构。
 
 后台启动先检查既有关键表、字段、生成表达式、索引及当前结构版本，再按配置的账户 ID 幂等插入缺失的 `account_runtime` 行；已有行的 `event_seq`、执行主机、代次和创建时间保持原值。当前结构版本为 3；版本 2 不能由 `schema init` 或启动自动升级，不兼容版本在初始化 DDL 前即被拒绝。运行时只读写业务状态，不执行 DDL。固定 schema 和按账户动态补行互不冲突。
 
@@ -106,3 +106,5 @@ QMT 侧检查停止标志、实例代次及短期授权。授权过期、失权�
 日志只接收有界普通值，不能为日志读取原生属性或把日志异常视作券商拒单。
 
 自动测试覆盖老查询兼容、合同参数、持久幂等、断连/超时、提交崩溃恢复、三类取消竞态、部分成交、`UNKNOWN` 单单冻结及三路线单票/篮子的 QMT 模拟函数调用。另需隔离 PostgreSQL 集成测试，验证 schema 初始化、事务、重启与并发；不得使用 TradeNest 数据库。最后在模拟盘逐条检验 DIRECT/SLICED/SMART 的单票与篮子路径，包括 remark、父任务、子委托、成交和撤单关联。代码测试通过不代表完成 QMT 实盘或模拟盘交易验收。
+
+当前 schema v4 的事件 `occurred_at` 和观测 `observed_at` 使用 `timestamptz`。repository 在读取边界转换为 UTC ISO 8601 字符串，保持文档、API 和证据哈希格式；不放宽 JSON 序列化器。v3 使用 `tools/order_timestamp_migration.py` 在备份与停写后显式迁移，保留所有业务事实及序列。数据库会话可设置 `Asia/Shanghai` 显示时间。

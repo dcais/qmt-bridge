@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-13。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-14。"""
 from decimal import Decimal, InvalidOperation
 from service.ipc_bridge.ipc_protocol.order_common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
@@ -98,6 +98,83 @@ def state_item(doc, identifiers):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def state_amount_equivalent(left, right):
+    """Allow at most 0.001 yuan of absolute observation noise, without rounding entries."""
+    try:
+        left, right = Decimal(str(left)), Decimal(str(right))
+        return (left.is_finite() and right.is_finite() and left >= 0 and right >= 0
+                and abs(left - right) <= Decimal('0.001'))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def state_query_order_alias(raw, source):
+    """Only a query's zero/missing-ref market_sysid form is a derived reference."""
+    ids = observation_identifiers('order', raw)
+    return (source == 'query' and observation_identity_valid('order', raw, ids)
+            and raw.get('m_nRef') in (None, '', 0, '0')
+            and ids['market'] in ('SH', 'SZ') and bool(ids['qmt_order_id'])
+            and raw.get('m_strOrderRef') == ids['market'] + '_' + ids['qmt_order_id'])
+
+
+def state_native_order_references(row):
+    raw = row.get('raw') or {}
+    if state_query_order_alias(raw, row.get('source')):
+        # A query alias must never complete a pair used by MISSING_QMT_ID resolution.
+        return state_id(row.get('native_ref')), state_id(row.get('native_order_ref'))
+    return (state_id(row.get('native_ref') or raw.get('m_nRef')),
+            state_id(row.get('native_order_ref') or raw.get('m_strOrderRef')))
+
+
+def state_equivalent_query_order(doc, row, raw, source):
+    """Recognize only uniquely scoped duplicate snapshots, in either arrival order."""
+    known_raw = row.get('raw') or {}
+    incoming_alias = state_query_order_alias(raw, source)
+    known_alias = state_query_order_alias(known_raw, row.get('source'))
+    if not incoming_alias and not (known_alias and source == 'callback'
+                                   and state_id(raw.get('m_nRef'))
+                                   and state_id(raw.get('m_strOrderRef'))):
+        return False
+    if incoming_alias and not known_alias and not all(state_native_order_references(row)):
+        return False
+    ids, known = observation_identifiers('order', raw), observation_identifiers('order', known_raw)
+    scope = ('account_id', 'trading_day', 'market', 'qmt_order_id', 'remark', 'symbol', 'side')
+    if (not observation_identity_valid('order', known_raw, known)
+            or any(not ids[key] or ids[key] != known[key] or ids[key] != row.get(key) for key in scope)
+            or ids['account_id'] != doc.get('account_id') or ids['remark'] != doc.get('remark')
+            or ((ids['qmt_task_id'] or known['qmt_task_id'] or row.get('qmt_task_id'))
+                and not ids['qmt_task_id'] == known['qmt_task_id'] == row.get('qmt_task_id'))):
+        return False
+    candidates = [candidate for candidate in doc['qmt_orders']
+                  if candidate.get('qmt_order_id') == ids['qmt_order_id']
+                  and candidate.get('trading_day') == ids['trading_day']
+                  and candidate.get('market') == ids['market']]
+    item = state_item(doc, ids)
+    if len(candidates) != 1 or item is None or row.get('item_id') != item['item_id']:
+        return False
+    # Time and strategy-type representations are retained in the observation log,
+    # but never used as identity evidence. Every other raw field must agree.
+    ignored = {'m_nRef', 'm_strOrderRef', 'm_nOrderStrategyType', 'm_strInsertTime'}
+    amounts = {'amount', 'filled_amount', 'm_dTradeAmount'}
+    for key in set(raw) | set(known_raw):
+        if key in ignored:
+            continue
+        if key in amounts:
+            if not state_amount_equivalent(raw.get(key), known_raw.get(key)):
+                return False
+        elif raw.get(key) != known_raw.get(key):
+            return False
+    required = (('quantity', 'm_nVolumeTotalOriginal'), ('filled_quantity', 'm_nVolumeTraded'),
+                ('status', 'execution_status', 'm_nOrderStatus'), ('m_dTradedPrice',),
+                ('amount', 'filled_amount', 'm_dTradeAmount'))
+    if any(state_value(raw, *keys) is None or state_value(known_raw, *keys) is None for keys in required):
+        return False
+    return (row.get('quantity') == state_number(raw, 'quantity', 'm_nVolumeTotalOriginal')
+            and row.get('filled_quantity') == state_number(raw, 'filled_quantity', 'm_nVolumeTraded')
+            and row.get('status') == state_status(state_value(raw, 'status', 'execution_status', 'm_nOrderStatus'),
+                                                 state_ORDER_STATUS))
+
+
 def state_evidence(doc, kind, raw, source, reason, observed_at):
     evidence = doc.setdefault('unassociated_evidence', [])
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
@@ -152,8 +229,7 @@ def resolve_missing_order_evidence(doc):
             known_scope = (known['account_id'], known['trading_day'], known['market'])
             if known_scope != scope or not all(known_scope) or not row.get('qmt_order_id'):
                 continue
-            native = (state_id(row.get('native_ref') or (row.get('raw') or {}).get('m_nRef')),
-                      state_id(row.get('native_order_ref') or (row.get('raw') or {}).get('m_strOrderRef')))
+            native = state_native_order_references(row)
             if not any(left == right for left, right in zip(references, native) if right):
                 continue
             # 共享任一引用却在另一引用或业务字段上冲突时，不猜测子委托归属。
@@ -223,8 +299,14 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 doc['fills'].append(record)
                 doc['submission_status'] = 'CONFIRMED'
                 doc['reconciliation_complete'] = False
-            elif previous['quantity'] != quantity or Decimal(previous['amount']) != Decimal(str(amount)) or previous['item_id'] != item['item_id']:
+            elif (previous['quantity'] != quantity or previous['item_id'] != item['item_id']
+                  or any(previous.get(name) and ids.get(name) and previous[name] != ids[name]
+                         for name in ('account_id', 'qmt_order_id', 'qmt_task_id', 'remark', 'symbol', 'side'))
+                  or not state_amount_equivalent(previous['amount'], amount)):
                 state_evidence(doc, kind, raw, source, 'CONFLICTING_FILL_IDENTITY', stamp)
+            else:
+                # Keep the original entry and raw callback; equivalent queries are logged separately.
+                return False
     elif kind in ('order', 'task'):
         id_name = 'qmt_order_id' if kind == 'order' else 'qmt_task_id'
         collection = doc['qmt_orders'] if kind == 'order' else doc['qmt_tasks']
@@ -241,6 +323,9 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 record = matching[0] if matching else dict(ids, **new_record_metadata())
                 if not matching:
                     collection.append(record)
+                equivalent_query = kind == 'order' and state_equivalent_query_order(doc, record, raw, source)
+                if equivalent_query and source == 'query':
+                    return False
                 old_status = record.get('status', 'UNKNOWN')
                 status = state_status(state_value(raw, 'status', 'execution_status', 'm_nOrderStatus') if kind == 'order'
                                       else state_value(raw, 'status', 'task_status', 'm_eStatus', 'm_nTaskStatus'),
@@ -259,10 +344,12 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                     native_ref = state_id(raw.get('m_nRef'))
                     native_order_ref = state_id(raw.get('m_strOrderRef'))
                     previous_raw = previous_record.get('raw') or {}
-                    previous_refs = (state_id(previous_record.get('native_ref') or previous_raw.get('m_nRef')),
-                                     state_id(previous_record.get('native_order_ref') or previous_raw.get('m_strOrderRef')))
+                    previous_refs = state_native_order_references(previous_record)
                     reference_conflict = any(old and new and old != new for old, new in
                                              zip(previous_refs, (native_ref, native_order_ref)))
+                    if (state_query_order_alias(previous_raw, previous_record.get('source'))
+                            and native_ref and native_order_ref and not equivalent_query):
+                        reference_conflict = True
                     if reference_conflict:
                         state_evidence(doc, kind, raw, source, 'CONFLICTING_ORDER_REFERENCE', stamp)
                         record.clear()

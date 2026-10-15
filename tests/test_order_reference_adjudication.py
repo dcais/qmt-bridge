@@ -20,7 +20,8 @@ class ReferenceAdjudicationTests(unittest.TestCase):
         state.apply_observation(doc, 'order', original, 'callback')
         state.apply_observation(doc, 'deal', deal(quantity=100, amount='1000'), 'callback')
         state.mark_reconciled(doc, now='2026-09-25T04:00:00Z')
-        alias = dict(original, m_nRef=0, m_strOrderRef='SH_o1', m_nOrderStrategyType=2)
+        # Keep this fixture outside automatic market_sysid recognition: it tests manual adjudication.
+        alias = dict(original, m_nRef=0, m_strOrderRef='reviewed-o1', m_nOrderStrategyType=2)
         state.apply_observation(doc, 'order', alias, 'query')
         evidence = copy.deepcopy(doc['unassociated_evidence'][0])
         evidence['resolution'] = dict(kind='MANUAL_NATIVE_REFERENCE_BINDING',

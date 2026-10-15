@@ -35,12 +35,12 @@ CREATE INDEX IF NOT EXISTS order_reconcile_due_v2 ON "qmt_order".orders(account_
  WHERE reconcile_pending;
 CREATE TABLE IF NOT EXISTS "qmt_order".order_events (
  account_type text NOT NULL, account_id text NOT NULL, event_seq bigint NOT NULL,
- order_id text NOT NULL, event_type text NOT NULL, occurred_at text NOT NULL, document jsonb NOT NULL,
+ order_id text NOT NULL, event_type text NOT NULL, occurred_at timestamptz NOT NULL, document jsonb NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(account_type,account_id,event_seq));
 CREATE TABLE IF NOT EXISTS "qmt_order".qmt_observations (
  observation_id bigserial PRIMARY KEY, account_type text NOT NULL, account_id text NOT NULL,
- kind text NOT NULL, source text NOT NULL, observed_at text NOT NULL, raw jsonb NOT NULL,
+ kind text NOT NULL, source text NOT NULL, observed_at timestamptz NOT NULL, raw jsonb NOT NULL,
  order_id text, applied boolean NOT NULL DEFAULT false, observation_hash text,
  created_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS qmt_observation_content ON "qmt_order".qmt_observations(account_type,account_id,observation_hash)

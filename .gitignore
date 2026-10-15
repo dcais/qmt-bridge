@@ -10,3 +10,4 @@ __pycache__/
 !.env.*.example
 var/
 .pytest_cache/
+/tmp/

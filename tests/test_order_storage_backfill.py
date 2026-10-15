@@ -68,6 +68,7 @@ class PostgresMigrationTests(unittest.TestCase):
     def _make_v2(self):
         """Reverse an empty current schema to the exact v2 column/key shape."""
         script = DEFAULT_SQL_PATH.read_text(encoding="utf-8-sig").replace(DEFAULT_SCHEMA, self.schema)
+        script = script.replace("occurred_at timestamptz", "occurred_at text").replace("observed_at timestamptz", "observed_at text")
         with self.conn.cursor() as cur:
             for statement in sql_statements(script):
                 cur.execute(statement)

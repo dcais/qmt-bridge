@@ -38,14 +38,14 @@ repo_SCHEMA_COLUMNS = {
     "order_events": {
         "account_type": repo_column("text"), "account_id": repo_column("text"),
         "event_seq": repo_column("bigint"), "order_id": repo_column("text"),
-        "event_type": repo_column("text"), "occurred_at": repo_column("text"),
+        "event_type": repo_column("text"), "occurred_at": repo_column("timestamp with time zone"),
         "document": repo_column("jsonb"),
         "created_at": repo_column("timestamp with time zone", default="now()")},
     "qmt_observations": {
         "observation_id": repo_column("bigint", default="nextval"),
         "account_type": repo_column("text"), "account_id": repo_column("text"),
         "kind": repo_column("text"), "source": repo_column("text"),
-        "observed_at": repo_column("text"), "raw": repo_column("jsonb"),
+        "observed_at": repo_column("timestamp with time zone"), "raw": repo_column("jsonb"),
         "order_id": repo_column("text", False),
         "applied": repo_column("boolean", default="false"),
         "observation_hash": repo_column("text", False),
@@ -147,8 +147,8 @@ def repo_generated_matches(expression, field, kind):
     return compact in ("document->>'{0}'".format(field), expected)
 
 
-def repo_check_storage_schema(cur, schema, expected_version=3):
-    """Validate the full v3 contract with catalog reads; never performs DDL or repairs."""
+def repo_check_storage_schema(cur, schema, expected_version=4):
+    """Validate the current contract (or explicit v3 for offline migration) with catalog reads; never performs DDL or repairs."""
     if not isinstance(schema, str) or not re.match(r'^"[A-Za-z_][A-Za-z0-9_]{0,62}"$', schema):
         raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
     schema_name = schema[1:-1]
@@ -171,6 +171,9 @@ def repo_check_storage_schema(cur, schema, expected_version=3):
         if table not in actual:
             raise repo_storage_error("missing required table: " + table)
         for column, (kind, required, default, generated) in columns.items():
+            if expected_version == 3 and (table, column) in (("order_events", "occurred_at"),
+                                                            ("qmt_observations", "observed_at")):
+                kind = "text"
             found = actual[table].get(column)
             if found is None:
                 raise repo_storage_error("missing required column: " + table + "." + column)

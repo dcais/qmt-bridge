@@ -18,7 +18,7 @@ from .state import (apply_cancel_request, apply_observation, cancel_response,
                     state_execution_finished, state_TERMINAL, restore_terminal_reconciliation)
 
 
-repo_SCHEMA_VERSION = 3
+repo_SCHEMA_VERSION = 4
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -43,6 +43,11 @@ def repo_schema(value):
 
 def repo_json(value):
     return json.loads(value) if isinstance(value, str) else copy_json(value)
+
+
+def repo_timestamp(value):
+    """Keep ISO strings compatible with legacy fixtures; normalize DB datetimes to UTC."""
+    return value if isinstance(value, str) else iso_datetime(value)
 
 
 def repo_inconsistent(message):
@@ -531,8 +536,8 @@ class PostgresRepository(object):
             for row in rows[:limit]:
                 doc = repo_json(row[4])
                 events.append({"event_id": row[0], "order_id": row[1], "order_version": doc["version"],
-                               "type": row[2], "recorded_at": row[3], "data": doc,
-                               "event_seq": row[0], "event_type": row[2], "occurred_at": row[3], "order": doc})
+                               "type": row[2], "recorded_at": repo_timestamp(row[3]), "data": doc,
+                               "event_seq": row[0], "event_type": row[2], "occurred_at": repo_timestamp(row[3]), "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
         return self.repo_run(listing)
@@ -572,7 +577,7 @@ class PostgresRepository(object):
             cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
             tail = cur.fetchone()
-            anchor = fingerprint([repo_json(tail[0]), tail[1], tail[2]]) if tail else None
+            anchor = fingerprint([repo_json(tail[0]), tail[1], repo_timestamp(tail[2])]) if tail else None
             if checkpoint and checkpoint['anchor'] != anchor:
                 raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
             cur.execute('SELECT count(*) FROM ' + self.repo_s +
@@ -582,7 +587,7 @@ class PostgresRepository(object):
             cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
                         'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
-            events = [dict(event_id=item[0], type=item[1], recorded_at=item[2], data=repo_json(item[3]))
+            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]), data=repo_json(item[3]))
                       for item in cur.fetchall()]
             meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
                         executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
@@ -830,7 +835,7 @@ class PostgresRepository(object):
             if doc is None:
                 continue
             before = json_text(doc)
-            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
+            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=repo_timestamp(row[4]))
             if json_text(doc) != before:
                 self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=row[3])
             cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
@@ -944,7 +949,7 @@ class PostgresRepository(object):
                     if ids.get("account_id") and str(ids["account_id"]) != self.account_id:
                         continue
                 result.append({"observation_id": row[0], "kind": row[1], "raw": raw, "source": row[3],
-                               "observed_at": row[4], "applied": row[5], "order_id": row[6]})
+                               "observed_at": repo_timestamp(row[4]), "applied": row[5], "order_id": row[6]})
             return result
         return self.repo_run(lookup)
 
@@ -1012,7 +1017,7 @@ class PostgresRepository(object):
                     cur.execute(sql + " LIMIT 1", params)
                     if cur.fetchone() is not None:
                         raise OrderError(409, "QMT_ID_CONFLICT", "QMT identity already belongs to another order")
-                observations.append((observation_id, kind, raw, source, observed_at))
+                observations.append((observation_id, kind, raw, source, repo_timestamp(observed_at)))
             for key, actual in (("qmt_order_ids", qmt_orders), ("qmt_task_ids", qmt_tasks)):
                 if key in audit and {str(value) for value in audit[key]} != actual:
                     raise OrderError(409, "QMT_ID_CONFLICT", "supplied QMT identities differ from selected observations")

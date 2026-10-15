@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-10-13 23:11:19
+# Last modified (Asia/Shanghai): 2026-10-15 09:28:19
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -715,7 +715,7 @@ def capabilities():
             "quantity_unit": "shares or ETF units; no multiplication", "amount_unit": "CNY, stocks only"}
 
 # ---- order_bridge/state.py ----
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-13。"""
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-14。"""
 from decimal import Decimal, InvalidOperation
 
 
@@ -813,6 +813,83 @@ def state_item(doc, identifiers):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def state_amount_equivalent(left, right):
+    """Allow at most 0.001 yuan of absolute observation noise, without rounding entries."""
+    try:
+        left, right = Decimal(str(left)), Decimal(str(right))
+        return (left.is_finite() and right.is_finite() and left >= 0 and right >= 0
+                and abs(left - right) <= Decimal('0.001'))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def state_query_order_alias(raw, source):
+    """Only a query's zero/missing-ref market_sysid form is a derived reference."""
+    ids = observation_identifiers('order', raw)
+    return (source == 'query' and observation_identity_valid('order', raw, ids)
+            and raw.get('m_nRef') in (None, '', 0, '0')
+            and ids['market'] in ('SH', 'SZ') and bool(ids['qmt_order_id'])
+            and raw.get('m_strOrderRef') == ids['market'] + '_' + ids['qmt_order_id'])
+
+
+def state_native_order_references(row):
+    raw = row.get('raw') or {}
+    if state_query_order_alias(raw, row.get('source')):
+        # A query alias must never complete a pair used by MISSING_QMT_ID resolution.
+        return state_id(row.get('native_ref')), state_id(row.get('native_order_ref'))
+    return (state_id(row.get('native_ref') or raw.get('m_nRef')),
+            state_id(row.get('native_order_ref') or raw.get('m_strOrderRef')))
+
+
+def state_equivalent_query_order(doc, row, raw, source):
+    """Recognize only uniquely scoped duplicate snapshots, in either arrival order."""
+    known_raw = row.get('raw') or {}
+    incoming_alias = state_query_order_alias(raw, source)
+    known_alias = state_query_order_alias(known_raw, row.get('source'))
+    if not incoming_alias and not (known_alias and source == 'callback'
+                                   and state_id(raw.get('m_nRef'))
+                                   and state_id(raw.get('m_strOrderRef'))):
+        return False
+    if incoming_alias and not known_alias and not all(state_native_order_references(row)):
+        return False
+    ids, known = observation_identifiers('order', raw), observation_identifiers('order', known_raw)
+    scope = ('account_id', 'trading_day', 'market', 'qmt_order_id', 'remark', 'symbol', 'side')
+    if (not observation_identity_valid('order', known_raw, known)
+            or any(not ids[key] or ids[key] != known[key] or ids[key] != row.get(key) for key in scope)
+            or ids['account_id'] != doc.get('account_id') or ids['remark'] != doc.get('remark')
+            or ((ids['qmt_task_id'] or known['qmt_task_id'] or row.get('qmt_task_id'))
+                and not ids['qmt_task_id'] == known['qmt_task_id'] == row.get('qmt_task_id'))):
+        return False
+    candidates = [candidate for candidate in doc['qmt_orders']
+                  if candidate.get('qmt_order_id') == ids['qmt_order_id']
+                  and candidate.get('trading_day') == ids['trading_day']
+                  and candidate.get('market') == ids['market']]
+    item = state_item(doc, ids)
+    if len(candidates) != 1 or item is None or row.get('item_id') != item['item_id']:
+        return False
+    # Time and strategy-type representations are retained in the observation log,
+    # but never used as identity evidence. Every other raw field must agree.
+    ignored = {'m_nRef', 'm_strOrderRef', 'm_nOrderStrategyType', 'm_strInsertTime'}
+    amounts = {'amount', 'filled_amount', 'm_dTradeAmount'}
+    for key in set(raw) | set(known_raw):
+        if key in ignored:
+            continue
+        if key in amounts:
+            if not state_amount_equivalent(raw.get(key), known_raw.get(key)):
+                return False
+        elif raw.get(key) != known_raw.get(key):
+            return False
+    required = (('quantity', 'm_nVolumeTotalOriginal'), ('filled_quantity', 'm_nVolumeTraded'),
+                ('status', 'execution_status', 'm_nOrderStatus'), ('m_dTradedPrice',),
+                ('amount', 'filled_amount', 'm_dTradeAmount'))
+    if any(state_value(raw, *keys) is None or state_value(known_raw, *keys) is None for keys in required):
+        return False
+    return (row.get('quantity') == state_number(raw, 'quantity', 'm_nVolumeTotalOriginal')
+            and row.get('filled_quantity') == state_number(raw, 'filled_quantity', 'm_nVolumeTraded')
+            and row.get('status') == state_status(state_value(raw, 'status', 'execution_status', 'm_nOrderStatus'),
+                                                 state_ORDER_STATUS))
+
+
 def state_evidence(doc, kind, raw, source, reason, observed_at):
     evidence = doc.setdefault('unassociated_evidence', [])
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
@@ -867,8 +944,7 @@ def resolve_missing_order_evidence(doc):
             known_scope = (known['account_id'], known['trading_day'], known['market'])
             if known_scope != scope or not all(known_scope) or not row.get('qmt_order_id'):
                 continue
-            native = (state_id(row.get('native_ref') or (row.get('raw') or {}).get('m_nRef')),
-                      state_id(row.get('native_order_ref') or (row.get('raw') or {}).get('m_strOrderRef')))
+            native = state_native_order_references(row)
             if not any(left == right for left, right in zip(references, native) if right):
                 continue
             # 共享任一引用却在另一引用或业务字段上冲突时，不猜测子委托归属。
@@ -938,8 +1014,14 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 doc['fills'].append(record)
                 doc['submission_status'] = 'CONFIRMED'
                 doc['reconciliation_complete'] = False
-            elif previous['quantity'] != quantity or Decimal(previous['amount']) != Decimal(str(amount)) or previous['item_id'] != item['item_id']:
+            elif (previous['quantity'] != quantity or previous['item_id'] != item['item_id']
+                  or any(previous.get(name) and ids.get(name) and previous[name] != ids[name]
+                         for name in ('account_id', 'qmt_order_id', 'qmt_task_id', 'remark', 'symbol', 'side'))
+                  or not state_amount_equivalent(previous['amount'], amount)):
                 state_evidence(doc, kind, raw, source, 'CONFLICTING_FILL_IDENTITY', stamp)
+            else:
+                # Keep the original entry and raw callback; equivalent queries are logged separately.
+                return False
     elif kind in ('order', 'task'):
         id_name = 'qmt_order_id' if kind == 'order' else 'qmt_task_id'
         collection = doc['qmt_orders'] if kind == 'order' else doc['qmt_tasks']
@@ -956,6 +1038,9 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 record = matching[0] if matching else dict(ids, **new_record_metadata())
                 if not matching:
                     collection.append(record)
+                equivalent_query = kind == 'order' and state_equivalent_query_order(doc, record, raw, source)
+                if equivalent_query and source == 'query':
+                    return False
                 old_status = record.get('status', 'UNKNOWN')
                 status = state_status(state_value(raw, 'status', 'execution_status', 'm_nOrderStatus') if kind == 'order'
                                       else state_value(raw, 'status', 'task_status', 'm_eStatus', 'm_nTaskStatus'),
@@ -974,10 +1059,12 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                     native_ref = state_id(raw.get('m_nRef'))
                     native_order_ref = state_id(raw.get('m_strOrderRef'))
                     previous_raw = previous_record.get('raw') or {}
-                    previous_refs = (state_id(previous_record.get('native_ref') or previous_raw.get('m_nRef')),
-                                     state_id(previous_record.get('native_order_ref') or previous_raw.get('m_strOrderRef')))
+                    previous_refs = state_native_order_references(previous_record)
                     reference_conflict = any(old and new and old != new for old, new in
                                              zip(previous_refs, (native_ref, native_order_ref)))
+                    if (state_query_order_alias(previous_raw, previous_record.get('source'))
+                            and native_ref and native_order_ref and not equivalent_query):
+                        reference_conflict = True
                     if reference_conflict:
                         state_evidence(doc, kind, raw, source, 'CONFLICTING_ORDER_REFERENCE', stamp)
                         record.clear()
@@ -1353,14 +1440,14 @@ repo_SCHEMA_COLUMNS = {
     "order_events": {
         "account_type": repo_column("text"), "account_id": repo_column("text"),
         "event_seq": repo_column("bigint"), "order_id": repo_column("text"),
-        "event_type": repo_column("text"), "occurred_at": repo_column("text"),
+        "event_type": repo_column("text"), "occurred_at": repo_column("timestamp with time zone"),
         "document": repo_column("jsonb"),
         "created_at": repo_column("timestamp with time zone", default="now()")},
     "qmt_observations": {
         "observation_id": repo_column("bigint", default="nextval"),
         "account_type": repo_column("text"), "account_id": repo_column("text"),
         "kind": repo_column("text"), "source": repo_column("text"),
-        "observed_at": repo_column("text"), "raw": repo_column("jsonb"),
+        "observed_at": repo_column("timestamp with time zone"), "raw": repo_column("jsonb"),
         "order_id": repo_column("text", False),
         "applied": repo_column("boolean", default="false"),
         "observation_hash": repo_column("text", False),
@@ -1462,8 +1549,8 @@ def repo_generated_matches(expression, field, kind):
     return compact in ("document->>'{0}'".format(field), expected)
 
 
-def repo_check_storage_schema(cur, schema, expected_version=3):
-    """Validate the full v3 contract with catalog reads; never performs DDL or repairs."""
+def repo_check_storage_schema(cur, schema, expected_version=4):
+    """Validate the current contract (or explicit v3 for offline migration) with catalog reads; never performs DDL or repairs."""
     if not isinstance(schema, str) or not re.match(r'^"[A-Za-z_][A-Za-z0-9_]{0,62}"$', schema):
         raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
     schema_name = schema[1:-1]
@@ -1486,6 +1573,9 @@ def repo_check_storage_schema(cur, schema, expected_version=3):
         if table not in actual:
             raise repo_storage_error("missing required table: " + table)
         for column, (kind, required, default, generated) in columns.items():
+            if expected_version == 3 and (table, column) in (("order_events", "occurred_at"),
+                                                            ("qmt_observations", "observed_at")):
+                kind = "text"
             found = actual[table].get(column)
             if found is None:
                 raise repo_storage_error("missing required column: " + table + "." + column)
@@ -1661,7 +1751,7 @@ from datetime import timedelta
 
 
 
-repo_SCHEMA_VERSION = 3
+repo_SCHEMA_VERSION = 4
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -1686,6 +1776,11 @@ def repo_schema(value):
 
 def repo_json(value):
     return json.loads(value) if isinstance(value, str) else copy_json(value)
+
+
+def repo_timestamp(value):
+    """Keep ISO strings compatible with legacy fixtures; normalize DB datetimes to UTC."""
+    return value if isinstance(value, str) else iso_datetime(value)
 
 
 def repo_inconsistent(message):
@@ -2174,8 +2269,8 @@ class PostgresRepository(object):
             for row in rows[:limit]:
                 doc = repo_json(row[4])
                 events.append({"event_id": row[0], "order_id": row[1], "order_version": doc["version"],
-                               "type": row[2], "recorded_at": row[3], "data": doc,
-                               "event_seq": row[0], "event_type": row[2], "occurred_at": row[3], "order": doc})
+                               "type": row[2], "recorded_at": repo_timestamp(row[3]), "data": doc,
+                               "event_seq": row[0], "event_type": row[2], "occurred_at": repo_timestamp(row[3]), "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
         return self.repo_run(listing)
@@ -2215,7 +2310,7 @@ class PostgresRepository(object):
             cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
             tail = cur.fetchone()
-            anchor = fingerprint([repo_json(tail[0]), tail[1], tail[2]]) if tail else None
+            anchor = fingerprint([repo_json(tail[0]), tail[1], repo_timestamp(tail[2])]) if tail else None
             if checkpoint and checkpoint['anchor'] != anchor:
                 raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
             cur.execute('SELECT count(*) FROM ' + self.repo_s +
@@ -2225,7 +2320,7 @@ class PostgresRepository(object):
             cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
                         'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
-            events = [dict(event_id=item[0], type=item[1], recorded_at=item[2], data=repo_json(item[3]))
+            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]), data=repo_json(item[3]))
                       for item in cur.fetchall()]
             meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
                         executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
@@ -2473,7 +2568,7 @@ class PostgresRepository(object):
             if doc is None:
                 continue
             before = json_text(doc)
-            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=row[4])
+            apply_observation(doc, row[1], repo_json(row[2]), row[3], observed_at=repo_timestamp(row[4]))
             if json_text(doc) != before:
                 self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=row[3])
             cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
@@ -2587,7 +2682,7 @@ class PostgresRepository(object):
                     if ids.get("account_id") and str(ids["account_id"]) != self.account_id:
                         continue
                 result.append({"observation_id": row[0], "kind": row[1], "raw": raw, "source": row[3],
-                               "observed_at": row[4], "applied": row[5], "order_id": row[6]})
+                               "observed_at": repo_timestamp(row[4]), "applied": row[5], "order_id": row[6]})
             return result
         return self.repo_run(lookup)
 
@@ -2655,7 +2750,7 @@ class PostgresRepository(object):
                     cur.execute(sql + " LIMIT 1", params)
                     if cur.fetchone() is not None:
                         raise OrderError(409, "QMT_ID_CONFLICT", "QMT identity already belongs to another order")
-                observations.append((observation_id, kind, raw, source, observed_at))
+                observations.append((observation_id, kind, raw, source, repo_timestamp(observed_at)))
             for key, actual in (("qmt_order_ids", qmt_orders), ("qmt_task_ids", qmt_tasks)):
                 if key in audit and {str(value) for value in audit[key]} != actual:
                     raise OrderError(409, "QMT_ID_CONFLICT", "supplied QMT identities differ from selected observations")
