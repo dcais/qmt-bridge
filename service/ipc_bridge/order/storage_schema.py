@@ -52,6 +52,12 @@ repo_SCHEMA_COLUMNS = {
         "created_at": repo_column("timestamp with time zone", default="now()")},
 }
 
+repo_SCHEMA_COLUMNS["submission_bans"] = {
+    "account_type": repo_column("text"), "account_id": repo_column("text"),
+    "client_order_id": repo_column("text"), "cancel_request_id": repo_column("text"),
+    "request_hash": repo_column("text"), "document": repo_column("jsonb"),
+    "created_at": repo_column("timestamp with time zone", default="now()")}
+
 repo_CHILD_GENERATED = {
     "order_items": {"item_id": "text", "symbol": "text", "side": "text"},
     "execution_attempts": {"attempt_id": "text", "kind": "text", "status": "text",
@@ -80,6 +86,7 @@ for repo_table, repo_fields in repo_CHILD_GENERATED.items():
     repo_SCHEMA_COLUMNS[repo_table] = repo_columns
 
 repo_SCHEMA_INDEXES = {
+    "submission_ban_cancel_id": ("submission_bans", True, ("account_type", "account_id", "cancel_request_id")),
     "order_items_business_id": ("order_items", True, ("account_type", "account_id", "order_id", "item_id")),
     "execution_attempts_business_id": ("execution_attempts", True, ("account_type", "account_id", "order_id", "attempt_id")),
     "cancel_request_scope_id": ("cancel_requests", True, ("account_type", "account_id", "cancel_request_id")),
@@ -89,6 +96,7 @@ repo_SCHEMA_INDEXES = {
     "fills_order_identity_lookup": ("fills", False, ("account_type", "account_id", "qmt_order_id", "trading_day", "market")),
 }
 repo_PRIMARY_KEYS = {
+    "submission_bans": ("account_type", "account_id", "client_order_id"),
     "schema_version": ("version",),
     "account_runtime": ("account_type", "account_id"),
     "orders": ("account_type", "account_id", "order_id"),
@@ -147,7 +155,7 @@ def repo_generated_matches(expression, field, kind):
     return compact in ("document->>'{0}'".format(field), expected)
 
 
-def repo_check_storage_schema(cur, schema, expected_version=4):
+def repo_check_storage_schema(cur, schema, expected_version=5):
     """Validate the current contract (or explicit v3 for offline migration) with catalog reads; never performs DDL or repairs."""
     if not isinstance(schema, str) or not re.match(r'^"[A-Za-z_][A-Za-z0-9_]{0,62}"$', schema):
         raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
@@ -168,6 +176,8 @@ def repo_check_storage_schema(cur, schema, expected_version=4):
         if [row[0] for row in cur.fetchall()] != [expected_version]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
     for table, columns in repo_SCHEMA_COLUMNS.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         if table not in actual:
             raise repo_storage_error("missing required table: " + table)
         for column, (kind, required, default, generated) in columns.items():
@@ -197,10 +207,14 @@ def repo_check_storage_schema(cur, schema, expected_version=4):
     indexes = {name: (table, bool(unique), bool(valid), bool(ready), predicate, tuple(columns))
                for table, name, unique, valid, ready, predicate, columns in cur.fetchall()}
     for name, (table, unique, columns) in repo_SCHEMA_INDEXES.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         found = indexes.get(name)
         if found != (table, unique, True, True, None, columns):
             raise repo_storage_error("missing or incorrect required index: " + name)
     for table, columns in repo_PRIMARY_KEYS.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         name = table + "_pkey"
         found = indexes.get(name)
         if found != (table, True, True, True, None, columns):

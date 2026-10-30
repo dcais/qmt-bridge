@@ -204,7 +204,7 @@ class PostgresRepositoryTests(unittest.TestCase):
 
     def test_schema_check_needs_no_account_and_does_not_insert_one(self):
         other = self.other("new-startup-account")
-        self.assertEqual(other.check_schema(), {"schema_version": 4, "ready": True})
+        self.assertEqual(other.check_schema(), {"schema_version": 5, "ready": True})
         def records(cur):
             cur.execute("SELECT account_id FROM " + other.repo_s +
                         ".account_runtime WHERE account_type=%s AND account_id=%s", other.repo_scope)
@@ -457,7 +457,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 404)
 
     def test_health_and_canonical_event_contract(self):
-        self.assertEqual(self.repo.health(), {"schema_version": 4, "ready": True,
+        self.assertEqual(self.repo.health(), {"schema_version": 5, "ready": True,
                                              "executor": False, "unknown_order_count": 0, "pending_count": 0})
         self.owner()
         doc = self.order()

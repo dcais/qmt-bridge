@@ -133,7 +133,7 @@ class TimestampRepositoryTests(unittest.TestCase):
     def test_strings_remain_compatible_and_json_serializer_stays_strict(self):
         for base, module, repo in self.repositories():
             with self.subTest(base=base):
-                self.assertEqual(module.repo_SCHEMA_VERSION, 4)
+                self.assertEqual(module.repo_SCHEMA_VERSION, 5)
                 legacy = "2026-10-15T09:30:12.123456+08:00"
                 self.assertEqual(module.repo_timestamp(legacy), legacy)
                 with self.assertRaises(TypeError):

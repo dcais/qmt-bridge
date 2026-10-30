@@ -126,3 +126,12 @@ CREATE TABLE IF NOT EXISTS "qmt_order".fills (
 CREATE INDEX IF NOT EXISTS fills_trade_identity_lookup ON "qmt_order".fills(account_type,account_id,trade_id,trading_day,market);
 CREATE INDEX IF NOT EXISTS fills_order_identity_lookup ON "qmt_order".fills(account_type,account_id,qmt_order_id,trading_day,market);
 -- tools/order_schema.py seeds the version. Strategy startup creates its account_runtime row.
+
+CREATE TABLE IF NOT EXISTS "qmt_order".submission_bans (
+ account_type text NOT NULL, account_id text NOT NULL,
+ client_order_id text NOT NULL, cancel_request_id text NOT NULL,
+ request_hash text NOT NULL, document jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(account_type,account_id,client_order_id));
+CREATE UNIQUE INDEX IF NOT EXISTS submission_ban_cancel_id
+ ON "qmt_order".submission_bans(account_type,account_id,cancel_request_id);

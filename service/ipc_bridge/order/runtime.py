@@ -165,6 +165,7 @@ class OrderRuntime:
             self._runtime_keys(params, ())
             result = capabilities()
             result['evidence_v1'] = evidence_capabilities()
+            result['cancel_before_submit_v1'] = dict(supported=True, receipt_type='SUBMISSION_BAN', schema_version=1)
             result["qmt_functions"] = {name: self.adapter.available(name) for name in
                 ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket", "get_history_trade_detail_data")}
             result["history_query"] = qmt_history_capabilities(self.adapter.apis)
@@ -239,6 +240,8 @@ class OrderRuntime:
                     raise
                 existing = None
             if existing is not None:
+                if existing.get("receipt_type") == "SUBMISSION_BAN":
+                    raise OrderError(409, "SUBMISSION_BANNED", "client_order_id is durably cancelled before submission")
                 if existing["request_hash"] != fingerprint(request):
                     raise OrderError(409, "IDEMPOTENCY_CONFLICT", "client_order_id has a different request")
                 return 200, public_order(existing, True)
@@ -264,7 +267,8 @@ class OrderRuntime:
             value = params.get("client_order_id")
             if not isinstance(value, str) or not value:
                 raise OrderError(400, "INVALID_PARAMS", "client_order_id is required")
-            return 200, public_order(self.repo.get_order(value))
+            document = self.repo.get_order(value)
+            return 200, (document if document.get("receipt_type") == "SUBMISSION_BAN" else public_order(document))
         if method == "orders":
             self._runtime_keys(params, ("active", "limit", "cursor"))
             active = params.get("active", "true")

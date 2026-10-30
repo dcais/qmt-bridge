@@ -18,7 +18,7 @@ from .state import (apply_cancel_request, apply_observation, cancel_response,
                     state_execution_finished, state_TERMINAL, restore_terminal_reconciliation)
 
 
-repo_SCHEMA_VERSION = 4
+repo_SCHEMA_VERSION = 5
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -410,10 +410,20 @@ class PostgresRepository(object):
                         self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
         return doc
 
+    def repo_ban(self, cur, value, by_cancel=False):
+        column = "cancel_request_id" if by_cancel else "client_order_id"
+        cur.execute("SELECT request_hash,document FROM " + self.repo_s +
+                    ".submission_bans WHERE account_type=%s AND account_id=%s AND " + column + "=%s",
+                    self.repo_scope + (value,))
+        row = cur.fetchone()
+        return (row[0], repo_json(row[1])) if row else None
+
     def accept_order(self, normalized):
         if str(normalized.get("account_id")) != self.account_id:
             raise OrderError(400, "ACCOUNT_MISMATCH", "request does not belong to this account")
         def accept(cur):
+            if self.repo_ban(cur, normalized["client_order_id"]):
+                raise OrderError(409, "SUBMISSION_BANNED", "client_order_id is durably cancelled before submission")
             doc = self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True)
             if doc:
                 if doc["request_hash"] != fingerprint(normalized):
@@ -425,7 +435,13 @@ class PostgresRepository(object):
         return self.repo_run(accept, mutation=True)
 
     def get_order(self, client_order_id):
-        return self.repo_run(lambda cur: self.repo_require(self.repo_load(cur, client_order_id, by_client=True)))
+        def read(cur):
+            doc = self.repo_load(cur, client_order_id, by_client=True)
+            if doc is not None:
+                return doc
+            ban = self.repo_ban(cur, client_order_id)
+            return ban[1] if ban else self.repo_require(None)
+        return self.repo_run(read)
 
     def get_by_id(self, order_id):
         return self.repo_run(lambda cur: self.repo_require(self.repo_load(cur, order_id)))
@@ -491,6 +507,11 @@ class PostgresRepository(object):
             raise OrderError(400, "ACCOUNT_MISMATCH", "request does not belong to this account")
         def cancel(cur):
             cancel_id = normalized["cancel_request_id"]
+            ban = self.repo_ban(cur, cancel_id, by_cancel=True)
+            if ban:
+                if ban[0] != fingerprint(normalized):
+                    raise OrderError(409, "IDEMPOTENCY_CONFLICT", "cancel_request_id already has different request content")
+                return 200, ban[1]
             cur.execute("SELECT order_id,document FROM " + self.repo_s + ".cancel_requests "
                         "WHERE account_type=%s AND account_id=%s AND cancel_request_id=%s", self.repo_scope + (cancel_id,))
             row = cur.fetchone()
@@ -500,7 +521,27 @@ class PostgresRepository(object):
                     raise OrderError(409, "IDEMPOTENCY_CONFLICT", "cancel_request_id already has different request content")
                 doc = self.repo_require(self.repo_load(cur, row[0], lock=True))
                 return record.get("http_status", 200), cancel_response(doc, cancel_id, replayed=True)
-            doc = self.repo_require(self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True))
+            doc = self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True)
+            if doc is None:
+                if self.repo_ban(cur, normalized["client_order_id"]):
+                    raise OrderError(409, "IDEMPOTENCY_CONFLICT", "client_order_id already has a different cancellation receipt")
+                cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id' FROM " + self.repo_s +
+                            ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+                stream = cur.fetchone()
+                if not stream or not stream[0]:
+                    raise OrderError(503, "EVIDENCE_SCHEMA_REQUIRED", "durable submission ban requires persisted evidence stream identity")
+                receipt = dict(receipt_type="SUBMISSION_BAN", receipt_version=1,
+                               source="BRIDGE_PERSISTED_SUBMISSION_BAN", stream_id=stream[0],
+                               account_type=self.account_type, account_id=self.account_id,
+                               client_order_id=normalized["client_order_id"], cancel_request_id=cancel_id,
+                               ban_id=str(uuid.uuid4()), created_at=iso_datetime(utc_now()),
+                               submission_status="CANCELLED_LOCAL", cancel_status="CONFIRMED",
+                               no_submission=True, execution_attempt_count=0)
+                cur.execute("INSERT INTO " + self.repo_s + ".submission_bans "
+                            "(account_type,account_id,client_order_id,cancel_request_id,request_hash,document) "
+                            "VALUES(%s,%s,%s,%s,%s,%s::jsonb)", self.repo_scope +
+                            (normalized["client_order_id"], cancel_id, fingerprint(normalized), json_text(receipt)))
+                return 200, receipt
             record, status = apply_cancel_request(doc, normalized)
             record = next(row for row in doc["cancel_requests"] if row["cancel_request_id"] == cancel_id)
             record["request_hash"] = fingerprint(normalized)

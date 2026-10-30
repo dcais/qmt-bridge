@@ -53,7 +53,7 @@ class StorageSchemaTests(unittest.TestCase):
             self.assertEqual(cur.fetchone()[0], 0)
             cur.execute("SELECT count(*) FROM information_schema.columns "
                         "WHERE table_schema=%s AND column_name='created_at'", (self.schema_name,))
-            self.assertEqual(cur.fetchone()[0], 11)
+            self.assertEqual(cur.fetchone()[0], 12)
             cur.execute("INSERT INTO " + self.repo_s + ".account_runtime(account_type,account_id,event_seq) "
                         "VALUES('STOCK','test-account',37)")
             cur.execute("SELECT created_at FROM " + self.repo_s + ".account_runtime")
@@ -67,7 +67,7 @@ class StorageSchemaTests(unittest.TestCase):
         with self.connection.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
             self.assertEqual(repo_check_storage_schema(cur, self.repo_s),
-                             {"schema_version": 4, "ready": True})
+                             {"schema_version": 5, "ready": True})
         self.connection.rollback()
         with self.connection.cursor() as cur:
             cur.execute("UPDATE " + self.repo_s + ".schema_version SET version=2")
