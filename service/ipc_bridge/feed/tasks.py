@@ -5,7 +5,7 @@ import uuid
 
 from service.ipc_bridge.ipc_protocol.feed_contracts import FeedError
 
-MAX_DOWNLOAD_TASKS = 1000
+MAX_DOWNLOAD_TASKS = 5000
 
 
 def download_task_public(task):

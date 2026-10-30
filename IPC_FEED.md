@@ -302,7 +302,7 @@ curl.exe -X POST `
 单证券下载没有来自 QMT 的真实百分比进度，FEED 不伪造百分比。
 `get_download_status` 直接读取线程安全内存快照，不进入 QMT 请求队列；
 因此即使某个下载正在 QMT 策略线程里同步执行，HTTP 状态轮询也不会排队等
-下一次 QMT 调度。内存任务表最多保留 1000 个任务；满时会优先淘汰已经结束
+下一次 QMT 调度。下载等待队列最多容纳 1000 个任务，满时新请求返回 `429 QUEUE_FULL`。内存任务表最多保留 5000 个任务；满时会优先淘汰已经结束
 的任务，若全是未结束任务则返回 `429 DOWNLOAD_TASKS_FULL`。
 
 `download_history_data` 是 QMT 同步调用，FEED 无法从 HTTP 线程强制中断。

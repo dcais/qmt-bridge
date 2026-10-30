@@ -13,7 +13,7 @@ from .tasks import (
 
 
 class FeedService:
-    def __init__(self, call, request_timeout=10, download_timeout=120, queue_size=64):
+    def __init__(self, call, request_timeout=10, download_timeout=120, queue_size=1000):
         if request_timeout <= 0 or download_timeout <= 0:
             raise ValueError("Feed timeouts must be positive")
         if queue_size <= 0:
