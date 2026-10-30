@@ -1,0 +1,3531 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-27T05:53:28.120774+00:00",
+  "szse_as_of": "2026-10-27",
+  "sse_lof_categories": [
+    "F200",
+    "F210",
+    "F211",
+    "F212",
+    "F213",
+    "F214",
+    "F220"
+  ],
+  "sources": [
+    {
+      "url": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true",
+      "sha256": "0d772f78280991d949bc7ed7ce44b4c81b96228189ba54481aea453983dab7d8",
+      "fetched_at": "2026-10-27T05:53:24.196495+00:00"
+    },
+    {
+      "url": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_JJLX_C",
+      "sha256": "b824915d6b98d69b7959b5a733de0003484f70350fdaebf858f364097f41c400",
+      "fetched_at": "2026-10-27T05:53:24.263164+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=1",
+      "sha256": "a5d89cd7793609f27179e676e292004c4c680b582d16c0629c78d5754e354944",
+      "fetched_at": "2026-10-27T05:53:24.587936+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=2",
+      "sha256": "a819bd4f538992dc745d83ba47694be386fda943d93069e0e707f6f6c81b726e",
+      "fetched_at": "2026-10-27T05:53:24.855191+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=3",
+      "sha256": "c7b45363ea501531037d471d246acdbf1282b6282f189678666f1105e97c3715",
+      "fetched_at": "2026-10-27T05:53:24.856619+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=4",
+      "sha256": "fa02ab1489200a6593f814fcf0d70e448b96b50483078591558585da7ac1e897",
+      "fetched_at": "2026-10-27T05:53:24.852511+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=5",
+      "sha256": "dc6a5efb573bd9d52b0d157c8fbf724b25b12fb1c1cd173a6e57a5b6e1a5f4fb",
+      "fetched_at": "2026-10-27T05:53:24.857168+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=6",
+      "sha256": "e5cc0a41d4c2d5025da4e4478db438945cbc18518fa4353aa7bc769f01227bff",
+      "fetched_at": "2026-10-27T05:53:25.107200+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=7",
+      "sha256": "406288f46fb92b38c9b5e86e13b21cb5eb64a9dba298cf7d5d376098228ad492",
+      "fetched_at": "2026-10-27T05:53:25.115328+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=8",
+      "sha256": "970d82d9b24338e28c3d4d09345d12f622b3feff8ec086674fa8e8f07f17f166",
+      "fetched_at": "2026-10-27T05:53:25.115328+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=9",
+      "sha256": "ef2548b7c719c87df4c06000c07676fb1697ac12c7cbc9ca4e3281a89843b379",
+      "fetched_at": "2026-10-27T05:53:25.123624+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=10",
+      "sha256": "da8e07cd8f9ed73e9959afcb2da5e49205ffed03d009a5e1ac793a9079f240e2",
+      "fetched_at": "2026-10-27T05:53:25.364122+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=11",
+      "sha256": "e312e1125853807f4cc3047a610b7cbaf783117f7c63a2e41ea72d52c6b47f25",
+      "fetched_at": "2026-10-27T05:53:25.360302+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=12",
+      "sha256": "8bf7275884566105ac6a18d3252297f7ccbbfc6f47b7eefd242ce0ff68ee56c4",
+      "fetched_at": "2026-10-27T05:53:25.369173+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=13",
+      "sha256": "5260fdd962a5f5aae30d326aea42df7e7c7c1afea04abdd16ef97f221ebcf04d",
+      "fetched_at": "2026-10-27T05:53:25.367136+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=14",
+      "sha256": "a242e1dd3ad30e9aedd762c003749638acd431c7d1fed2db627ea05b89086e80",
+      "fetched_at": "2026-10-27T05:53:25.602049+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=15",
+      "sha256": "8cce424483e08f998d4f5d993158e74195d94f0cb62bdfd66c318760740d5dd7",
+      "fetched_at": "2026-10-27T05:53:25.648705+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=16",
+      "sha256": "d16e806b3a3ec976e6087cb0b408db3360f666f4173e02f7bd64a7a911e58747",
+      "fetched_at": "2026-10-27T05:53:25.633292+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=17",
+      "sha256": "561a64089217e826285025a700e10ee45474ece46b917df4ac18c7014d863bc9",
+      "fetched_at": "2026-10-27T05:53:25.608449+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=18",
+      "sha256": "d8115358d1e2ecd0d030c76f41d4df0d163d773fbb82aed91160141c1cab3a77",
+      "fetched_at": "2026-10-27T05:53:25.856196+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=19",
+      "sha256": "e915e983f6a24c50c0e2e3354efd98724f07303e066f020ab240b1c6dcacb373",
+      "fetched_at": "2026-10-27T05:53:25.856196+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=20",
+      "sha256": "ba2810779734541c3179553c5b4977dd158fddff6d2a04288fb612ec689cedb3",
+      "fetched_at": "2026-10-27T05:53:25.885956+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=21",
+      "sha256": "8a010dee180ebd0a5ad39bb657d41ebf012518aeb74d030d413a094e3cd93048",
+      "fetched_at": "2026-10-27T05:53:25.907500+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=22",
+      "sha256": "5f5ac3004dc807b7cd13dfbd4aa171f11dcbccfa685b7a57c53ea15c48ed460f",
+      "fetched_at": "2026-10-27T05:53:26.115261+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=23",
+      "sha256": "1e4348a3c0266d3c4df7d34d38998c28bd9b4ebae601258ce54cfa790d810d4b",
+      "fetched_at": "2026-10-27T05:53:26.101392+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=24",
+      "sha256": "25f2d520bf47d1555de500c2fd877350d7f2dacf8a9def7770a847afdfa414c7",
+      "fetched_at": "2026-10-27T05:53:26.149789+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=25",
+      "sha256": "8c6daffb3935dad9fa123a310db7388043223c3c4624aa9627615be2bdb51029",
+      "fetched_at": "2026-10-27T05:53:26.144963+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=26",
+      "sha256": "cbe8482ad89ef21398bdfd3f8fab23ef74893c2054edc45c9fe8a75e28ffcc76",
+      "fetched_at": "2026-10-27T05:53:26.394729+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=27",
+      "sha256": "88dd8a18b20df069212beb1da66fa81506e3bb7b1d055735891efd80df73d234",
+      "fetched_at": "2026-10-27T05:53:26.359146+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=28",
+      "sha256": "8ee4d050683d904cc4dc1f23d03ab1429194af866d198da7e86dca22648a50db",
+      "fetched_at": "2026-10-27T05:53:26.358083+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=29",
+      "sha256": "a154137b5083a3b8c8fca8d241e4bf2356ce53d8c8043d547515b80b7e8ecff9",
+      "fetched_at": "2026-10-27T05:53:26.355818+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=30",
+      "sha256": "232ac3dd1b014f6f61ab339ab6f10aab738f22a0a04dc98e94745c85992eebfb",
+      "fetched_at": "2026-10-27T05:53:26.621141+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=31",
+      "sha256": "cdbc285c061c6bcfda209631c1bdc7ec8dd5b7889797c7be34fdac696f5196ad",
+      "fetched_at": "2026-10-27T05:53:26.609613+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=32",
+      "sha256": "092c989fdc4c4236e2bf0fa3e23ee4804db66a38abaa7958d454196e590365ab",
+      "fetched_at": "2026-10-27T05:53:26.601735+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=33",
+      "sha256": "dd143db21f244f182cd22b24e1e5f98d422d0d46e0c00abd3297fc3c50245ec1",
+      "fetched_at": "2026-10-27T05:53:26.637405+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=34",
+      "sha256": "3f42e3d27a83f1f329fc23d93c0caed0c02db9817a4e9b120e25250912c605f4",
+      "fetched_at": "2026-10-27T05:53:26.864420+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=35",
+      "sha256": "2397f2855e24f28aa8c2b77b9d243bce997d73dd527260f90419e9eb860bd1c5",
+      "fetched_at": "2026-10-27T05:53:26.874869+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=36",
+      "sha256": "ce6cde35080448b534ce57c5147cbecd1b76d74f651c50dc0983ab413fe6d7f3",
+      "fetched_at": "2026-10-27T05:53:26.861561+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=37",
+      "sha256": "dbcf660dd05259d295e8b07fa1e5dd239706e77a6d2e147b016bb93dafeb28f2",
+      "fetched_at": "2026-10-27T05:53:26.883487+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=38",
+      "sha256": "72acc3fc4b04aa8a44000a152727c52dc9971317d5662f672c1e13eaae4d3bcb",
+      "fetched_at": "2026-10-27T05:53:27.088043+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39",
+      "sha256": "545970b52826a373f43dd24adbbf9991b1d570ca58bc109fe35964e186f9db68",
+      "fetched_at": "2026-10-27T05:53:27.109983+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40",
+      "sha256": "fd9cc20d942e7794fa07785876f88f249296f31dc262a575fffd376d850dc87d",
+      "fetched_at": "2026-10-27T05:53:27.125339+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41",
+      "sha256": "d3c3ffb0f726bc8b4dba40ea565c18df41ebc56c7567472b3b3be29387e73f95",
+      "fetched_at": "2026-10-27T05:53:27.145182+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42",
+      "sha256": "0d13619df992c2b39b1abdb64db52932ba964181ed3cf1cb1565ea59c7ab673e",
+      "fetched_at": "2026-10-27T05:53:27.351492+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43",
+      "sha256": "8da0d6dbfb464f081869fd3846291910ac442b7bebecc033a743ad9f859d6b10",
+      "fetched_at": "2026-10-27T05:53:27.366390+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44",
+      "sha256": "3decd0e502520128ae532583972ecce54d3145ceeed33455217564f064e3f0fc",
+      "fetched_at": "2026-10-27T05:53:27.399611+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45",
+      "sha256": "24ca69bbb43e9a289f060b1a93e47c81b65313780b678ab135498d4dd70c206f",
+      "fetched_at": "2026-10-27T05:53:27.391775+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46",
+      "sha256": "48d6f1289030d91d96b0e7d767d1c9791b5f306c545c3e26d483095e22e659f6",
+      "fetched_at": "2026-10-27T05:53:27.634364+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47",
+      "sha256": "86ec282815f1602aeafb8db5e1a2050243660260b513274b3a66ebffd34c1c25",
+      "fetched_at": "2026-10-27T05:53:27.612856+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48",
+      "sha256": "e0b40e3cce2028490b5495fcf37f2ae476acbf1c19a7daf5d300de34b022379f",
+      "fetched_at": "2026-10-27T05:53:27.647241+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49",
+      "sha256": "b6b9789c78cca75ce882242fc0e94b15fe2ebf9410125a0025dfc044231f8c3d",
+      "fetched_at": "2026-10-27T05:53:27.640781+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50",
+      "sha256": "d89ce624e4d00b71ce525ddc60603c5b6c35682ca35c91af55d76ecf333f1d3c",
+      "fetched_at": "2026-10-27T05:53:27.860570+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51",
+      "sha256": "15d9426b7404464c74b242fdb83f75a7af9c97862c1b3d0c0e5563bc726cc89f",
+      "fetched_at": "2026-10-27T05:53:27.873062+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52",
+      "sha256": "8c79850ed1a7e4d2393ec59b09fb5ff81a6f31e45dc4fdc5a7f4b19a12a0ce3c",
+      "fetched_at": "2026-10-27T05:53:27.922963+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53",
+      "sha256": "4c64b4f45ae7b990253ac42460f02e15ecd0fca3aade4bbf1323df42ace2cbd6",
+      "fetched_at": "2026-10-27T05:53:27.912842+00:00"
+    },
+    {
+      "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=54",
+      "sha256": "36204b9b1aa74023d1bbe86284bf3cfe7ea77144a263bb3da345fc64932ebe39",
+      "fetched_at": "2026-10-27T05:53:28.120774+00:00"
+    }
+  ],
+  "records": [
+    {
+      "symbol": "160105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方积配LOF",
+      "list_date": "2004-12-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160106.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方高增LOF",
+      "list_date": "2005-09-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160119.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "500ETF联接LOF",
+      "list_date": "2009-11-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160125.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方香港LOF",
+      "list_date": "2011-11-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160127.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方消费LOF",
+      "list_date": "2020-11-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160128.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方金利定开",
+      "list_date": "2012-07-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160133.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方天元LOF",
+      "list_date": "2014-08-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160135.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "高铁基金LOF",
+      "list_date": "2020-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160140.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "美国REIT精选LOF",
+      "list_date": "2017-11-24",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160142.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "南方优势产业LOF",
+      "list_date": "2019-03-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160143.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板定开南方",
+      "list_date": "2021-03-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160211.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国泰小盘LOF",
+      "list_date": "2010-01-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160212.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国泰估值LOF",
+      "list_date": "2013-02-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160215.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国泰价值LOF",
+      "list_date": "2010-09-13",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=39"
+    },
+    {
+      "symbol": "160216.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国泰商品LOF",
+      "list_date": "2015-04-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160218.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "房地产LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160219.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医药LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160220.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国泰民益LOF",
+      "list_date": "2014-01-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160221.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "有色金属LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160222.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "食品LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160223.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板LOF",
+      "list_date": "2016-11-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160225.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "新能源汽车LOF",
+      "list_date": "2016-07-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160311.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华夏蓝筹LOF",
+      "list_date": "2007-05-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160314.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华夏行业LOF",
+      "list_date": "2008-01-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160322.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "港股精选LOF",
+      "list_date": "2017-07-24",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160323.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华夏磐泰LOF",
+      "list_date": "2017-03-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160324.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华夏磐晟LOF",
+      "list_date": "2017-08-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160325.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华夏创业板定开",
+      "list_date": "2021-01-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160326.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "优选配置FOF-LOF",
+      "list_date": "2022-01-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160416.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "石油基金LOF",
+      "list_date": "2012-05-02",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160421.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华安智增LOF",
+      "list_date": "2016-12-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160505.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "博时主题LOF",
+      "list_date": "2005-02-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160512.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "博时卓越LOF",
+      "list_date": "2011-06-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160513.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "稳健债LOF",
+      "list_date": "2014-07-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=40"
+    },
+    {
+      "symbol": "160515.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "安丰18定开",
+      "list_date": "2013-10-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160518.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "博时睿远LOF",
+      "list_date": "2016-07-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160526.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "博时优势企业",
+      "list_date": "2019-12-02",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160527.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "博时研究优选LOF",
+      "list_date": "2020-06-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160529.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板博时定开",
+      "list_date": "2021-03-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160607.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华价值优势LOF",
+      "list_date": "2006-09-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160610.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华动力LOF",
+      "list_date": "2007-03-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160611.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华优质治理LOF",
+      "list_date": "2007-07-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160613.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华盛世创新LOF",
+      "list_date": "2008-11-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160615.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华300LOF",
+      "list_date": "2009-05-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160616.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华500LOF",
+      "list_date": "2010-04-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160617.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华丰润LOF",
+      "list_date": "2010-12-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160618.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华丰泽LOF",
+      "list_date": "2014-12-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160620.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "资源LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160621.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华丰和LOF",
+      "list_date": "2013-01-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160622.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华丰利LOF",
+      "list_date": "2016-05-24",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160625.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "证保LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160626.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "信息LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160628.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "地产LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160629.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "传媒LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=41"
+    },
+    {
+      "symbol": "160630.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国防LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160631.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银行LOF基金",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160632.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "酒LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160633.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "券商LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160635.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医药LOF基金",
+      "list_date": "2016-08-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160637.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板LOF基金",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160638.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "带路LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160639.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "高铁LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160641.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华丰锐LOF",
+      "list_date": "2015-09-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160642.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鹏华增瑞LOF",
+      "list_date": "2016-09-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160643.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "空天军工LOF",
+      "list_date": "2017-06-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160644.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "港美互联网LOF",
+      "list_date": "2017-12-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160706.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "沪深300LOF",
+      "list_date": "2005-10-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160716.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "基本面50LOF",
+      "list_date": "2010-02-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160717.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "H股LOF",
+      "list_date": "2010-10-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160719.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "嘉实黄金LOF",
+      "list_date": "2012-02-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160722.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "嘉实惠泽LOF",
+      "list_date": "2016-12-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160723.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "嘉实原油LOF",
+      "list_date": "2017-05-05",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160726.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "嘉实瑞享定开",
+      "list_date": "2019-04-12",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160805.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长盛同智LOF",
+      "list_date": "2007-02-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=42"
+    },
+    {
+      "symbol": "160806.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长盛中证800LOF",
+      "list_date": "2015-08-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160807.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长盛沪深300LOF",
+      "list_date": "2010-09-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160812.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长盛同益LOF",
+      "list_date": "2014-06-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160813.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长盛同盛LOF",
+      "list_date": "2014-12-26",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160910.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创新成长LOF",
+      "list_date": "2007-10-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160916.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "优选LOF",
+      "list_date": "2012-12-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160918.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中小盘LOF",
+      "list_date": "2014-04-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160919.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "产业升级LOF",
+      "list_date": "2015-01-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160921.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "多策略LOF",
+      "list_date": "2016-11-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160924.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "恒生指数LOF",
+      "list_date": "2017-08-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160925.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "沪深港300LOF",
+      "list_date": "2019-03-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "160926.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板定开",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161005.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "富国天惠LOF",
+      "list_date": "2006-02-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161010.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "富国天丰LOF",
+      "list_date": "2008-12-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161014.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "富国汇利定开",
+      "list_date": "2017-12-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161015.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "富国天盈LOF",
+      "list_date": "2014-06-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161017.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "500增强LOF",
+      "list_date": "2011-10-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161019.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "富国天锋LOF",
+      "list_date": "2012-06-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161024.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "军工LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161025.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "互联网LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=43"
+    },
+    {
+      "symbol": "161026.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国企改革LOF",
+      "list_date": "2021-01-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161027.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "证券LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161028.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "新能源车LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161029.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银行龙头LOF",
+      "list_date": "2019-06-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161030.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "体育LOF",
+      "list_date": "2021-01-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161031.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "工业40LOF",
+      "list_date": "2021-01-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161032.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "煤炭龙头LOF",
+      "list_date": "2021-01-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161033.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "智能汽车LOF",
+      "list_date": "2016-02-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161035.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医药增强LOF",
+      "list_date": "2016-11-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161036.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "娱乐增强LOF",
+      "list_date": "2017-03-24",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161037.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "高端制造LOF",
+      "list_date": "2017-05-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161038.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "成长LOF",
+      "list_date": "2017-08-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161039.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "1000增强LOF",
+      "list_date": "2018-06-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161040.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业富国定开",
+      "list_date": "2021-01-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161115.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "易基岁丰添利LOF",
+      "list_date": "2010-12-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161116.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "黄金主题LOF",
+      "list_date": "2011-11-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161117.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "易基永旭添利定开",
+      "list_date": "2012-07-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161118.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中小企业100LOF",
+      "list_date": "2019-10-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161119.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "易方达新综债LOF",
+      "list_date": "2013-01-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161121.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银行LOF易方达",
+      "list_date": "2020-08-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=44"
+    },
+    {
+      "symbol": "161122.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "生物科技LOF",
+      "list_date": "2020-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161123.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "并购重组LOF",
+      "list_date": "2021-01-12",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161124.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "港股小盘LOF",
+      "list_date": "2016-11-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161125.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "标普500LOF",
+      "list_date": "2016-12-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161126.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "标普医疗保健LOF",
+      "list_date": "2016-12-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161127.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "标普生物科技LOF",
+      "list_date": "2016-12-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161128.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "标普信息科技LOF",
+      "list_date": "2016-12-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161129.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "原油LOF易方达",
+      "list_date": "2017-02-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161130.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "纳斯达克100LOF",
+      "list_date": "2017-07-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161131.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "易方达科润LOF",
+      "list_date": "2019-03-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161132.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "易方达科顺定开",
+      "list_date": "2019-01-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161133.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "优势回报FOF-LOF",
+      "list_date": "2022-06-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161216.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投双债LOF",
+      "list_date": "2011-05-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161217.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投资源LOF",
+      "list_date": "2011-08-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161219.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投新兴产业LOF",
+      "list_date": "2012-01-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161222.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投瑞利LOF",
+      "list_date": "2015-05-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161224.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投新丝路LOF",
+      "list_date": "2015-05-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161225.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投瑞盈LOF",
+      "list_date": "2015-08-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161226.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投白银LOF",
+      "list_date": "2015-08-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161227.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投深证100LOF",
+      "list_date": "2015-08-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=45"
+    },
+    {
+      "symbol": "161229.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投中国价值LOF",
+      "list_date": "2016-01-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161232.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投瑞盛LOF",
+      "list_date": "2016-08-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161233.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国投瑞泰LOF",
+      "list_date": "2017-02-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161505.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银河通利债券LOF",
+      "list_date": "2014-05-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161607.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "巨潮100LOF",
+      "list_date": "2005-06-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161610.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "融通领先成长LOF",
+      "list_date": "2007-07-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161614.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "融通四季添利LOF",
+      "list_date": "2012-04-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161626.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "融通通福LOF",
+      "list_date": "2017-01-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161631.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "人工智能LOF",
+      "list_date": "2017-04-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161706.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商成长LOF",
+      "list_date": "2005-12-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161713.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商信用添利LOF",
+      "list_date": "2010-07-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161715.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "大宗商品LOF",
+      "list_date": "2017-07-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161716.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商双债LOF",
+      "list_date": "2015-03-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161720.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "证券基金LOF",
+      "list_date": "2021-01-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161722.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商丰泰LOF",
+      "list_date": "2015-07-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161724.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "煤炭等权LOF",
+      "list_date": "2021-01-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161725.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "白酒基金LOF",
+      "list_date": "2021-01-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161726.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "生物医药LOF",
+      "list_date": "2021-01-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161727.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商增荣LOF",
+      "list_date": "2016-07-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161728.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商优选LOF",
+      "list_date": "2019-03-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=46"
+    },
+    {
+      "symbol": "161729.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "招商瑞利LOF",
+      "list_date": "2020-01-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161810.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银华内需LOF",
+      "list_date": "2009-10-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161811.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "沪深300LOF银华",
+      "list_date": "2020-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161812.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "深证100LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161815.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "抗通胀LOF",
+      "list_date": "2010-12-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161816.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中证90LOF",
+      "list_date": "2020-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161820.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银华纯债LOF",
+      "list_date": "2012-09-05",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161831.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "恒生国企LOF",
+      "list_date": "2015-04-13",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161834.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银华鑫锐LOF",
+      "list_date": "2016-09-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161837.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "银华大盘定开",
+      "list_date": "2020-05-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161903.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "万家行业优选LOF",
+      "list_date": "2005-08-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161908.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "万家添利LOF",
+      "list_date": "2014-06-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161912.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "社会责任定开",
+      "list_date": "2019-06-14",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "161914.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "创业板2年定开",
+      "list_date": "2021-03-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162006.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长城久富LOF",
+      "list_date": "2007-05-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "金鹰持久增利LOF",
+      "list_date": "2015-03-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162108.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "金鹰元盛债券LOF",
+      "list_date": "2015-05-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162207.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "宏利效率混合LOF",
+      "list_date": "2006-07-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162215.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "宏利聚利债券LOF",
+      "list_date": "2016-05-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162216.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "宏利500增强LOF",
+      "list_date": "2019-12-05",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=47"
+    },
+    {
+      "symbol": "162307.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "海富通A100LOF",
+      "list_date": "2010-01-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162411.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华宝油气LOF",
+      "list_date": "2012-06-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162412.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医疗基金LOF",
+      "list_date": "2021-02-26",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162414.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "新机遇LOF",
+      "list_date": "2015-07-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162415.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "美国消费LOF",
+      "list_date": "2016-04-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162509.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中证A100LOF",
+      "list_date": "2020-12-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162605.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "景顺鼎益LOF",
+      "list_date": "2005-05-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162607.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "景顺资源LOF",
+      "list_date": "2006-04-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162703.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "广发小盘LOF",
+      "list_date": "2005-04-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162711.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中证500LOF",
+      "list_date": "2010-01-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162712.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "广发聚利LOF",
+      "list_date": "2011-10-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162715.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "广发聚源LOF",
+      "list_date": "2013-07-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162719.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "石油LOF",
+      "list_date": "2017-03-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162720.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "广发创业板定开",
+      "list_date": "2021-03-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "162721.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "广发积极FOF-LOF",
+      "list_date": "2022-08-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163001.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长信医疗LOF",
+      "list_date": "2010-04-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163003.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长信利鑫LOF",
+      "list_date": "2016-07-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163005.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "长信利众LOF",
+      "list_date": "2016-03-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163109.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万深成LOF",
+      "list_date": "2021-01-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163110.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万量化LOF",
+      "list_date": "2011-08-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=48"
+    },
+    {
+      "symbol": "163111.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万中小LOF",
+      "list_date": "2017-05-26",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163113.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万证券LOF",
+      "list_date": "2021-01-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163114.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万环保LOF",
+      "list_date": "2020-11-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163115.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万军工LOF",
+      "list_date": "2021-01-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163116.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "申万电子LOF",
+      "list_date": "2020-11-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163118.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医药生物LOF",
+      "list_date": "2021-01-25",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163208.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "全球油气能源LOF",
+      "list_date": "2015-02-17",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163302.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "大摩资源LOF",
+      "list_date": "2007-07-05",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163402.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全趋势LOF",
+      "list_date": "2006-01-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163406.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全合润LOF",
+      "list_date": "2021-01-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163407.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全沪深300LOF",
+      "list_date": "2011-01-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163409.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全绿色LOF",
+      "list_date": "2011-07-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163412.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全轻资产LOF",
+      "list_date": "2012-05-31",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163415.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全商业模式LOF",
+      "list_date": "2013-02-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163417.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全合宜LOF",
+      "list_date": "2018-04-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163418.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "兴全合兴LOF",
+      "list_date": "2021-04-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163503.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "天治核心LOF",
+      "list_date": "2007-07-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163801.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中银中国LOF",
+      "list_date": "2005-02-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163819.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中银信用增利LOF",
+      "list_date": "2012-07-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163821.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "沪深300等权LOF",
+      "list_date": "2012-07-13",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=49"
+    },
+    {
+      "symbol": "163907.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中海惠裕LOF",
+      "list_date": "2016-03-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "华富强债LOF",
+      "list_date": "2010-10-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164206.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "天弘添利LOF",
+      "list_date": "2015-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164208.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "天弘丰利LOF",
+      "list_date": "2014-12-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164210.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "天弘同利LOF",
+      "list_date": "2016-09-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164403.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "农业精选LOF",
+      "list_date": "2016-08-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164508.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国富中证A100LOF",
+      "list_date": "2020-04-22",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164509.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "国富恒利债券LOF",
+      "list_date": "2017-04-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164606.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "信用增利LOF",
+      "list_date": "2011-12-12",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164701.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "黄金LOF",
+      "list_date": "2012-03-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164703.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "汇添富纯债LOF",
+      "list_date": "2016-12-02",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164705.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "恒生LOF",
+      "list_date": "2015-04-13",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164808.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "工银四季LOF",
+      "list_date": "2011-03-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164810.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "工银纯债定开",
+      "list_date": "2012-09-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164814.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "工银双债LOF",
+      "list_date": "2013-12-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164824.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "印度基金LOF",
+      "list_date": "2018-08-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164902.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "交银添利LOF",
+      "list_date": "2011-04-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "164906.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中概互联网LOF",
+      "list_date": "2015-07-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "165309.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "沪深300LOF建信",
+      "list_date": "2009-11-30",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "165311.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "信用债LOF",
+      "list_date": "2011-09-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=50"
+    },
+    {
+      "symbol": "165313.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "建信优势LOF",
+      "list_date": "2013-04-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165508.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚深度LOF",
+      "list_date": "2010-09-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165509.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚增强LOF",
+      "list_date": "2010-11-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165511.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚500LOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165512.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚机遇LOF",
+      "list_date": "2011-09-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165513.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚商品LOF",
+      "list_date": "2012-01-13",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165515.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚300LOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165516.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚周期LOF",
+      "list_date": "2012-11-05",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165517.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚双盈LOF",
+      "list_date": "2015-04-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165519.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "医药生物科技LOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165520.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "有色LOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165521.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "金融LOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165522.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "TMTLOF",
+      "list_date": "2021-02-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165525.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "基建工程LOF",
+      "list_date": "2016-12-09",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "165528.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中信保诚鼎利LOF",
+      "list_date": "2016-08-31",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166001.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧趋势LOF",
+      "list_date": "2007-04-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166006.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧成长LOF",
+      "list_date": "2010-03-26",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166008.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧强债LOF",
+      "list_date": "2011-02-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166009.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧动力LOF",
+      "list_date": "2011-04-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166011.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧盛世LOF",
+      "list_date": "2015-04-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=51"
+    },
+    {
+      "symbol": "166016.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧纯债LOF",
+      "list_date": "2016-03-01",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166023.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧瑞丰LOF",
+      "list_date": "2017-09-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166024.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧恒利定开",
+      "list_date": "2017-12-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166025.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧远见定开",
+      "list_date": "2019-05-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166027.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "中欧创业定开",
+      "list_date": "2021-01-29",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "信澳鑫安LOF",
+      "list_date": "2015-06-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166107.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "多因子LOF",
+      "list_date": "2019-11-28",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "166401.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "稳健增利LOF",
+      "list_date": "2015-01-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167001.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鼎泰LOF",
+      "list_date": "2016-10-18",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167002.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鼎越LOF",
+      "list_date": "2016-12-19",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167003.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "鼎弘LOF",
+      "list_date": "2017-06-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167301.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "保险主题LOF",
+      "list_date": "2021-01-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167302.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "大湾区LOF",
+      "list_date": "2020-01-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167501.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "安信宝利债券LOF",
+      "list_date": "2015-08-07",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167506.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "安信深圳科技LOF",
+      "list_date": "2020-01-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "167508.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "安信价值发现定开",
+      "list_date": "2020-06-08",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "168101.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "九泰锐智LOF",
+      "list_date": "2015-09-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "168102.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "九泰锐富LOF",
+      "list_date": "2016-05-04",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "168103.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "九泰锐益LOF",
+      "list_date": "2016-11-23",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "168104.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "九泰锐丰LOF",
+      "list_date": "2016-12-15",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=52"
+    },
+    {
+      "symbol": "168105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "九泰泰富LOF",
+      "list_date": "2017-01-10",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "168203.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "钢铁LOF",
+      "list_date": "2021-06-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "168204.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "煤炭LOF",
+      "list_date": "2021-06-11",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "168301.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "东海祥龙LOF",
+      "list_date": "2017-02-27",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "168401.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "红土创新精选LOF",
+      "list_date": "2017-07-03",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "168701.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "金融科技LOF",
+      "list_date": "2020-05-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "169101.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "东方红睿丰LOF",
+      "list_date": "2015-03-06",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "169104.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "东方红睿满LOF",
+      "list_date": "2017-02-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "169105.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "东方红睿华LOF",
+      "list_date": "2017-02-21",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "169106.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "东方红创优定开",
+      "list_date": "2018-06-20",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "169201.SZ",
+      "kind": "LOF",
+      "classification": "LOF",
+      "name": "浙商鼎盈LOF",
+      "list_date": "2017-03-16",
+      "source": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1000_lf&TABKEY=tab1&PAGENO=53"
+    },
+    {
+      "symbol": "501001.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通精选混合LOF",
+      "list_date": "2015-09-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501005.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "精准医疗LOF",
+      "list_date": "2016-03-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501006.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "精准医C",
+      "list_date": "2016-03-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501007.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "互联网医疗LOF",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501008.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "互联网医疗LOFC",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501009.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "生物科技LOF",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501010.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "生物科技LOFC",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501011.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "中药基金LOF",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501012.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "中药基金LOFC",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501015.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通升级混合LOF",
+      "list_date": "2016-06-06",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501016.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "券商基金LOF",
+      "list_date": "2017-05-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501017.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "国泰融丰LOF",
+      "list_date": "2016-08-26",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501018.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "南方原油LOF",
+      "list_date": "2016-06-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501019.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "军工基金LOF",
+      "list_date": "2017-04-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501021.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "香港中小LOF",
+      "list_date": "2016-07-06",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501022.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "银华鑫盛LOF",
+      "list_date": "2016-11-10",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501023.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "港中小企LOF",
+      "list_date": "2016-10-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501025.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "香港银行LOF",
+      "list_date": "2016-11-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501026.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通福享混合LOF",
+      "list_date": "2016-12-15",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501028.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通福瑞混合LOF",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501029.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "红利基金LOF",
+      "list_date": "2017-02-13",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501030.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "环境治理LOF",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501031.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "环境治理LOFC",
+      "list_date": "2017-02-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501032.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通福盛混合LOF",
+      "list_date": "2017-04-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501036.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "中证500LOF",
+      "list_date": "2017-10-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501037.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "中证500LOFC",
+      "list_date": "2017-10-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501038.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "银华明择",
+      "list_date": "2017-11-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501043.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "沪深300LOF",
+      "list_date": "2017-10-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501045.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "沪深300LOFC",
+      "list_date": "2017-10-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501046.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通福鑫定开混合",
+      "list_date": "2017-12-01",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501047.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "证券公司LOF",
+      "list_date": "2018-01-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501048.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "证券公司LOFC",
+      "list_date": "2018-01-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501050.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "50AHLOF",
+      "list_date": "2016-11-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501051.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "圆信永丰汇利LOF",
+      "list_date": "2018-01-31",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501053.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "东方红目标优选",
+      "list_date": "2018-08-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501057.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "新能源车LOF",
+      "list_date": "2018-06-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501058.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "新能源车LOFC",
+      "list_date": "2018-06-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501059.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "国企红利LOF",
+      "list_date": "2018-07-26",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501060.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "金选300A类LOF",
+      "list_date": "2018-09-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501061.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "金选300C类LOF",
+      "list_date": "2018-09-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501062.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "南方瑞合LOF",
+      "list_date": "2018-12-05",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501064.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "国泰价值LOF",
+      "list_date": "2019-05-16",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501065.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "经典成长",
+      "list_date": "2019-05-08",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501070.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "广发睿阳",
+      "list_date": "2019-07-31",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501071.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "泓德丰泽LOF",
+      "list_date": "2019-09-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501073.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "华安智联LOF",
+      "list_date": "2019-12-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501075.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创主题LOF",
+      "list_date": "2019-09-12",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501076.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "鹏华创新动力LOF",
+      "list_date": "2019-12-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501077.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "富国创新企业LOF",
+      "list_date": "2019-10-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501078.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创配置LOF",
+      "list_date": "2019-11-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501079.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创大成LOF",
+      "list_date": "2020-01-20",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501080.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创主题投资基金LOF",
+      "list_date": "2019-12-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501081.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创中欧LOF",
+      "list_date": "2019-09-06",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501082.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创投资LOF",
+      "list_date": "2019-12-26",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501083.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创银华LOF",
+      "list_date": "2020-01-07",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501085.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "财通科创LOF",
+      "list_date": "2020-02-07",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501087.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "交银瑞丰LOF",
+      "list_date": "2020-03-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501088.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "嘉实瑞虹",
+      "list_date": "2020-03-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501089.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "消费红利增强LOF",
+      "list_date": "2019-12-31",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501090.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "消费龙头LOF",
+      "list_date": "2020-01-06",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501091.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "嘉实欣荣LOF",
+      "list_date": "2020-07-22",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501092.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "交银瑞思LOF",
+      "list_date": "2020-08-05",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501093.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "华夏翔阳LOF",
+      "list_date": "2021-01-08",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501095.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "中银证券科技创新LOF",
+      "list_date": "2020-07-08",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501096.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "国联安科创LOF",
+      "list_date": "2020-07-22",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501097.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创国寿LOF",
+      "list_date": "2020-08-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501098.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创建信LOF",
+      "list_date": "2020-04-27",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501099.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "平安新兴产业LOF",
+      "list_date": "2020-07-01",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501186.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "华夏兴融LOF",
+      "list_date": "2019-03-29",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501188.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "添富核心精选LOF",
+      "list_date": "2019-03-29",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501189.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "嘉实产业优选LOF",
+      "list_date": "2019-03-29",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501200.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创加银LOF",
+      "list_date": "2020-12-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501201.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "科创红土LOF",
+      "list_date": "2021-03-05",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501202.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "华泰创新先锋LOF",
+      "list_date": "2020-11-16",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501203.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "易基创新未来LOF",
+      "list_date": "2021-01-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501205.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "鹏华创新未来LOF",
+      "list_date": "2021-01-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501206.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "添富创新未来LOF",
+      "list_date": "2021-01-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501207.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "华夏创新未来LOF",
+      "list_date": "2021-01-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501208.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "中欧创新未来LOF",
+      "list_date": "2021-01-21",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501209.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "富久食品饮料LOF",
+      "list_date": "2021-12-02",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501210.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "交银智选星光FOF",
+      "list_date": "2021-11-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501211.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "民生加银优享FOF",
+      "list_date": "2021-12-22",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501212.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "广发优选配置FOF",
+      "list_date": "2021-11-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501213.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "中欧汇选FOF",
+      "list_date": "2021-11-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501215.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "积极配置FOF",
+      "list_date": "2021-11-19",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501216.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "富国行业精选FOF",
+      "list_date": "2022-01-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501217.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "行业配置FOF",
+      "list_date": "2022-04-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501218.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "工银睿智进取FOF",
+      "list_date": "2021-12-17",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501219.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "智胜先锋LOF",
+      "list_date": "2022-02-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501220.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "行业轮动FOF",
+      "list_date": "2022-08-15",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501222.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "如意招享FOF",
+      "list_date": "2023-02-01",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501225.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "全球芯片LOF",
+      "list_date": "2023-04-14",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501227.SH",
+      "kind": "LOF",
+      "classification": "F213",
+      "name": "泓德红利优选LOF",
+      "list_date": "2025-06-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501300.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "美元债LOF",
+      "list_date": "2017-02-16",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501301.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "香港大盘LOF",
+      "list_date": "2017-05-08",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501302.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "恒生指数基金LOF",
+      "list_date": "2017-08-15",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501303.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "恒生中型股LOF",
+      "list_date": "2017-10-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501305.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "港股高股息LOF",
+      "list_date": "2018-01-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501306.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "港股高股息LOFC",
+      "list_date": "2018-01-18",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501307.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "沪港深红利LOF",
+      "list_date": "2018-04-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501310.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "价值基金LOF",
+      "list_date": "2018-11-22",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501311.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "港股通新经济LOF",
+      "list_date": "2019-02-14",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "501312.SH",
+      "kind": "LOF",
+      "classification": "F214",
+      "name": "海外科技LOF",
+      "list_date": "2023-04-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502000.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "500增强LOF",
+      "list_date": "2015-04-27",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502003.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "军工LOF",
+      "list_date": "2015-07-15",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502006.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "国企改革LOF",
+      "list_date": "2015-06-25",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502010.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "证券LOF",
+      "list_date": "2015-07-15",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502013.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "一带一路LOF",
+      "list_date": "2015-06-09",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502023.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "钢铁LOF",
+      "list_date": "2015-08-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502048.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "上证50LOF",
+      "list_date": "2015-04-27",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502053.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "券商LOF",
+      "list_date": "2015-08-24",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "502056.SH",
+      "kind": "LOF",
+      "classification": "F211",
+      "name": "医疗基金LOF",
+      "list_date": "2015-07-31",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506000.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "科创板基金",
+      "list_date": "2021-01-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506001.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "万家科创板",
+      "list_date": "2021-02-03",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506002.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "易方达科创板",
+      "list_date": "2021-01-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506003.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "富国科创板",
+      "list_date": "2021-01-29",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506005.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "科创板博时",
+      "list_date": "2021-01-29",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506006.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "汇添富科创板",
+      "list_date": "2021-01-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    },
+    {
+      "symbol": "506008.SH",
+      "kind": "LOF",
+      "classification": "F220",
+      "name": "科创板长城",
+      "list_date": "2022-03-28",
+      "source": "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_JJZWZ_JJLB_L&type=inParams&CATEGORY=F000&pageHelp.pageSize=2000&pageHelp.pageNo=1&isPagination=true"
+    }
+  ],
+  "listing_status_verified": false
+}

@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-10-15 09:28:19
+# Last modified (Asia/Shanghai): 2026-10-30 18:04:46
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -306,8 +306,86 @@ def public_order(document, replayed=None):
         result["replayed"] = replayed
     return result
 
+# ---- order_bridge/lof_catalog.py ----
+"""Generated LOF identities; run tools/update_lof_catalog.py --refresh.
+Source: docs/data/lof_catalog.json; identity does not prove current listing or permission.
+"""
+LOF_CATALOG_SHA256 = "15ca436e95845db629034da159c81a01d29ec1995922da64ce8b8b6d76e90c08"
+LOF_CATALOG_AS_OF = "2026-10-27"
+LOF_SYMBOLS = frozenset((
+    '160105.SZ', '160106.SZ', '160119.SZ', '160125.SZ', '160127.SZ', '160128.SZ',
+    '160133.SZ', '160135.SZ', '160140.SZ', '160142.SZ', '160143.SZ', '160211.SZ',
+    '160212.SZ', '160215.SZ', '160216.SZ', '160218.SZ', '160219.SZ', '160220.SZ',
+    '160221.SZ', '160222.SZ', '160223.SZ', '160225.SZ', '160311.SZ', '160314.SZ',
+    '160322.SZ', '160323.SZ', '160324.SZ', '160325.SZ', '160326.SZ', '160416.SZ',
+    '160421.SZ', '160505.SZ', '160512.SZ', '160513.SZ', '160515.SZ', '160518.SZ',
+    '160526.SZ', '160527.SZ', '160529.SZ', '160607.SZ', '160610.SZ', '160611.SZ',
+    '160613.SZ', '160615.SZ', '160616.SZ', '160617.SZ', '160618.SZ', '160620.SZ',
+    '160621.SZ', '160622.SZ', '160625.SZ', '160626.SZ', '160628.SZ', '160629.SZ',
+    '160630.SZ', '160631.SZ', '160632.SZ', '160633.SZ', '160635.SZ', '160637.SZ',
+    '160638.SZ', '160639.SZ', '160641.SZ', '160642.SZ', '160643.SZ', '160644.SZ',
+    '160706.SZ', '160716.SZ', '160717.SZ', '160719.SZ', '160722.SZ', '160723.SZ',
+    '160726.SZ', '160805.SZ', '160806.SZ', '160807.SZ', '160812.SZ', '160813.SZ',
+    '160910.SZ', '160916.SZ', '160918.SZ', '160919.SZ', '160921.SZ', '160924.SZ',
+    '160925.SZ', '160926.SZ', '161005.SZ', '161010.SZ', '161014.SZ', '161015.SZ',
+    '161017.SZ', '161019.SZ', '161024.SZ', '161025.SZ', '161026.SZ', '161027.SZ',
+    '161028.SZ', '161029.SZ', '161030.SZ', '161031.SZ', '161032.SZ', '161033.SZ',
+    '161035.SZ', '161036.SZ', '161037.SZ', '161038.SZ', '161039.SZ', '161040.SZ',
+    '161115.SZ', '161116.SZ', '161117.SZ', '161118.SZ', '161119.SZ', '161121.SZ',
+    '161122.SZ', '161123.SZ', '161124.SZ', '161125.SZ', '161126.SZ', '161127.SZ',
+    '161128.SZ', '161129.SZ', '161130.SZ', '161131.SZ', '161132.SZ', '161133.SZ',
+    '161216.SZ', '161217.SZ', '161219.SZ', '161222.SZ', '161224.SZ', '161225.SZ',
+    '161226.SZ', '161227.SZ', '161229.SZ', '161232.SZ', '161233.SZ', '161505.SZ',
+    '161607.SZ', '161610.SZ', '161614.SZ', '161626.SZ', '161631.SZ', '161706.SZ',
+    '161713.SZ', '161715.SZ', '161716.SZ', '161720.SZ', '161722.SZ', '161724.SZ',
+    '161725.SZ', '161726.SZ', '161727.SZ', '161728.SZ', '161729.SZ', '161810.SZ',
+    '161811.SZ', '161812.SZ', '161815.SZ', '161816.SZ', '161820.SZ', '161831.SZ',
+    '161834.SZ', '161837.SZ', '161903.SZ', '161908.SZ', '161912.SZ', '161914.SZ',
+    '162006.SZ', '162105.SZ', '162108.SZ', '162207.SZ', '162215.SZ', '162216.SZ',
+    '162307.SZ', '162411.SZ', '162412.SZ', '162414.SZ', '162415.SZ', '162509.SZ',
+    '162605.SZ', '162607.SZ', '162703.SZ', '162711.SZ', '162712.SZ', '162715.SZ',
+    '162719.SZ', '162720.SZ', '162721.SZ', '163001.SZ', '163003.SZ', '163005.SZ',
+    '163109.SZ', '163110.SZ', '163111.SZ', '163113.SZ', '163114.SZ', '163115.SZ',
+    '163116.SZ', '163118.SZ', '163208.SZ', '163302.SZ', '163402.SZ', '163406.SZ',
+    '163407.SZ', '163409.SZ', '163412.SZ', '163415.SZ', '163417.SZ', '163418.SZ',
+    '163503.SZ', '163801.SZ', '163819.SZ', '163821.SZ', '163907.SZ', '164105.SZ',
+    '164206.SZ', '164208.SZ', '164210.SZ', '164403.SZ', '164508.SZ', '164509.SZ',
+    '164606.SZ', '164701.SZ', '164703.SZ', '164705.SZ', '164808.SZ', '164810.SZ',
+    '164814.SZ', '164824.SZ', '164902.SZ', '164906.SZ', '165309.SZ', '165311.SZ',
+    '165313.SZ', '165508.SZ', '165509.SZ', '165511.SZ', '165512.SZ', '165513.SZ',
+    '165515.SZ', '165516.SZ', '165517.SZ', '165519.SZ', '165520.SZ', '165521.SZ',
+    '165522.SZ', '165525.SZ', '165528.SZ', '166001.SZ', '166006.SZ', '166008.SZ',
+    '166009.SZ', '166011.SZ', '166016.SZ', '166023.SZ', '166024.SZ', '166025.SZ',
+    '166027.SZ', '166105.SZ', '166107.SZ', '166401.SZ', '167001.SZ', '167002.SZ',
+    '167003.SZ', '167301.SZ', '167302.SZ', '167501.SZ', '167506.SZ', '167508.SZ',
+    '168101.SZ', '168102.SZ', '168103.SZ', '168104.SZ', '168105.SZ', '168203.SZ',
+    '168204.SZ', '168301.SZ', '168401.SZ', '168701.SZ', '169101.SZ', '169104.SZ',
+    '169105.SZ', '169106.SZ', '169201.SZ', '501001.SH', '501005.SH', '501006.SH',
+    '501007.SH', '501008.SH', '501009.SH', '501010.SH', '501011.SH', '501012.SH',
+    '501015.SH', '501016.SH', '501017.SH', '501018.SH', '501019.SH', '501021.SH',
+    '501022.SH', '501023.SH', '501025.SH', '501026.SH', '501028.SH', '501029.SH',
+    '501030.SH', '501031.SH', '501032.SH', '501036.SH', '501037.SH', '501038.SH',
+    '501043.SH', '501045.SH', '501046.SH', '501047.SH', '501048.SH', '501050.SH',
+    '501051.SH', '501053.SH', '501057.SH', '501058.SH', '501059.SH', '501060.SH',
+    '501061.SH', '501062.SH', '501064.SH', '501065.SH', '501070.SH', '501071.SH',
+    '501073.SH', '501075.SH', '501076.SH', '501077.SH', '501078.SH', '501079.SH',
+    '501080.SH', '501081.SH', '501082.SH', '501083.SH', '501085.SH', '501087.SH',
+    '501088.SH', '501089.SH', '501090.SH', '501091.SH', '501092.SH', '501093.SH',
+    '501095.SH', '501096.SH', '501097.SH', '501098.SH', '501099.SH', '501186.SH',
+    '501188.SH', '501189.SH', '501200.SH', '501201.SH', '501202.SH', '501203.SH',
+    '501205.SH', '501206.SH', '501207.SH', '501208.SH', '501209.SH', '501210.SH',
+    '501211.SH', '501212.SH', '501213.SH', '501215.SH', '501216.SH', '501217.SH',
+    '501218.SH', '501219.SH', '501220.SH', '501222.SH', '501225.SH', '501227.SH',
+    '501300.SH', '501301.SH', '501302.SH', '501303.SH', '501305.SH', '501306.SH',
+    '501307.SH', '501310.SH', '501311.SH', '501312.SH', '502000.SH', '502003.SH',
+    '502006.SH', '502010.SH', '502013.SH', '502023.SH', '502048.SH', '502053.SH',
+    '502056.SH', '506000.SH', '506001.SH', '506002.SH', '506003.SH', '506005.SH',
+    '506006.SH', '506008.SH',
+))
+
 # ---- order_bridge/contracts.py ----
 """HTTP ORDER 输入合同；不在此层调用 QMT。"""
+
 import re
 import math
 import sys
@@ -365,8 +443,8 @@ _contracts_sliced_units = {
     "MaxOrderCount": "orders", "SinglePriceRange": "boolean 0/1",
     "PriceRangeType": "enum", "PriceRangeValue": "CNY", "PriceRangeRate": "ratio",
     "SuperPriceType": "enum", "SuperPriceRate": "ratio", "SuperPriceValue": "CNY",
-    "VolumeType": "enum", "VolumeRate": "ratio", "SingleNumMin": "shares or ETF units",
-    "SingleNumMax": "shares or ETF units", "ValidTimeType": "enum",
+    "VolumeType": "enum", "VolumeRate": "ratio", "SingleNumMin": "shares or ETF/LOF units",
+    "SingleNumMax": "shares or ETF/LOF units", "ValidTimeType": "enum",
     "ValidTimeElapse": "QMT duration integer; official unit unspecified",
     "ValidTimeStart": "Unix epoch seconds", "ValidTimeEnd": "Unix epoch seconds",
     "UndealtEntrustRule": "QMT prType enum", "PlaceOrderInterval": "seconds",
@@ -445,6 +523,8 @@ def _contracts_instrument_kind(symbol):
         return "STOCK"
     if code.startswith(_contracts_etf_prefixes[exchange]):
         return "ETF"
+    if symbol in LOF_SYMBOLS:
+        return "LOF"
     return None
 
 
@@ -452,7 +532,7 @@ def _contracts_symbol_value(value, field):
     if not isinstance(value, str) or not _contracts_symbol.match(value):
         _contracts_error(field, "use six digits and .SH/.SZ/.BJ")
     if _contracts_instrument_kind(value) is None:
-        _contracts_error(field, "outside supported A-share/ETF code ranges", 422)
+        _contracts_error(field, "outside supported A-share/ETF ranges or LOF catalog", 422)
     return value
 
 
@@ -600,8 +680,8 @@ def normalize_order(payload, account_id):
         if "quantity" in payload:
             result["quantity"] = _contracts_positive_int(payload["quantity"], "quantity")
         else:
-            if _contracts_instrument_kind(result["symbol"]) == "ETF":
-                _contracts_error("amount", "ETF amount orders are unsupported", 422)
+            if _contracts_instrument_kind(result["symbol"]) in ("ETF", "LOF"):
+                _contracts_error("amount", "ETF/LOF amount orders are unsupported", 422)
             result["amount"] = _contracts_decimal(payload["amount"], "amount")
     else:
         _contracts_keys(payload, tuple(set(common) | {"items"}), ("items",), "basket order")
@@ -712,7 +792,7 @@ def capabilities():
                        "percent_params": ["PriceRangeRate", "SuperPriceRate", "VolumeRate"]},
             "smart": {"required": ["algorithm", "start_at", "end_at", "params"],
                       "percent_params": "QMT unit % fields use decimal [0,1]", "reserved": ["m_strCmdRemark"]},
-            "quantity_unit": "shares or ETF units; no multiplication", "amount_unit": "CNY, stocks only"}
+            "quantity_unit": "shares or ETF/LOF units; no multiplication", "amount_unit": "CNY, stocks only"}
 
 # ---- order_bridge/state.py ----
 """纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-14。"""
@@ -1454,6 +1534,12 @@ repo_SCHEMA_COLUMNS = {
         "created_at": repo_column("timestamp with time zone", default="now()")},
 }
 
+repo_SCHEMA_COLUMNS["submission_bans"] = {
+    "account_type": repo_column("text"), "account_id": repo_column("text"),
+    "client_order_id": repo_column("text"), "cancel_request_id": repo_column("text"),
+    "request_hash": repo_column("text"), "document": repo_column("jsonb"),
+    "created_at": repo_column("timestamp with time zone", default="now()")}
+
 repo_CHILD_GENERATED = {
     "order_items": {"item_id": "text", "symbol": "text", "side": "text"},
     "execution_attempts": {"attempt_id": "text", "kind": "text", "status": "text",
@@ -1482,6 +1568,7 @@ for repo_table, repo_fields in repo_CHILD_GENERATED.items():
     repo_SCHEMA_COLUMNS[repo_table] = repo_columns
 
 repo_SCHEMA_INDEXES = {
+    "submission_ban_cancel_id": ("submission_bans", True, ("account_type", "account_id", "cancel_request_id")),
     "order_items_business_id": ("order_items", True, ("account_type", "account_id", "order_id", "item_id")),
     "execution_attempts_business_id": ("execution_attempts", True, ("account_type", "account_id", "order_id", "attempt_id")),
     "cancel_request_scope_id": ("cancel_requests", True, ("account_type", "account_id", "cancel_request_id")),
@@ -1491,6 +1578,7 @@ repo_SCHEMA_INDEXES = {
     "fills_order_identity_lookup": ("fills", False, ("account_type", "account_id", "qmt_order_id", "trading_day", "market")),
 }
 repo_PRIMARY_KEYS = {
+    "submission_bans": ("account_type", "account_id", "client_order_id"),
     "schema_version": ("version",),
     "account_runtime": ("account_type", "account_id"),
     "orders": ("account_type", "account_id", "order_id"),
@@ -1549,7 +1637,7 @@ def repo_generated_matches(expression, field, kind):
     return compact in ("document->>'{0}'".format(field), expected)
 
 
-def repo_check_storage_schema(cur, schema, expected_version=4):
+def repo_check_storage_schema(cur, schema, expected_version=5):
     """Validate the current contract (or explicit v3 for offline migration) with catalog reads; never performs DDL or repairs."""
     if not isinstance(schema, str) or not re.match(r'^"[A-Za-z_][A-Za-z0-9_]{0,62}"$', schema):
         raise OrderError(503, "INVALID_PERSISTENCE_CONFIG", "invalid PostgreSQL schema identifier")
@@ -1570,6 +1658,8 @@ def repo_check_storage_schema(cur, schema, expected_version=4):
         if [row[0] for row in cur.fetchall()] != [expected_version]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
     for table, columns in repo_SCHEMA_COLUMNS.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         if table not in actual:
             raise repo_storage_error("missing required table: " + table)
         for column, (kind, required, default, generated) in columns.items():
@@ -1599,10 +1689,14 @@ def repo_check_storage_schema(cur, schema, expected_version=4):
     indexes = {name: (table, bool(unique), bool(valid), bool(ready), predicate, tuple(columns))
                for table, name, unique, valid, ready, predicate, columns in cur.fetchall()}
     for name, (table, unique, columns) in repo_SCHEMA_INDEXES.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         found = indexes.get(name)
         if found != (table, unique, True, True, None, columns):
             raise repo_storage_error("missing or incorrect required index: " + name)
     for table, columns in repo_PRIMARY_KEYS.items():
+        if table == "submission_bans" and expected_version < 5:
+            continue
         name = table + "_pkey"
         found = indexes.get(name)
         if found != (table, True, True, True, None, columns):
@@ -1751,7 +1845,7 @@ from datetime import timedelta
 
 
 
-repo_SCHEMA_VERSION = 4
+repo_SCHEMA_VERSION = 5
 repo_EPOCH = "1970-01-01T00:00:00Z"
 repo_CHILD_TABLES = {"order_items": "items", "execution_attempts": "attempts",
                      "cancel_requests": "cancel_requests", "qmt_tasks": "qmt_tasks",
@@ -2143,10 +2237,20 @@ class PostgresRepository(object):
                         self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
         return doc
 
+    def repo_ban(self, cur, value, by_cancel=False):
+        column = "cancel_request_id" if by_cancel else "client_order_id"
+        cur.execute("SELECT request_hash,document FROM " + self.repo_s +
+                    ".submission_bans WHERE account_type=%s AND account_id=%s AND " + column + "=%s",
+                    self.repo_scope + (value,))
+        row = cur.fetchone()
+        return (row[0], repo_json(row[1])) if row else None
+
     def accept_order(self, normalized):
         if str(normalized.get("account_id")) != self.account_id:
             raise OrderError(400, "ACCOUNT_MISMATCH", "request does not belong to this account")
         def accept(cur):
+            if self.repo_ban(cur, normalized["client_order_id"]):
+                raise OrderError(409, "SUBMISSION_BANNED", "client_order_id is durably cancelled before submission")
             doc = self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True)
             if doc:
                 if doc["request_hash"] != fingerprint(normalized):
@@ -2158,7 +2262,13 @@ class PostgresRepository(object):
         return self.repo_run(accept, mutation=True)
 
     def get_order(self, client_order_id):
-        return self.repo_run(lambda cur: self.repo_require(self.repo_load(cur, client_order_id, by_client=True)))
+        def read(cur):
+            doc = self.repo_load(cur, client_order_id, by_client=True)
+            if doc is not None:
+                return doc
+            ban = self.repo_ban(cur, client_order_id)
+            return ban[1] if ban else self.repo_require(None)
+        return self.repo_run(read)
 
     def get_by_id(self, order_id):
         return self.repo_run(lambda cur: self.repo_require(self.repo_load(cur, order_id)))
@@ -2224,6 +2334,11 @@ class PostgresRepository(object):
             raise OrderError(400, "ACCOUNT_MISMATCH", "request does not belong to this account")
         def cancel(cur):
             cancel_id = normalized["cancel_request_id"]
+            ban = self.repo_ban(cur, cancel_id, by_cancel=True)
+            if ban:
+                if ban[0] != fingerprint(normalized):
+                    raise OrderError(409, "IDEMPOTENCY_CONFLICT", "cancel_request_id already has different request content")
+                return 200, ban[1]
             cur.execute("SELECT order_id,document FROM " + self.repo_s + ".cancel_requests "
                         "WHERE account_type=%s AND account_id=%s AND cancel_request_id=%s", self.repo_scope + (cancel_id,))
             row = cur.fetchone()
@@ -2233,7 +2348,27 @@ class PostgresRepository(object):
                     raise OrderError(409, "IDEMPOTENCY_CONFLICT", "cancel_request_id already has different request content")
                 doc = self.repo_require(self.repo_load(cur, row[0], lock=True))
                 return record.get("http_status", 200), cancel_response(doc, cancel_id, replayed=True)
-            doc = self.repo_require(self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True))
+            doc = self.repo_load(cur, normalized["client_order_id"], by_client=True, lock=True)
+            if doc is None:
+                if self.repo_ban(cur, normalized["client_order_id"]):
+                    raise OrderError(409, "IDEMPOTENCY_CONFLICT", "client_order_id already has a different cancellation receipt")
+                cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id' FROM " + self.repo_s +
+                            ".account_runtime r WHERE account_type=%s AND account_id=%s", self.repo_scope)
+                stream = cur.fetchone()
+                if not stream or not stream[0]:
+                    raise OrderError(503, "EVIDENCE_SCHEMA_REQUIRED", "durable submission ban requires persisted evidence stream identity")
+                receipt = dict(receipt_type="SUBMISSION_BAN", receipt_version=1,
+                               source="BRIDGE_PERSISTED_SUBMISSION_BAN", stream_id=stream[0],
+                               account_type=self.account_type, account_id=self.account_id,
+                               client_order_id=normalized["client_order_id"], cancel_request_id=cancel_id,
+                               ban_id=str(uuid.uuid4()), created_at=iso_datetime(utc_now()),
+                               submission_status="CANCELLED_LOCAL", cancel_status="CONFIRMED",
+                               no_submission=True, execution_attempt_count=0)
+                cur.execute("INSERT INTO " + self.repo_s + ".submission_bans "
+                            "(account_type,account_id,client_order_id,cancel_request_id,request_hash,document) "
+                            "VALUES(%s,%s,%s,%s,%s,%s::jsonb)", self.repo_scope +
+                            (normalized["client_order_id"], cancel_id, fingerprint(normalized), json_text(receipt)))
+                return 200, receipt
             record, status = apply_cancel_request(doc, normalized)
             record = next(row for row in doc["cancel_requests"] if row["cancel_request_id"] == cancel_id)
             record["request_hash"] = fingerprint(normalized)
@@ -4416,6 +4551,7 @@ class OrderRuntime:
             self._runtime_keys(params, ())
             result = capabilities()
             result['evidence_v1'] = evidence_capabilities()
+            result['cancel_before_submit_v1'] = dict(supported=True, receipt_type='SUBMISSION_BAN', schema_version=1)
             result["qmt_functions"] = {name: self.adapter.available(name) for name in
                 ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket", "get_history_trade_detail_data")}
             result["history_query"] = qmt_history_capabilities(self.adapter.apis)
@@ -4490,6 +4626,8 @@ class OrderRuntime:
                     raise
                 existing = None
             if existing is not None:
+                if existing.get("receipt_type") == "SUBMISSION_BAN":
+                    raise OrderError(409, "SUBMISSION_BANNED", "client_order_id is durably cancelled before submission")
                 if existing["request_hash"] != fingerprint(request):
                     raise OrderError(409, "IDEMPOTENCY_CONFLICT", "client_order_id has a different request")
                 return 200, public_order(existing, True)
@@ -4515,7 +4653,8 @@ class OrderRuntime:
             value = params.get("client_order_id")
             if not isinstance(value, str) or not value:
                 raise OrderError(400, "INVALID_PARAMS", "client_order_id is required")
-            return 200, public_order(self.repo.get_order(value))
+            document = self.repo.get_order(value)
+            return 200, (document if document.get("receipt_type") == "SUBMISSION_BAN" else public_order(document))
         if method == "orders":
             self._runtime_keys(params, ("active", "limit", "cursor"))
             active = params.get("active", "true")

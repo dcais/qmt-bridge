@@ -4,6 +4,9 @@ IPC 服务的统一入口文档：[IPC_BRIDGE.md](IPC_BRIDGE.md)（部署、接�
 
 本仓库同时保留 HTTP 直连与 IPC 桥接两种部署方式。
 
+沪深 LOF 数量订单使用离线官方目录校验；新增 LOF 需刷新目录，详见
+[LOF 下单目录](docs/lof-order-catalog.md)。目录身份不证明当前上市或账户交易权限。
+
 原 HTTP 方案使用 `strategies/http_feed.py`、`strategies/http_order.py`，
 部署说明见 [HTTP_FEED.md](HTTP_FEED.md) 和 [HTTP_ORDER.md](HTTP_ORDER.md)。
 ORDER 源码仍在 `order_bridge`，构建器为 `tools/build_order_strategy.py`，

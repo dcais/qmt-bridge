@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """HTTP ORDER 输入合同；不在此层调用 QMT。"""
+from .lof_catalog import LOF_SYMBOLS
+
 import re
 import math
 import sys
@@ -58,8 +60,8 @@ _contracts_sliced_units = {
     "MaxOrderCount": "orders", "SinglePriceRange": "boolean 0/1",
     "PriceRangeType": "enum", "PriceRangeValue": "CNY", "PriceRangeRate": "ratio",
     "SuperPriceType": "enum", "SuperPriceRate": "ratio", "SuperPriceValue": "CNY",
-    "VolumeType": "enum", "VolumeRate": "ratio", "SingleNumMin": "shares or ETF units",
-    "SingleNumMax": "shares or ETF units", "ValidTimeType": "enum",
+    "VolumeType": "enum", "VolumeRate": "ratio", "SingleNumMin": "shares or ETF/LOF units",
+    "SingleNumMax": "shares or ETF/LOF units", "ValidTimeType": "enum",
     "ValidTimeElapse": "QMT duration integer; official unit unspecified",
     "ValidTimeStart": "Unix epoch seconds", "ValidTimeEnd": "Unix epoch seconds",
     "UndealtEntrustRule": "QMT prType enum", "PlaceOrderInterval": "seconds",
@@ -138,6 +140,8 @@ def _contracts_instrument_kind(symbol):
         return "STOCK"
     if code.startswith(_contracts_etf_prefixes[exchange]):
         return "ETF"
+    if symbol in LOF_SYMBOLS:
+        return "LOF"
     return None
 
 
@@ -145,7 +149,7 @@ def _contracts_symbol_value(value, field):
     if not isinstance(value, str) or not _contracts_symbol.match(value):
         _contracts_error(field, "use six digits and .SH/.SZ/.BJ")
     if _contracts_instrument_kind(value) is None:
-        _contracts_error(field, "outside supported A-share/ETF code ranges", 422)
+        _contracts_error(field, "outside supported A-share/ETF ranges or LOF catalog", 422)
     return value
 
 
@@ -293,8 +297,8 @@ def normalize_order(payload, account_id):
         if "quantity" in payload:
             result["quantity"] = _contracts_positive_int(payload["quantity"], "quantity")
         else:
-            if _contracts_instrument_kind(result["symbol"]) == "ETF":
-                _contracts_error("amount", "ETF amount orders are unsupported", 422)
+            if _contracts_instrument_kind(result["symbol"]) in ("ETF", "LOF"):
+                _contracts_error("amount", "ETF/LOF amount orders are unsupported", 422)
             result["amount"] = _contracts_decimal(payload["amount"], "amount")
     else:
         _contracts_keys(payload, tuple(set(common) | {"items"}), ("items",), "basket order")
@@ -405,4 +409,4 @@ def capabilities():
                        "percent_params": ["PriceRangeRate", "SuperPriceRate", "VolumeRate"]},
             "smart": {"required": ["algorithm", "start_at", "end_at", "params"],
                       "percent_params": "QMT unit % fields use decimal [0,1]", "reserved": ["m_strCmdRemark"]},
-            "quantity_unit": "shares or ETF units; no multiplication", "amount_unit": "CNY, stocks only"}
+            "quantity_unit": "shares or ETF/LOF units; no multiplication", "amount_unit": "CNY, stocks only"}
