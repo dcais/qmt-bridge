@@ -2,6 +2,8 @@
 # Last modified (Asia/Shanghai): 2026-10-14
 """终态修复工具：纯本地事务替身，不连接 PostgreSQL/QMT。"""
 import copy
+import contextlib
+import io
 import importlib.util
 import hashlib
 import json
@@ -575,6 +577,190 @@ class EquivalentObservationRepairTests(unittest.TestCase):
         self.repo.account_orders.append(other)
         with self.assertRaisesRegex(OrderError, "incomplete scope"):
             tool.repair(self.repo, self.args)
+
+
+def precision_snapshots(query_changes=None, count=2):
+    """Legacy history with the two production quantity/amount precision pairs."""
+    _, events, _ = equivalent_snapshots()
+    checkpoint = events[0][3]
+    checkpoint["account_type"] = "STOCK"
+    checkpoint["items"][0]["requested_quantity"] = 217600
+    checkpoint["request"]["quantity"] = 217600
+    order = checkpoint["qmt_orders"][0]
+    order.update(quantity=217600, filled_quantity=217600)
+    order["raw"].update(quantity=217600, filled_quantity=217600,
+                        m_dTradeAmount=405388.8, m_dPrice=1.863, m_dTradedPrice=1.863)
+    prototype = copy.deepcopy(checkpoint["fills"][0])
+    checkpoint["fills"] = []
+    for index, quantity, amount in ((1, 164548, "306552.924"), (2, 53052, "98835.876")):
+        fill = copy.deepcopy(prototype)
+        trade_id = "trade-{}".format(index)
+        fill.update(trade_id=trade_id, fill_key=["20260926", "SH", trade_id],
+                    quantity=quantity, amount=amount, source="callback")
+        fill["raw"].update(trade_id=trade_id, quantity=quantity, filled_quantity=quantity,
+                           amount=amount, m_dTradeAmount=amount, m_dPrice=1.863,
+                           m_dTradedPrice=1.863)
+        checkpoint["fills"].append(fill)
+    mark_reconciled(checkpoint, now=checkpoint["last_reconciled_at"])
+    events = [(5, "RECONCILE_STATE_CHANGED", "2026-09-26T14:54:00+00:00", checkpoint)]
+    observations = []
+    previous = checkpoint
+    for index in range(count):
+        fill = checkpoint["fills"][index % 2]
+        query = copy.deepcopy(fill["raw"])
+        amount = "306552.92" if index % 2 == 0 else "98835.88"
+        query.update(amount=amount, m_dTradeAmount=amount, m_nOrderStrategyType=index,
+                     m_dCommission=0, m_dComssion=123.456, m_dComission="unavailable")
+        if index == 0:
+            query.update(query_changes or {})
+        seq = index + 6
+        stamp = "2026-09-28T00:00:00+00:00"
+        reason = "CONFLICTING_FILL_IDENTITY"
+        evidence = {"kind": "deal", "raw": query, "source": "query", "reason": reason,
+                    "observed_at": stamp,
+                    "evidence_id": tool.fingerprint({"kind": "deal", "raw": query, "reason": reason})}
+        doc = copy.deepcopy(previous)
+        doc["unassociated_evidence"].append(evidence)
+        doc.update(version=previous["version"] + 1, reconciliation_complete=False,
+                   reconcile_requested=True, reconcile_priority=True)
+        recompute_order(doc)
+        events.append((seq, "QMT_OBSERVATION", stamp, doc))
+        observations.append((seq + 100, "deal", query, "query", stamp, True, "order-1"))
+        previous = doc
+    gap = copy.deepcopy(previous)
+    gap.update(version=previous["version"] + 1, fact_version=previous["fact_version"] + 1)
+    events.append((count + 6, "RECONCILE_GAP", "2026-09-28T00:00:08+00:00", gap))
+    return copy.deepcopy(gap), events, observations
+
+
+class FillPrecisionObservationRepairTests(unittest.TestCase):
+    def setUp(self):
+        self.load_fixture()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "receipt.json"
+        self.args = SimpleNamespace(order_id="order-1", expected_version=self.repo.current["version"],
+            checkpoint_event_seq=5, reason="audited callback/query cent precision", evidence_out=self.path,
+            apply=False, resolve_equivalent_observations=False, resolve_fill_precision_observations=True)
+
+    def load_fixture(self, **kwargs):
+        current, events, observations = precision_snapshots(**kwargs)
+        self.repo = Repo(current, events)
+        self.repo.observations = observations
+
+    def test_precision_dry_run_proves_both_rounding_directions_without_writes(self):
+        before = copy.deepcopy((self.repo.current, self.repo.events, self.repo.observations))
+        result = tool.repair(self.repo, self.args)
+        self.assertEqual(result["repair_kind"], "fill-precision-query-observations")
+        self.assertEqual(result["proof"]["checked_observation_ids"], [106, 107])
+        for proof in result["proof"]["evidence_proofs"]:
+            self.assertEqual(proof["rule"], "QUERY_FILL_CALLBACK_QUERY_CENT_PRECISION")
+        for proof in result["proof"]["observation_proofs"]:
+            self.assertEqual(proof["ignored_raw_fields"], ["m_dCommission", "m_dComssion", "m_dComission"])
+        self.assertEqual((self.repo.current, self.repo.events, self.repo.observations), before)
+        self.assertEqual(self.repo.saved, [])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(result["expected_active"])
+
+    def test_apply_preserves_native_facts_and_receipt_and_restart_stays_closed(self):
+        # The existing invariant test also replays every query after startup recovery.
+        EquivalentObservationRepairTests.test_apply_preserves_native_facts_and_receipt_and_restart_stays_closed(self)
+        receipt = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["repair_kind"], "fill-precision-query-observations")
+        self.assertEqual(receipt["events"], [
+            {"seq": row[0], "type": row[1], "at": row[2], "document": row[3]} for row in self.repo.events])
+        self.assertEqual([row["raw"] for row in receipt["observations"]],
+                         [row[2] for row in self.repo.observations])
+        self.assertTrue(all(row["resolution"]["kind"] == "MANUAL_FILL_PRECISION_QUERY_OBSERVATION"
+                            for row in self.repo.current["resolved_evidence"]))
+
+    def test_default_and_old_explicit_mode_still_refuse_precision_pairs(self):
+        self.args.resolve_fill_precision_observations = False
+        for old_mode in (False, True):
+            with self.subTest(old_mode=old_mode):
+                self.args.resolve_equivalent_observations = old_mode
+                with self.assertRaises(OrderError):
+                    tool.repair(self.repo, self.args)
+
+    def test_true_economics_identity_unknown_fields_and_noncent_amounts_refused(self):
+        for changes in ({"quantity": 164549}, {"m_dPrice": 1.864},
+                        {"amount": "306552.93", "m_dTradeAmount": "306552.93"},
+                        {"amount": "306552.9251", "m_dTradeAmount": "306552.9251"},
+                        {"m_dTradeAmount": "306552.93"}, {"trade_id": "other"},
+                        {"qmt_order_id": "other"}, {"account_id": "other"},
+                        {"symbol": "other"}, {"side": "SELL"}, {"remark": "other"},
+                        {"m_strOrderRef": "other"}, {"unknown_fact": 1}):
+            with self.subTest(changes=changes):
+                self.load_fixture(query_changes=changes)
+                with self.assertRaises(OrderError):
+                    tool.repair(self.repo, self.args)
+
+    def test_unaudited_noop_query_and_order_branch_stay_strict(self):
+        for kind, changes in (("deal", {"m_dPrice": 1.864}),
+                              ("deal", {"amount": "306552.93", "m_dTradeAmount": "306552.93"}),
+                              ("order", {"m_dTradeAmount": "405388.804"}),
+                              ("order", {"m_dCommission": 0}),
+                              ("order", {"m_dComssion": 0}),
+                              ("order", {"m_dComission": 0})):
+            with self.subTest(kind=kind, changes=changes):
+                self.load_fixture()
+                checkpoint = self.repo.events[0][3]
+                raw = copy.deepcopy(checkpoint["fills" if kind == "deal" else "qmt_orders"][0]["raw"])
+                raw.update(changes)
+                self.repo.observations.append((999, kind, raw, "query",
+                    "2026-09-29T00:00:00+00:00", True, "order-1"))
+                with self.assertRaises(OrderError):
+                    tool.repair(self.repo, self.args)
+
+    def test_noncallback_origin_and_nonstock_account_cannot_use_cent_rule(self):
+        for bad in ("source", "account_type", "callback_price"):
+            with self.subTest(bad=bad):
+                self.load_fixture()
+                for doc in [self.repo.current] + [row[3] for row in self.repo.events]:
+                    if bad == "source":
+                        doc["fills"][0]["source"] = "query"
+                    elif bad == "account_type":
+                        doc["account_type"] = "FUTURE"
+                    else:
+                        doc["fills"][0]["raw"]["m_dPrice"] = 1.864
+                checkpoint = self.repo.events[0][3]
+                checkpoint["terminal_reconciliation_checkpoint"]["facts_fingerprint"] = state_reconciliation_facts(checkpoint)
+                for doc in [self.repo.current] + [row[3] for row in self.repo.events[1:]]:
+                    doc["terminal_reconciliation_checkpoint"] = copy.deepcopy(checkpoint["terminal_reconciliation_checkpoint"])
+                with self.assertRaises(OrderError):
+                    tool.repair(self.repo, self.args)
+
+
+    def test_history_and_observation_proofs_cannot_be_bypassed_in_precision_mode(self):
+        EquivalentObservationRepairTests.test_missing_duplicate_or_changed_raw_observation_refused(self)
+        EquivalentObservationRepairTests.test_event_mutation_or_unexpected_event_or_fact_generation_refused(self)
+        EquivalentObservationRepairTests.test_new_fact_error_submission_and_cancel_changes_refused(self)
+        EquivalentObservationRepairTests.test_cross_order_identity_collision_and_missing_internal_fields_refused(self)
+
+    def test_commission_only_difference_requires_new_mode(self):
+        current, events, observations = equivalent_snapshots()
+        self.repo = Repo(current, events)
+        self.repo.observations = observations
+        self.args.expected_version = current["version"]
+        raw = copy.deepcopy(events[0][3]["fills"][0]["raw"])
+        raw.update(m_dCommission=999, m_dComssion=0, m_dComission=None)
+        self.repo.observations.append((999, "deal", raw, "query",
+            "2026-09-29T00:00:00+00:00", True, "order-1"))
+        self.assertIn(999, tool.repair(self.repo, self.args)["proof"]["checked_observation_ids"])
+        self.args.resolve_fill_precision_observations = False
+        self.args.resolve_equivalent_observations = True
+        with self.assertRaisesRegex(OrderError, "query raw field"):
+            tool.repair(self.repo, self.args)
+
+    def test_receipt_collision_version_race_and_cli_modes(self):
+        EquivalentObservationRepairTests.test_existing_receipt_and_version_race_refuse_equivalent_apply(self)
+        argv = ["--order-id", "order-1", "--expected-version", "14", "--checkpoint-event-seq", "5",
+                "--reason", "audit", "--resolve-fill-precision-observations"]
+        args = tool.parser().parse_args(argv)
+        self.assertTrue(args.resolve_fill_precision_observations)
+        self.assertFalse(args.resolve_equivalent_observations)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            tool.parser().parse_args(argv + ["--resolve-equivalent-observations"])
 
 
 if __name__ == "__main__":

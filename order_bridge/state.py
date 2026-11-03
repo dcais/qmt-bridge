@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-10-14。"""
-from decimal import Decimal, InvalidOperation
+"""纯订单事实归并；所有调用副作用由持久库和运行时负责。Last modified: 2026-11-03。"""
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from .common import OrderError, copy_json, fingerprint, iso_datetime, new_record_metadata, parse_timestamp, utc_now
 
 
@@ -108,6 +108,77 @@ def state_amount_equivalent(left, right):
         return False
 
 
+def state_nonnegative_decimal(value):
+    try:
+        number = Decimal(str(value))
+        return number if number.is_finite() and number >= 0 else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def state_float_representation_equal(left, right):
+    # Eight binary64 epsilons cover a short multiply/divide chain, not cash rounding.
+    return abs(left - right) <= max(abs(left), abs(right), Decimal('1')) * Decimal(2) ** -49
+
+
+def state_fill_cent_precision(doc, previous, raw, source):
+    """Recognize a scoped STOCK callback amount and its query's cent representation."""
+    known_raw = previous.get('raw') or {}
+    if ({source, previous.get('source')} != {'callback', 'query'}
+            or doc.get('account_type') != 'STOCK'):
+        return False
+    ids, known = observation_identifiers('deal', raw), observation_identifiers('deal', known_raw)
+    scope = ('account_id', 'trading_day', 'market', 'trade_id', 'qmt_order_id', 'remark', 'symbol', 'side')
+    if (not observation_identity_valid('deal', known_raw, known)
+            or ids['market'] not in ('SH', 'SZ')
+            or any(not ids[key] or ids[key] != known[key] or ids[key] != previous.get(key) for key in scope)
+            or ids['account_id'] != doc.get('account_id') or ids['remark'] != doc.get('remark')
+            or ids['qmt_task_id'] != known['qmt_task_id']
+            or len([row for row in doc['fills'] if row['fill_key'] == previous['fill_key']]) != 1):
+        return False
+    callback, query = (known_raw, raw) if source == 'query' else (raw, known_raw)
+    callback_amount = state_nonnegative_decimal(state_value(callback, 'amount', 'filled_amount', 'm_dTradeAmount'))
+    query_amount = state_nonnegative_decimal(state_value(query, 'amount', 'filled_amount', 'm_dTradeAmount'))
+    price = state_nonnegative_decimal(callback.get('m_dPrice'))
+    quantity = state_nonnegative_decimal(state_value(callback, 'quantity', 'filled_quantity', 'm_nVolume'))
+    if (None in (callback_amount, query_amount, price, quantity) or price <= 0 or quantity <= 0
+            or quantity != quantity.to_integral_value() or quantity != previous['quantity']
+            or state_nonnegative_decimal(query.get('m_dPrice')) != price
+            or state_nonnegative_decimal(state_value(query, 'quantity', 'filled_quantity', 'm_nVolume')) != quantity):
+        return False
+    try:
+        return (query_amount == query_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                and callback_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) == query_amount
+                and state_float_representation_equal(callback_amount, price * quantity))
+    except InvalidOperation:
+        return False
+
+
+def state_fill_observation_equivalent(doc, previous, raw, source, amount):
+    known_raw = previous.get('raw') or {}
+    cent_precision = state_fill_cent_precision(doc, previous, raw, source)
+    if not state_amount_equivalent(previous['amount'], amount) and not cent_precision:
+        return False
+    amounts = {'amount', 'filled_amount', 'm_dTradeAmount'}
+    for key in set(known_raw) | set(raw):
+        # Commission is retained as raw evidence, never an execution gate.
+        if key in {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}:
+            continue
+        if key not in known_raw or key not in raw:
+            return False
+        left, right = known_raw[key], raw[key]
+        if key in amounts:
+            if state_amount_equivalent(left, right):
+                continue
+            if (cent_precision and state_nonnegative_decimal(left) == state_nonnegative_decimal(previous['amount'])
+                    and state_nonnegative_decimal(right) == amount):
+                continue
+            return False
+        if fingerprint(left) != fingerprint(right):
+            return False
+    return True
+
+
 def state_query_order_alias(raw, source):
     """Only a query's zero/missing-ref market_sysid form is a derived reference."""
     ids = observation_identifiers('order', raw)
@@ -177,6 +248,15 @@ def state_equivalent_query_order(doc, row, raw, source):
 
 def state_evidence(doc, kind, raw, source, reason, observed_at):
     evidence = doc.setdefault('unassociated_evidence', [])
+    if kind == 'deal' and reason == 'CONFLICTING_FILL_IDENTITY':
+        ignored = {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}
+        semantic = fingerprint({key: value for key, value in raw.items() if key not in ignored})
+        for row in evidence:
+            if (row.get('kind') == kind and row.get('source') == source and row.get('reason') == reason
+                    and fingerprint({key: value for key, value in (row.get('raw') or {}).items()
+                                     if key not in ignored}) == semantic):
+                # Keep the unresolved representative and latch; the raw observation is persisted separately.
+                return
     key = fingerprint({'kind': kind, 'raw': raw, 'reason': reason})
     if any(row.get('evidence_id') == key for row in doc.get('resolved_evidence', [])):
         return
@@ -302,7 +382,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
             elif (previous['quantity'] != quantity or previous['item_id'] != item['item_id']
                   or any(previous.get(name) and ids.get(name) and previous[name] != ids[name]
                          for name in ('account_id', 'qmt_order_id', 'qmt_task_id', 'remark', 'symbol', 'side'))
-                  or not state_amount_equivalent(previous['amount'], amount)):
+                  or not state_fill_observation_equivalent(doc, previous, raw, source, amount)):
                 state_evidence(doc, kind, raw, source, 'CONFLICTING_FILL_IDENTITY', stamp)
             else:
                 # Keep the original entry and raw callback; equivalent queries are logged separately.

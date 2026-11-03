@@ -26,7 +26,7 @@ from service.ipc_bridge.order.repository import PostgresRepository, repo_json, r
 from service.ipc_bridge.order.state import (apply_observation, observation_identifiers,
                                 mark_reconciled, reconcile_pending, recompute_order,
                                 state_execution_finished, state_reconciliation_facts,
-                                is_order_active, state_value)  # noqa: E402
+                                is_order_active, state_value, state_fill_cent_precision)  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
 
 
@@ -211,7 +211,7 @@ def scoped_order(checkpoint, kind, raw):
     return ids, order
 
 
-def prove_query_noop(checkpoint, kind, raw, source, observed_at):
+def prove_query_noop(checkpoint, kind, raw, source, observed_at, fill_precision=False):
     require(source == "query", "newer observation is not a query")
     ids, order = scoped_order(checkpoint, kind, raw)
     known = order
@@ -234,6 +234,10 @@ def prove_query_noop(checkpoint, kind, raw, source, observed_at):
     if kind == "order":
         ignored.add("m_strInsertTime")
     amount_fields = {"amount", "filled_amount", "m_dTradeAmount"}
+    cent_precision = (fill_precision and kind == "deal"
+                      and state_fill_cent_precision(checkpoint, known, raw, source))
+    if fill_precision and kind == "deal":
+        ignored.update(("m_dCommission", "m_dComssion", "m_dComission"))
     for key in set(raw) | set(known_raw):
         if key in ignored:
             continue
@@ -247,7 +251,11 @@ def prove_query_noop(checkpoint, kind, raw, source, observed_at):
             try:
                 left, right = Decimal(str(raw.get(key))), Decimal(str(known_raw.get(key)))
                 same = (left.is_finite() and right.is_finite() and left >= 0 and right >= 0
-                        and abs(left - right) <= tolerance)
+                        and (abs(left - right) <= tolerance
+                             or (cent_precision and key in amount_fields
+                                 and left == Decimal(str(state_value(
+                                     raw, "amount", "filled_amount", "m_dTradeAmount")))
+                                 and right == Decimal(str(known["amount"])))))
             except (InvalidOperation, ValueError, TypeError):
                 same = False
         require(same, "query raw field {} changes audited facts".format(key))
@@ -257,7 +265,7 @@ def prove_query_noop(checkpoint, kind, raw, source, observed_at):
     return ids, order
 
 
-def prove_equivalent_evidence(checkpoint, evidence, observations):
+def prove_equivalent_evidence(checkpoint, evidence, observations, fill_precision=False):
     kind, raw = evidence.get("kind"), evidence.get("raw")
     reason = evidence.get("reason")
     require(isinstance(raw, dict) and (kind, reason) in (
@@ -270,7 +278,8 @@ def prove_equivalent_evidence(checkpoint, evidence, observations):
                 and parse_timestamp(repo_timestamp(row[4])) == parse_timestamp(evidence.get("observed_at"))
                 and row[6] == checkpoint["order_id"] and row[5] is True]
     require(len(matching) == 1, "conflict lacks a unique applied raw observation")
-    ids, order = prove_query_noop(checkpoint, kind, raw, evidence["source"], evidence["observed_at"])
+    ids, order = prove_query_noop(checkpoint, kind, raw, evidence["source"], evidence["observed_at"],
+                                  fill_precision=fill_precision)
     if kind == "deal":
         fills = [row for row in checkpoint["fills"]
                  if row.get("fill_key") == [ids["trading_day"], ids["market"], ids.get("trade_id")]]
@@ -281,11 +290,16 @@ def prove_equivalent_evidence(checkpoint, evidence, observations):
             delta = abs(amount - Decimal(fills[0]["amount"]))
             quantity = Decimal(str(state_value(raw, "quantity", "filled_quantity", "m_nVolume")))
             equivalent = (amount.is_finite() and amount >= 0 and delta.is_finite()
-                          and delta <= Decimal("0.001") and quantity == fills[0]["quantity"])
+                          and (delta <= Decimal("0.001")
+                               or (fill_precision and state_fill_cent_precision(
+                                   checkpoint, fills[0], raw, evidence["source"])))
+                          and quantity == fills[0]["quantity"])
         except (InvalidOperation, ValueError, TypeError):
             equivalent = False
-        require(equivalent, "fill economics differ beyond 0.001 yuan")
-        rule = "QUERY_FILL_AMOUNT_ABS_DELTA_LE_0_001"
+        require(equivalent, "fill economics do not satisfy approved amount rule"
+                if fill_precision else "fill economics differ beyond 0.001 yuan")
+        rule = ("QUERY_FILL_CALLBACK_QUERY_CENT_PRECISION" if fill_precision
+                and delta > Decimal("0.001") else "QUERY_FILL_AMOUNT_ABS_DELTA_LE_0_001")
     else:
         require(raw.get("m_nRef") in (0, "0")
                 and raw.get("m_strOrderRef") == ids["market"] + "_" + ids["qmt_order_id"]
@@ -318,7 +332,8 @@ def validate_unique_order_scope(checkpoint, account_orders):
     return checked
 
 
-def validate_equivalent(current, events, observations, checkpoint_seq, account_orders):
+def validate_equivalent(current, events, observations, checkpoint_seq, account_orders,
+                        fill_precision=False):
     require(events and events[0][0] == checkpoint_seq, "checkpoint event is missing")
     seq, kind, occurred_at, checkpoint = events[0]
     require_internal_document(checkpoint)
@@ -353,7 +368,8 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
         require(bool(added) == (event_kind == "QMT_OBSERVATION"),
                 "QMT_OBSERVATION must add only approved equivalent evidence")
         for evidence in added:
-            proof = prove_equivalent_evidence(checkpoint, evidence, observations)
+            proof = prove_equivalent_evidence(checkpoint, evidence, observations,
+                                              fill_precision=fill_precision)
             require(proof["evidence_id"] not in proofs, "duplicate conflict evidence")
             proofs[proof["evidence_id"]] = proof
         event_proofs.append({"event_seq": event_seq, "type": event_kind,
@@ -378,9 +394,12 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
                 "raw observation is associated with a colliding order")
             continue
         stamp = iso_datetime(observed_at) if not isinstance(observed_at, str) else observed_at
-        prove_query_noop(checkpoint, obs_kind, raw, source, stamp)
+        prove_query_noop(checkpoint, obs_kind, raw, source, stamp, fill_precision=fill_precision)
         checked.append({"observation_id": observation_id, "kind": obs_kind, "source": source,
-                        "applied": applied, "order_id": order_id, "equivalent": True})
+                        "applied": applied, "order_id": order_id, "equivalent": True,
+                        **({"deal_amount_policy": "SCOPED_CALLBACK_QUERY_CENT_PRECISION",
+                            "ignored_raw_fields": ["m_dCommission", "m_dComssion", "m_dComission"]}
+                           if fill_precision and obs_kind == "deal" else {})})
     return {"checkpoint_seq": seq, "checkpoint_at": str(occurred_at),
             "historical_reconciled_at": checkpoint["last_reconciled_at"],
             "checked_observation_ids": [row["observation_id"] for row in checked],
@@ -389,13 +408,14 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
             "intervening_event_seqs": [row[0] for row in events[1:]]}
 
 
-def repaired_candidate(current, checkpoint, proof, equivalent):
+def repaired_candidate(current, checkpoint, proof, equivalent, fill_precision=False):
     candidate = copy.deepcopy(current)
     if equivalent:
         decisions = {row["evidence_id"]: row for row in proof["evidence_proofs"]}
         for evidence in candidate["unassociated_evidence"]:
             resolved = copy.deepcopy(evidence)
-            resolved["resolution"] = {"kind": "MANUAL_EQUIVALENT_QUERY_OBSERVATION",
+            resolved["resolution"] = {"kind": ("MANUAL_FILL_PRECISION_QUERY_OBSERVATION"
+                                               if fill_precision else "MANUAL_EQUIVALENT_QUERY_OBSERVATION"),
                                       "order_id": current["order_id"],
                                       "checkpoint_event_seq": proof["checkpoint_seq"],
                                       **decisions[evidence["evidence_id"]]}
@@ -413,7 +433,10 @@ def repaired_candidate(current, checkpoint, proof, equivalent):
 
 
 def repair(repo, args):
-    equivalent = getattr(args, "resolve_equivalent_observations", False)
+    fill_precision = getattr(args, "resolve_fill_precision_observations", False)
+    equivalent = getattr(args, "resolve_equivalent_observations", False) or fill_precision
+    require(not (fill_precision and getattr(args, "resolve_equivalent_observations", False)),
+            "choose only one observation resolution mode")
     require(args.reason and args.reason.strip(), "reason is required")
     require(args.expected_version >= 0 and args.checkpoint_event_seq > 0,
             "expected version and checkpoint seq must be positive")
@@ -447,13 +470,15 @@ def repair(repo, args):
                         ".orders WHERE account_type=%s AND account_id=%s ORDER BY order_id" +
                         (" FOR UPDATE" if args.apply else ""), repo.repo_scope)
             account_orders = [repo_json(row[0]) for row in cur.fetchall()]
-            proof = validate_equivalent(current, events, observations, args.checkpoint_event_seq, account_orders)
+            proof = validate_equivalent(current, events, observations, args.checkpoint_event_seq, account_orders,
+                                        fill_precision=fill_precision)
         else:
             proof = validate(current, events, observations, args.checkpoint_event_seq)
-        candidate = repaired_candidate(current, events[0][3], proof, equivalent)
+        candidate = repaired_candidate(current, events[0][3], proof, equivalent, fill_precision=fill_precision)
         result = {"order_id": args.order_id, "mode": "apply" if args.apply else "dry-run",
                   "expected_version": args.expected_version, "proof": proof,
-                  "repair_kind": "equivalent-query-observations" if equivalent else "strict-terminal-gap",
+                  "repair_kind": ("fill-precision-query-observations" if fill_precision else
+                                  "equivalent-query-observations" if equivalent else "strict-terminal-gap"),
                   "expected_state": {key: candidate.get(key) for key in (
                       "fact_version", "execution_status", "sync_status", "last_reconciled_at",
                       "reconciliation_complete", "reconcile_pending", "reconcile_requested")},
@@ -483,7 +508,8 @@ def repair(repo, args):
         if equivalent:
             for row in current["resolved_evidence"]:
                 resolution = row.get("resolution") or {}
-                if resolution.get("kind") == "MANUAL_EQUIVALENT_QUERY_OBSERVATION":
+                if resolution.get("kind") in ("MANUAL_EQUIVALENT_QUERY_OBSERVATION",
+                                               "MANUAL_FILL_PRECISION_QUERY_OBSERVATION"):
                     resolution.update(evidence_path=str(args.evidence_out.resolve()), evidence_sha256=digest)
             # Resolved evidence is part of closure facts; bind its receipt before fingerprinting.
             mark_reconciled(current, now=events[0][3]["last_reconciled_at"])
@@ -516,7 +542,10 @@ def parser():
     root.add_argument("--reason", required=True)
     root.add_argument("--evidence-out", type=Path)
     root.add_argument("--apply", action="store_true")
-    root.add_argument("--resolve-equivalent-observations", action="store_true",
+    modes = root.add_mutually_exclusive_group()
+    modes.add_argument("--resolve-fill-precision-observations", action="store_true",
+                       help="audit scoped callback/query deal cent precision; deal commission is raw evidence only")
+    modes.add_argument("--resolve-equivalent-observations", action="store_true",
                       help="prove and audit only duplicate query amount/reference conflicts")
     return root
 
