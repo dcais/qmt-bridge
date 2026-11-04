@@ -60,7 +60,7 @@ class BridgeLink:
                         heartbeat_age_seconds=(round(time.monotonic() - self.last_heartbeat, 3)
                                                if self.last_heartbeat else None),
                         pending_requests=len(self._pending), pending_events=self._events.qsize(),
-                        observation_gap=self.gap, error_code=self.last_error,
+                        error_code=self.last_error,
                         logging={"sink": "console", "file_logging": False})
 
     @property

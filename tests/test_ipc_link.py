@@ -94,7 +94,7 @@ class LinkIntegrationTests(unittest.TestCase):
         peer.commands.put(peer.runtime.disconnect)
         wait_for(lambda: self.link.ready and self.link.session_id != first_session)
         self.assertEqual(self.link.boot_id, boot)
-        self.assertTrue(self.link.health()["observation_gap"])
+        self.assertTrue(self.link.gap)
         self.assertEqual(self.link.call("feed.after_reconnect", {})["method"], "feed.after_reconnect")
         peer.close()
         self.runtime = None

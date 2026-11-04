@@ -337,6 +337,8 @@ python tools/order_terminal_repair.py --config config.json --order-id <order_id>
 重复执行会因版本或状态不符而拒绝，不重复追加审计。未曾完整结案、结案后有新事实或存在引用冲突的
 记录不适用；仍需核对原始回报或券商历史记录，不能用当天空查询替代。
 
+`/health` 仅在顶层返回 `observation_gap`，表示 Order 运行时当前的观测缺口。
+
 `/health` 另返回 `last_reconcile_attempt_at`（最近轮次开始）、`last_reconcile_finished_at`（最近轮次结束，包括失败）、`next_reconcile_at`（预计下次轮次，执行中为空）及 `last_reconcile_error`（最近查询异常摘要）。`last_reconciled_at` 只表示成功完成对账的时间，失败不得刷新它。调度使用单调时钟，展示时间使用带时区的 UTC 时间戳；这些轮次诊断字段在策略重启后重新采样。
 
 QMT 的 `console_log` 只打印有界元信息，允许字段为 `request_id`、`method`、`elapsed_ms`、`code`、`qmt_method`、`qmt_call_id`、`return_type`、`return_count`、`error_code`、`error_type`、`stage`、`attempt_id`、`order_id`、`client_order_id`。字符串字段最多 256 字符，只接受普通标量；调用参数、原生对象、属性值快照和 traceback 不通过该 logger 打印或转发。外部异常日志可能包含远端调用包装层的堆栈，不能据此认为原生 QMT 堆栈或 `return_snapshot` 已完整保留。
