@@ -74,6 +74,7 @@ class ReturnLogTests(unittest.TestCase):
             self.assertEqual(fields["row_index"], 0)
             self.assertFalse(bg.round["complete"])
             repo.ingest_observation.assert_not_called()
+            repo.ingest_observations.assert_not_called()
             self.assertNotIn("return_snapshot", runtime.health()["last_reconcile_error"])
 
     def test_callback_failure_logs_readable_fields_without_enqueueing_partial_order(self):
@@ -117,8 +118,10 @@ class ReturnLogTests(unittest.TestCase):
             self.assertIsNotNone(runtime.last_reconciled_at)
             self.assertIsNone(runtime.health()["last_reconcile_error"])
             self.assertTrue(runtime.recovery_complete)
-            self.assertEqual(repo.ingest_observation.call_count, 1)
-            kind, raw, source = repo.ingest_observation.call_args[0]
+            self.assertEqual(repo.ingest_observations.call_count, 1)
+            kind, raws, source = repo.ingest_observations.call_args[0]
+            self.assertEqual(len(raws), 1)
+            raw = raws[0]
             self.assertEqual((kind, source), ("order", "query"))
             self.assertNotIn("m_xtTag", raw)
             self.assertEqual(raw["m_nVolumeTotalOriginal"], 100)

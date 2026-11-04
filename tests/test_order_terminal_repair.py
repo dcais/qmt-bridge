@@ -80,7 +80,9 @@ class Cursor:
 
     def execute(self, sql, params=None):
         self.statements.append(sql)
-        if ".order_events WHERE" in sql:
+        if '.account_runtime r WHERE' in sql:
+            self.rows = [(self.repo.stream_id, max((row[0] for row in self.repo.events), default=0))]
+        elif ".order_events WHERE" in sql:
             self.rows = [row for row in self.repo.events if row[0] >= params[-1]]
         elif ".qmt_observations WHERE" in sql:
             self.rows = list(self.repo.observations)
@@ -91,6 +93,9 @@ class Cursor:
         elif sql != "SET TRANSACTION READ ONLY":
             raise AssertionError("unexpected SQL: " + sql)
 
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
     def fetchall(self):
         return self.rows
 
@@ -100,6 +105,7 @@ class Repo:
     account_id = "account-1"
     repo_scope = ("STOCK", "account-1")
     repo_s = '"qmt_order"'
+    stream_id = 'de7932f5-481f-4d64-8f88-008f846b239d'
 
     def __init__(self, current, events):
         self.current = current
@@ -173,6 +179,36 @@ class TerminalRepairTests(unittest.TestCase):
             tool.repair(self.repo, self.args)
         self.assertEqual(len(self.repo.saved), 1)
 
+    def test_append_only_repair_persists_exact_original_stream_sequence_and_public_digest(self):
+        from service.ipc_bridge.ipc_protocol.order_common import fingerprint, public_order
+        original = copy.deepcopy(self.repo.events)
+        self.args.apply = True
+        result = tool.repair(self.repo, self.args)
+        refs = result['source_event_refs']
+        self.assertEqual([ref['event_id'] for ref in refs], [5, 6, 7])
+        for ref, (seq, kind, stamp, document) in zip(refs, original):
+            self.assertEqual(ref['stream_id'], self.repo.stream_id)
+            self.assertEqual(ref['order_id'], document['order_id'])
+            self.assertEqual(ref['order_version'], document['version'])
+            self.assertEqual(ref['sha256'], fingerprint(dict(event_id=seq, type=kind, recorded_at=stamp, data=public_order(document))))
+        saved = self.repo.saved[0][0]
+        self.assertEqual(saved['terminal_repairs'][-1]['source_event_refs'], refs)
+        self.assertEqual(saved['event_corrections_v1'][-1]['source_event_refs'], refs)
+        self.assertEqual(saved['event_corrections_v1'][-1]['financial_revision'], 'NOT_AUTHORIZED')
+        receipt = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(receipt['source_event_refs'], refs)
+        self.assertEqual(self.repo.events, original)
+        self.assertEqual(saved['fills'], original[-1][3]['fills'])
+
+    def test_missing_durable_stream_cannot_create_a_new_unanchored_repair(self):
+        self.repo.stream_id = None
+        self.args.apply = True
+        with self.assertRaises(OrderError) as caught:
+            tool.repair(self.repo, self.args)
+        self.assertEqual(caught.exception.code, 'EVIDENCE_SCHEMA_REQUIRED')
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.repo.saved, [])
+
     def test_all_four_terminal_states_restore_original_closure_and_facts(self):
         for status in ("FILLED", "CANCELLED", "PARTIALLY_CANCELLED", "REJECTED"):
             with self.subTest(status=status):
@@ -184,7 +220,7 @@ class TerminalRepairTests(unittest.TestCase):
                 self.assertEqual(result["execution_status"], status)
                 after = self.repo.current
                 self.assertEqual(tool.business_facts(after), before_facts | {
-                    "terminal_repairs": after["terminal_repairs"]})
+                    "terminal_repairs": after["terminal_repairs"], "event_corrections_v1": after["event_corrections_v1"]})
                 self.assertEqual(after["last_reconciled_at"], self.repo.events[0][3]["last_reconciled_at"])
                 self.assertFalse(after["reconcile_pending"])
                 self.assertEqual(after["terminal_reconciliation_checkpoint"], {

@@ -118,7 +118,10 @@ class TimestampRepositoryTests(unittest.TestCase):
                     doc["submission_status"] = "UNKNOWN"
                     raw = dict(order(), m_strRemark=doc["remark"], m_strAccountID="acct")
                     cur = Mock()
-                    cur.fetchone.side_effect = [("order", raw, "query", stamp, None), None]
+                    cur.fetchone.side_effect = [("order", raw, "query", stamp, None), None,
+                        ('de7932f5-481f-4d64-8f88-008f846b239d', 1), (1,)]
+                    repo.repo_journal_row = Mock(return_value=dict(event_id=1, type='SUBMISSION_UNKNOWN',
+                        recorded_at=ISO, data=copy.deepcopy(doc)))
                     self.bind_cursor(repo, cur)
                     repo.repo_load = Mock(return_value=doc)
                     repo.repo_apply_pending = Mock()

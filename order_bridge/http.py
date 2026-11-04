@@ -459,7 +459,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             params = {}
             for name, values in parse_qs(parsed.query, keep_blank_values=True).items():
                 params[name] = values[0] if len(values) == 1 else values
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, True))
@@ -491,7 +491,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
                 raise OrderError(400, "INVALID_JSON", "request body must be UTF-8 JSON")
             if not isinstance(params, dict):
                 raise OrderError(400, "INVALID_PARAMS", "JSON body must be an object")
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, False))

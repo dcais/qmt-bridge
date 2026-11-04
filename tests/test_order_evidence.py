@@ -10,6 +10,9 @@ from unittest.mock import Mock, patch
 from service.ipc_bridge.ipc_protocol.order_common import OrderError, new_order_document
 from service.ipc_bridge.order.evidence import evidence_fee, evidence_sample
 from service.ipc_bridge.order.repository import PostgresRepository
+from order_bridge.common import OrderError as LegacyOrderError
+from order_bridge.repository import PostgresRepository as LegacyPostgresRepository
+from order_bridge.runtime import OrderRuntime as LegacyOrderRuntime
 from tests.order_runtime_helpers import OrderRuntime
 from tests import test_http_order as http_tests
 Record = http_tests.Record
@@ -37,15 +40,13 @@ class MemoryEvidenceCursor:
         elif 'event_seq=%s' in sql:
             row = state['events'].get(params[-1])
             self.result = [(copy.deepcopy(row['data']), row['type'], row['recorded_at'])] if row else []
-        elif 'count(*)' in sql:
-            self.result = [(sum(params[-2] < seq <= params[-1] for seq in state['events']),)]
-            if self.store.on_count:
-                hook, self.store.on_count = self.store.on_count, None
-                hook()
         elif 'ORDER BY event_seq LIMIT' in sql:
             after, high, limit = params[-3:]
             self.result = [(seq, row['type'], row['recorded_at'], copy.deepcopy(row['data']))
                            for seq, row in sorted(state['events'].items()) if after < seq <= high][:limit]
+            if self.store.on_page:
+                hook, self.store.on_page = self.store.on_page, None
+                hook()
         elif 'ORDER BY order_id LIMIT' in sql:
             self.result = [(copy.deepcopy(row),) for row in state['pending'][:params[-1]]]
         else:
@@ -63,11 +64,11 @@ class MemoryEvidenceCursor:
         return self.result
 
 
-class MemoryEvidenceRepository(PostgresRepository):
+class MemoryEvidenceRepositoryMixin:
     def __init__(self):
         super().__init__({}, 'fake-account')
         self.state = dict(stream=str(uuid.uuid4()), high=0, epoch=1, instance='fake-executor', events={}, pending=[])
-        self.on_count = None
+        self.on_page = None
         self.transactions = []
         self.failed = False
 
@@ -103,10 +104,20 @@ class MemoryEvidenceRepository(PostgresRepository):
                     has_more=len(rows)>limit)
 
 
+class MemoryEvidenceRepository(MemoryEvidenceRepositoryMixin, PostgresRepository):
+    pass
+
+
+class MemoryLegacyEvidenceRepository(MemoryEvidenceRepositoryMixin, LegacyPostgresRepository):
+    pass
+
+
 class JournalEvidenceTests(unittest.TestCase):
+    repository_type = MemoryEvidenceRepository
+    runtime_type = staticmethod(OrderRuntime)
     def setUp(self):
-        self.repo = MemoryEvidenceRepository()
-        self.runtime = OrderRuntime({}, None, self.repo.account_id, repository=self.repo)
+        self.repo = self.repository_type()
+        self.runtime = self.runtime_type({}, None, self.repo.account_id, repository=self.repo)
         for _ in range(4):
             self.repo.append()
 
@@ -114,12 +125,12 @@ class JournalEvidenceTests(unittest.TestCase):
         return self.runtime.handle('order_events_evidence_v1', params, 'GET')[1]
 
     def assert_code(self, code, action):
-        with self.assertRaises(OrderError) as caught:
+        with self.assertRaises((OrderError, LegacyOrderError)) as caught:
             action()
         self.assertEqual(caught.exception.code, code)
 
     def test_fixed_high_watermark_excludes_concurrent_append_in_and_between_pages(self):
-        self.repo.on_count = self.repo.append
+        self.repo.on_page = self.repo.append
         first = self.query(limit=2)
         self.assertEqual([r['event_id'] for r in first['events']], [1, 2])
         self.assertEqual(first['high_watermark'], 4)
@@ -142,7 +153,7 @@ class JournalEvidenceTests(unittest.TestCase):
 
     def test_restart_preserves_stream_but_invalidates_ephemeral_cursor(self):
         first = self.query(limit=1)
-        self.runtime = OrderRuntime({}, None, self.repo.account_id, repository=self.repo)
+        self.runtime = self.runtime_type({}, None, self.repo.account_id, repository=self.repo)
         self.assert_code('EVIDENCE_CURSOR_INVALID', lambda: self.query(cursor=first['next_cursor']))
         self.assertEqual(self.query()['stream_id'], first['stream_id'])
 
@@ -160,9 +171,16 @@ class JournalEvidenceTests(unittest.TestCase):
         self.repo.state['high'] = 3
         self.assert_code('EVIDENCE_ANCHOR_CHANGED', lambda: self.query(cursor=first['next_cursor']))
 
-    def test_internal_gap_retention_gap_and_invalid_bounds_fail_closed(self):
+    def test_internal_gap_delivers_prefix_then_fails_without_skipping(self):
         self.repo.state['events'].pop(2)
-        self.assert_code('EVIDENCE_JOURNAL_GAP', self.query)
+        first = self.query()
+        self.assertEqual([row['event_id'] for row in first['events']], [1])
+        self.assertEqual(first['next_after'], 1)
+        self.assertTrue(first['has_more'])
+        self.assert_code('EVIDENCE_JOURNAL_GAP', lambda: self.query(cursor=first['next_cursor']))
+        self.assert_code('EVIDENCE_JOURNAL_GAP', lambda: self.query(after=1))
+        # A new capture may re-read the durable anchor, but cannot advance beyond it.
+        self.assertEqual(self.query(after=0)['events'], first['events'])
         self.repo.state['events'].pop(1)
         self.assert_code('EVIDENCE_RETENTION_GAP', self.query)
         self.assert_code('EVIDENCE_ROLLBACK_OR_INVALID_RANGE', lambda: self.query(after=99))
@@ -173,6 +191,59 @@ class JournalEvidenceTests(unittest.TestCase):
         self.assertEqual((result['retained_from'], result['high_watermark'], result['events']), (1, 0, []))
         self.assertEqual(result['coverage']['broker_complete'], 'unknown')
         self.assertEqual(result['restore_lineage_proof'], 'unsupported')
+        self.assertEqual(result['next_after'], 0)
+        self.assertFalse(result['has_more'])
+        self.assertIsNone(result['next_cursor'])
+        self.assertEqual(result['coverage']['through_inclusive'], 0)
+
+    def test_page_coverage_is_explicit_and_never_claims_unread_tail(self):
+        first = self.query(limit=1)
+        self.assertEqual(first['coverage'], dict(validation_version=2, validation_scope='RETURNED_PAGE',
+            after_exclusive=0, through_inclusive=1, journal_contiguous=True, sequence_kinds='ORIGINAL_ONLY',
+            start_origin='CLIENT_REQUESTED_BOUND_ONLY', broker_complete='unknown', provable_broker_dates=None))
+        self.assertEqual(first['high_watermark'], 4)
+        self.assertTrue(first['has_more'])
+        tail = self.query(after=4)
+        self.assertEqual(tail['coverage']['through_inclusive'], 4)
+        self.assertFalse(tail['has_more'])
+        self.assertEqual(tail['events'], [])
+
+    def test_bounded_page_has_no_remaining_range_count(self):
+        self.repo.state['high'] = 1000000
+        result = self.query(limit=1)
+        self.assertEqual(result['next_after'], 1)
+        sql = self.repo.transactions[-1]
+        self.assertFalse(any('count(' in query.lower() for query, _ in sql))
+        pages = [(query, params) for query, params in sql if 'ORDER BY event_seq LIMIT' in query]
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0][1][-1], 2)
+
+    def test_later_gap_does_not_discard_preceding_complete_pages(self):
+        self.repo.state['events'].pop(3)
+        first = self.query(limit=1)
+        second = self.query(cursor=first['next_cursor'], limit=1)
+        self.assertEqual(first['next_after'], 1)
+        self.assertEqual(second['next_after'], 2)
+        self.assertTrue(second['has_more'])
+        self.assert_code('EVIDENCE_JOURNAL_GAP', lambda: self.query(cursor=second['next_cursor']))
+
+    def test_missing_high_event_delivers_available_prefix_then_blocks(self):
+        self.repo.state['events'].pop(4)
+        first = self.query()
+        self.assertEqual([row['event_id'] for row in first['events']], [1, 2, 3])
+        self.assertEqual(first['coverage']['through_inclusive'], 3)
+        self.assertTrue(first['has_more'])
+        self.assert_code('EVIDENCE_JOURNAL_GAP', lambda: self.query(cursor=first['next_cursor']))
+
+    def test_recovery_does_not_attach_sample_beyond_validated_page(self):
+        marker = self.repo.evidence_marker()
+        sample = evidence_sample('positions', self.repo.account_id, 'STOCK', [], 'start', 'end')
+        sample.update(event_relation='non_atomic_bracket', event_watermark=dict(before=marker, after=marker))
+        self.runtime.record_evidence_sample(sample)
+        result = self.runtime.handle('recovery_evidence_v1', dict(limit=1), 'GET')[1]
+        self.assertIsNone(result['sample_evidence'])
+        self.assertEqual(result['recovery_status'], 'incomplete')
+        self.assertEqual(result['coverage']['through_inclusive'], 1)
 
     def test_forged_expired_and_cross_route_cursor_are_rejected(self):
         first = self.query(limit=1)
@@ -265,7 +336,7 @@ class JournalEvidenceTests(unittest.TestCase):
         stream = self.query()['stream_id']
         self.repo.append()
         self.repo.state = saved
-        self.runtime = OrderRuntime({}, None, self.repo.account_id, repository=self.repo)
+        self.runtime = self.runtime_type({}, None, self.repo.account_id, repository=self.repo)
         result = self.query()
         self.assertEqual(result['stream_id'], stream)
         self.assertEqual(result['restore_lineage_proof'], 'unsupported')
@@ -280,6 +351,11 @@ class JournalEvidenceTests(unittest.TestCase):
             self.assertIsNone(result['cumulative_amount'])
             self.assertIsNone(result['revision'])
             self.assertEqual(result['fills'][0]['finality'], 'unknown')
+
+
+class LegacyJournalEvidenceTests(JournalEvidenceTests):
+    repository_type = MemoryLegacyEvidenceRepository
+    runtime_type = staticmethod(LegacyOrderRuntime)
 
 
 class SampleEvidenceHttpTests(unittest.TestCase):

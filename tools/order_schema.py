@@ -95,6 +95,9 @@ def initialize_schema(repo, sql_path=None):
         cur.execute("SELECT to_regclass(%s)", (schema + ".schema_version",))
         if cur.fetchone()[0] is not None:
             versions = _version(cur, schema)
+            if versions == [6]:
+                repo_check_storage_schema(cur, schema, 6)
+                return {"schema_version": 6}
             if versions != [repo_SCHEMA_VERSION]:
                 raise OrderError(503, "SCHEMA_VERSION_MISMATCH",
                                  "ORDER schema version {0} is incompatible with initializer version {1}; "

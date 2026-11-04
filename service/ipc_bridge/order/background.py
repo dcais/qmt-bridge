@@ -468,12 +468,13 @@ class OrderBackground(object):
         kind = result['kind']
         if kind == 'query':
             if result['status'] == 'RETURNED':
-                # 每条原始事实独立事务，游标保留于结果上以便故障重试。
+                # 每批共用事务；提交后才推进游标，结果不明时按原始哈希幂等重试。
                 index = result.get('merge_index', 0)
                 values = result['value']
-                for raw in values[index:index + r.settings['reconcile_batch_size']]:
-                    r.repo.ingest_observation(result['query_kind'], raw, 'query')
-                    index += 1
+                batch = values[index:index + r.settings['reconcile_batch_size']]
+                if batch:
+                    r.repo.ingest_observations(result['query_kind'], batch, 'query')
+                    index += len(batch)
                     result['merge_index'] = index
                 if index < len(values):
                     raise _ContinueMerge()

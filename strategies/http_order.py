@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-11-03 09:50:11
+# Last modified (Asia/Shanghai): 2026-11-03 15:42:58
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -1735,8 +1735,40 @@ def repo_check_storage_schema(cur, schema, expected_version=5):
         actual.setdefault(table, {})[column] = (kind, bool(not_null), generated or "", expression)
     if "version" in actual.get("schema_version", {}):
         cur.execute("SELECT version FROM " + schema + ".schema_version")
-        if [row[0] for row in cur.fetchall()] != [expected_version]:
+        versions = [row[0] for row in cur.fetchall()]
+        if expected_version is None and versions in ([5], [6]):
+            expected_version = versions[0]
+        if versions != [expected_version]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
+    if expected_version is None:
+        raise repo_storage_error("missing required schema version")
+    if expected_version == 6:
+        if actual.get('account_runtime', {}).get('event_journal_write_mode', ())[:2] != ('text', True) or (
+                actual.get('order_events', {}).get('base_event_seq', ())[:2] != ('bigint', False)):
+            raise repo_storage_error("missing journal storage columns")
+        if actual.get('order_events', {}).get('storage_stream_id', ())[:2] != ('uuid', False):
+            raise repo_storage_error("missing per-event stream identity")
+        cur.execute("""SELECT pg_get_constraintdef(con.oid), con.convalidated AND con.confrelid=con.conrelid
+                FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname=%s AND c.relname='order_events' AND con.conname='order_event_base_fk'""", (schema_name,))
+        fk = cur.fetchone()
+        if not fk or not fk[1] or not fk[0].startswith(
+                'FOREIGN KEY (account_type, account_id, order_id, storage_stream_id, base_event_seq) REFERENCES ') or (
+                '(account_type, account_id, order_id, storage_stream_id, event_seq) ON DELETE RESTRICT' not in fk[0]):
+            raise repo_storage_error("missing journal baseline protection")
+        cur.execute("""SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname='order_events'
+                AND t.tgname='order_events_no_update'""", (schema_name,))
+        if cur.fetchone() not in (('O',), ('A',)):
+            raise repo_storage_error("missing journal immutability trigger")
+        if actual.get('account_runtime', {}).get('evidence_stream_id', ())[:2] != ('uuid', True):
+            raise repo_storage_error("missing immutable journal stream")
+        cur.execute("""SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname='account_runtime'
+                AND t.tgname='order_event_stream_guard'""", (schema_name,))
+        if cur.fetchone() not in (('O',), ('A',)):
+            raise repo_storage_error("missing journal stream protection")
     for table, columns in repo_SCHEMA_COLUMNS.items():
         if table == "submission_bans" and expected_version < 5:
             continue
@@ -1822,6 +1854,9 @@ import time
 
 def evidence_capabilities():
     return dict(version=1, journal_paging='SUPPORTED_WITH_EVIDENCE_MIGRATION',
+                journal_validation_version=2, journal_validation_scope='RETURNED_PAGE',
+                sequence_void_receipts=dict(version=1, default='DISABLED',
+                    activation='PER_SEQUENCE_PRIOR_AUTHORIZATION', query_parameter='include_void_receipts'),
                 source='BRIDGE_PERSISTED_RECORDS', broker_event_completeness='UNSUPPORTED',
                 atomic_financial_snapshot='UNSUPPORTED', final_order_fees='UNSUPPORTED',
                 native_history='UNSUPPORTED', restore_lineage_proof='UNSUPPORTED',
@@ -1893,25 +1928,458 @@ class EvidenceCursors(object):
 
 
 def evidence_page(meta, rows, after, high, limit):
-    """Check the requested remaining range, not only the returned page."""
+    """Prove only the returned continuous prefix; never scan or skip the remaining range."""
     retained = meta['retained_from']
     if high > meta['high_watermark'] or after > high:
         raise OrderError(409, 'EVIDENCE_ROLLBACK_OR_INVALID_RANGE', 'journal watermark regressed or range is invalid')
     if after < retained - 1:
         raise OrderError(409, 'EVIDENCE_RETENTION_GAP', 'requested range precedes retained journal')
-    if meta['range_count'] != max(0, high - after):
-        raise OrderError(409, 'EVIDENCE_JOURNAL_GAP', 'requested journal range has missing events')
-    page = rows[:limit]
+    page = []
+    through = after
+    for row in rows[:limit]:
+        if row['event_id'] != through + 1 or row['event_id'] > high:
+            break
+        page.append(row)
+        through = row['event_id']
+    if not page and after < high:
+        raise OrderError(409, 'EVIDENCE_JOURNAL_GAP', 'next journal event is missing; no sequence was skipped')
     return dict(evidence_version=1, source='BRIDGE_PERSISTED_RECORDS', stream_id=meta['stream_id'],
                 stream_identity_origin='DATABASE_GENERATED', authenticity='DEPLOYMENT_TRUST_REQUIRED',
                 account_id=meta['account_id'], account_type=meta['account_type'],
                 executor_epoch=meta['executor_epoch'], executor_instance=meta['executor_instance'],
                 retained_from=retained, high_watermark=high,
-                coverage=dict(after_exclusive=after, through_inclusive=high, journal_contiguous=True,
+                coverage=dict(validation_version=2, validation_scope='RETURNED_PAGE',
+                              after_exclusive=after, through_inclusive=through, journal_contiguous=True,
                               start_origin='CLIENT_REQUESTED_BOUND_ONLY',
                               broker_complete='unknown', provable_broker_dates=None),
                 restore_lineage_proof='unsupported', events=page,
-                next_after=page[-1]['event_id'] if page else after, has_more=len(rows) > limit)
+                next_after=through, has_more=through < high)
+
+# ---- order_bridge/compact_events.py ----
+"""Lossless, opt-in transport for public order journal rows. No current-order reads."""
+import copy
+import hashlib
+import json
+
+
+def compact_json(value):
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
+
+
+COMPACT_VOID = 'NON_FINANCIAL_SEQUENCE_VOID'
+
+
+def compact_source_ref(scope, event):
+    doc = event['data']
+    if any(doc.get(key) != scope[key] for key in ('account_id', 'account_type')):
+        raise ValueError('journal order account differs from stream')
+    ref = {key: scope[key] for key in ('stream_id', 'account_id', 'account_type')}
+    ref.update(event_id=event['event_id'], sha256=hashlib.sha256(compact_json(event).encode('utf-8')).hexdigest())
+    if event['type'] == COMPACT_VOID:
+        payload = dict(doc)
+        receipt_hash = payload.pop('receipt_sha256')
+        if (doc['kind'] != COMPACT_VOID or doc['receipt_version'] != 1 or
+                doc['stream_id'] != ref['stream_id'] or doc['event_seq'] != ref['event_id'] or
+                doc['import']['imported_at'] != event['recorded_at'] or
+                hashlib.sha256(compact_json(payload).encode('utf-8')).hexdigest() != receipt_hash):
+            raise ValueError('void receipt differs from journal source')
+        ref['kind'] = COMPACT_VOID
+    else:
+        ref.update(order_id=doc['order_id'], order_version=doc['version'])
+    return ref
+
+
+def compact_changes(old, new, path, out):
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in sorted(set(old) - set(new)):
+            out.append(dict(op='remove', path=path + [key]))
+        for key in sorted(new):
+            if key in old:
+                compact_changes(old[key], new[key], path + [key], out)
+            else:
+                out.append(dict(op='set', path=path + [key], value=new[key]))
+    elif isinstance(old, list) and isinstance(new, list):
+        common = min(len(old), len(new))
+        for index in range(common):
+            compact_changes(old[index], new[index], path + [index], out)
+        if len(old) != len(new):
+            out.append(dict(op='splice', path=path, start=common, delete=len(old)-common, items=new[common:]))
+    elif type(old) is not type(new) or old != new or (isinstance(old, float) and repr(old) != repr(new)):
+        out.append(dict(op='set', path=path, value=new))
+
+
+def project_event(scope, row, previous=None):
+    ref = compact_source_ref(scope, row)
+    if row['type'] == COMPACT_VOID:
+        if previous is not None:
+            raise ValueError('void receipt has no order predecessor')
+        return dict(event_id=row['event_id'], type=COMPACT_VOID, recorded_at=row['recorded_at'],
+                    source_ref=ref, base_ref=None, receipt=row['data'])
+    base = compact_source_ref(scope, previous) if previous is not None else None
+    if base and (base['order_id'] != ref['order_id'] or base['event_id'] >= ref['event_id']):
+        raise ValueError('invalid journal predecessor')
+    changes = []
+    compact_changes(previous['data'] if base else {}, row['data'], [], changes)
+    return dict(event_id=row['event_id'], type=row['type'], recorded_at=row['recorded_at'],
+                source_ref=ref, base_ref=base, changes=changes)
+
+
+def materialize_event(scope, compact, previous=None):
+    base = compact['base_ref']
+    if compact['type'] == COMPACT_VOID:
+        row = dict(event_id=compact['event_id'], type=COMPACT_VOID, recorded_at=compact['recorded_at'],
+                   data=compact['receipt'])
+        if base is not None or previous is not None or compact_source_ref(scope, row) != compact['source_ref']:
+            raise ValueError('invalid void source')
+        return row
+    if (compact_source_ref(scope, previous) if previous is not None else None) != base:
+        raise ValueError('journal predecessor missing or changed')
+    if base and (base['order_id'] != compact['source_ref']['order_id'] or base['event_id'] >= compact['event_id']):
+        raise ValueError('invalid journal predecessor')
+    doc = compact_apply(previous['data'] if base else {}, compact['changes'])
+    row = dict(event_id=compact['event_id'], type=compact['type'], recorded_at=compact['recorded_at'], data=doc)
+    if compact_source_ref(scope, row) != compact['source_ref']:
+        raise ValueError('journal event differs from immutable reference')
+    return row
+
+
+def compact_apply(original, changes):
+    doc = copy.deepcopy(original)
+    for change in changes:
+        path = change['path']
+        op = change['op']
+        node = doc
+        for key in path if op == 'splice' else path[:-1]:
+            node = node[key]
+        if op == 'set':
+            node[path[-1]] = copy.deepcopy(change['value'])
+        elif op == 'remove':
+            del node[path[-1]]
+        elif op == 'splice':
+            start = change['start']
+            node[start:start + change['delete']] = copy.deepcopy(change['items'])
+        else:
+            raise ValueError('unknown journal change operation')
+    return doc
+
+# ---- order_bridge/sequence_void.py ----
+"""Imported positive RESERVED_VOID evidence; never an online gap-filling authority."""
+import re
+import uuid
+
+
+
+VOID_EVENT_TYPE = 'NON_FINANCIAL_SEQUENCE_VOID'
+VOID_SCOPE = ('stream_id', 'account_type', 'account_id', 'event_seq')
+
+
+def void_require(condition, message):
+    if not condition:
+        raise OrderError(409, 'EVIDENCE_VOID_INVALID', message)
+
+
+def void_text(value):
+    return isinstance(value, str) and 0 < len(value.strip()) <= 4096
+
+
+def void_hash(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def void_evidence(value):
+    void_require(isinstance(value, dict) and set(value) == {'reference', 'sha256'}
+                 and void_text(value['reference']) and void_hash(value['sha256']),
+                 'positive evidence reference and SHA256 are required')
+
+
+def void_scope(value):
+    void_require(isinstance(value, dict) and all(key in value for key in VOID_SCOPE), 'void scope is missing')
+    try:
+        valid_stream = str(uuid.UUID(value['stream_id'])) == value['stream_id']
+    except (ValueError, TypeError, AttributeError):
+        valid_stream = False
+    void_require(valid_stream and value['account_type'] == 'STOCK' and void_text(value['account_id'])
+                 and type(value['event_seq']) is int and 1 <= value['event_seq'] <= 9223372036854775807,
+                 'invalid void account, stream or sequence')
+    return {key: value[key] for key in VOID_SCOPE}
+
+
+def void_validate_statements(source, approval):
+    scope = void_scope(source)
+    void_require(void_scope(approval) == scope, 'source and approval scopes differ')
+    void_require(set(source) == set(VOID_SCOPE) | {'statement_version', 'kind', 'source_id', 'source_state',
+                 'never_published', 'financial_effect', 'reservation_id', 'reason', 'issued_at', 'evidence'},
+                 'source statement fields differ from the RESERVED_VOID contract')
+    void_require(source['statement_version'] == 1 and type(source['statement_version']) is int
+                 and source['kind'] == 'RESERVED_SEQUENCE_VOID' and source['source_state'] == 'RESERVED_VOID'
+                 and source['never_published'] is True and source['financial_effect'] == 'NONE'
+                 and all(void_text(source[key]) for key in ('source_id', 'reservation_id', 'reason')),
+                 'missing positive never-published non-financial reservation evidence')
+    void_evidence(source['evidence'])
+    parse_timestamp(source['issued_at'])
+    void_require(set(approval) == set(VOID_SCOPE) | {'statement_version', 'decision', 'source_statement_sha256',
+                 'approval_id', 'approved_by', 'reason', 'approved_at', 'evidence'}, 'approval statement fields differ')
+    void_require(approval['statement_version'] == 1 and type(approval['statement_version']) is int
+                 and approval['decision'] == 'APPROVE_RESERVED_SEQUENCE_VOID_IMPORT'
+                 and approval['source_statement_sha256'] == fingerprint(source)
+                 and all(void_text(approval[key]) for key in ('approval_id', 'approved_by', 'reason')),
+                 'approval is not bound to the exact source statement')
+    void_evidence(approval['evidence'])
+    void_require(parse_timestamp(source['issued_at']) <= parse_timestamp(approval['approved_at']),
+                 'approval precedes the source statement')
+    return scope
+
+
+def void_validate_receipt(receipt, expected_scope=None):
+    void_require(isinstance(receipt, dict), 'void receipt must be an object')
+    required = set(VOID_SCOPE) | {'receipt_version', 'kind', 'source_statement', 'approval_statement',
+                                'authorization', 'import', 'receipt_sha256'}
+    void_require(set(receipt) == required and type(receipt['receipt_version']) is int
+                 and receipt['receipt_version'] == 1 and receipt['kind'] == VOID_EVENT_TYPE,
+                 'void receipt version or fields differ')
+    scope = void_scope(receipt)
+    void_require(expected_scope is None or scope == expected_scope, 'void receipt scope differs from the journal')
+    void_require(void_validate_statements(receipt['source_statement'], receipt['approval_statement']) == scope,
+                 'void statements differ from the journal scope')
+    authorization = receipt['authorization']
+    void_require(isinstance(authorization, dict) and set(authorization) == set(VOID_SCOPE) |
+                 {'authorization_id', 'source_statement_sha256', 'approval_statement_sha256', 'authorized_by',
+                  'authorized_at', 'reason', 'evidence'}, 'independent authorization fields differ')
+    void_require(void_scope(authorization) == scope
+                 and authorization['source_statement_sha256'] == fingerprint(receipt['source_statement'])
+                 and authorization['approval_statement_sha256'] == fingerprint(receipt['approval_statement'])
+                 and all(void_text(authorization[key]) for key in ('authorization_id', 'authorized_by', 'reason')),
+                 'independent authorization is not bound to both statements')
+    void_evidence(authorization['evidence'])
+    imported = receipt['import']
+    void_require(isinstance(imported, dict) and set(imported) == {'operator', 'imported_at'}
+                 and void_text(imported['operator']), 'import identity is missing')
+    void_require(parse_timestamp(receipt['approval_statement']['approved_at']) <= parse_timestamp(authorization['authorized_at'])
+                 <= parse_timestamp(imported['imported_at']), 'authorization/import chronology is invalid')
+    payload = {key: value for key, value in receipt.items() if key != 'receipt_sha256'}
+    void_require(void_hash(receipt['receipt_sha256']) and fingerprint(payload) == receipt['receipt_sha256'],
+                 'void receipt digest differs')
+    return receipt
+
+
+def void_event(receipt, expected_scope):
+    void_validate_receipt(receipt, expected_scope)
+    return dict(event_id=receipt['event_seq'], type=VOID_EVENT_TYPE,
+                recorded_at=receipt['import']['imported_at'], data=copy_json(receipt))
+
+# ---- order_bridge/event_correction.py ----
+"""Append-only references to published order events; never authority to revise fills."""
+import re
+import uuid
+
+
+CORRECTION_NOTICE_KIND = 'EXTERNAL_BROKER_CORRECTION_REVIEW_REQUIRED'
+
+
+def correction_require(condition, message):
+    if not condition:
+        raise OrderError(409, 'EVIDENCE_CORRECTION_INVALID', message)
+
+
+def correction_source_refs(repo, cur, order_id, events=None, event_id=None, client_order_id=None):
+    cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id',event_seq FROM " + repo.repo_s +
+                '.account_runtime r WHERE account_type=%s AND account_id=%s', repo.repo_scope)
+    marker = cur.fetchone()
+    if not marker or not marker[0]:
+        raise OrderError(503, 'EVIDENCE_SCHEMA_REQUIRED', 'published-event correction requires a durable stream identity')
+    scope = dict(stream_id=marker[0], account_id=repo.account_id, account_type=repo.account_type)
+    if events is None:
+        if event_id is None:
+            cur.execute('SELECT event_seq FROM ' + repo.repo_s + '.order_events WHERE account_type=%s '
+                        'AND account_id=%s AND order_id=%s ORDER BY event_seq DESC LIMIT 1', repo.repo_scope + (order_id,))
+            row = cur.fetchone()
+            correction_require(row is not None, 'original published order event is missing')
+            event_id = row[0]
+        correction_require(type(event_id) is int and 1 <= event_id <= marker[1], 'invalid original event sequence')
+        row = repo.repo_journal_row(cur, marker[0], event_id)
+        correction_require(row is not None and row['type'] != 'NON_FINANCIAL_SEQUENCE_VOID',
+                           'a missing event or void cannot authorize an order correction')
+        events = [(row['event_id'], row['type'], row['recorded_at'], row['data'])]
+    references = []
+    for seq, kind, stamp, document in events:
+        correction_require(type(seq) is int and 1 <= seq <= marker[1] and document.get('order_id') == order_id
+                           and (client_order_id is None or document.get('client_order_id') == client_order_id),
+                           'original event belongs to another order or client identity')
+        wire = dict(event_id=seq, type=kind, recorded_at=stamp, data=public_order(document))
+        references.append(compact_source_ref(scope, wire))
+    correction_require(bool(references), 'at least one retained original event is required')
+    return references
+
+
+def correction_request(notice_id, kind, refs, reason, evidence_hash):
+    correction_require(isinstance(notice_id, str) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', notice_id),
+                       'notice_id must contain 1..128 ASCII identifier characters')
+    correction_require(isinstance(reason, str) and 0 < len(reason.strip()) <= 4096
+                       and isinstance(evidence_hash, str) and re.fullmatch('[0-9a-f]{64}', evidence_hash),
+                       'notice reason and evidence SHA256 are required')
+    return dict(notice_version=1, notice_id=notice_id, kind=kind, source_event_refs=copy_json(refs),
+                reason=reason, evidence_sha256=evidence_hash)
+
+
+def correction_notice(kind, refs, reason, operator, evidence, notice_id=None):
+    notice_id = notice_id or uuid.uuid4().hex
+    request = correction_request(notice_id, kind, refs, reason, evidence['sha256'])
+    correction_require(isinstance(operator, str) and bool(operator.strip())
+                       and isinstance(evidence.get('reference'), str) and bool(evidence['reference'].strip()),
+                       'notice operator and retained evidence reference are required')
+    return dict(notice_version=1, notice_id=notice_id, kind=kind,
+                verification_status=('PENDING_INDEPENDENT_REVIEW' if kind == CORRECTION_NOTICE_KIND else 'AUDITED_STATE_REPAIR'),
+                financial_revision='NOT_AUTHORIZED', source_event_refs=copy_json(refs), reason=reason,
+                operator=operator, at=iso_datetime(), evidence=copy_json(evidence), request_sha256=fingerprint(request))
+
+
+def manual_resolution_notice(repo, cur, document, audit):
+    refs = correction_source_refs(repo, cur, document['order_id'], client_order_id=document.get('client_order_id'))
+    evidence = dict(reference=audit.get('evidence_reference', 'embedded:manual_resolutions.evidence'),
+                    sha256=audit.get('evidence_sha256') or fingerprint(audit['evidence']))
+    notice = correction_notice('UNKNOWN_OUTCOME_RESOLUTION', refs, audit['reason'], audit['operator'], evidence)
+    audit['source_event_refs'] = refs
+    document.setdefault('event_corrections_v1', []).append(notice)
+
+
+def append_broker_correction_notice(repo, order_id, expected_version, notice_id, source_ref, reason,
+                                    evidence, operator, apply=False):
+    request = correction_request(notice_id, CORRECTION_NOTICE_KIND, [source_ref], reason, evidence['sha256'])
+    request_hash = fingerprint(request)
+    def run(cur):
+        if not apply:
+            cur.execute('SET TRANSACTION READ ONLY')
+        document = repo.repo_require(repo.repo_load(cur, order_id, lock=apply))
+        refs = correction_source_refs(repo, cur, order_id, event_id=source_ref.get('event_id'),
+                                      client_order_id=document.get('client_order_id'))
+        correction_require(refs == [source_ref], 'original source reference differs from the retained public event')
+        prior = [row for row in document.get('event_corrections_v1', []) if row.get('notice_id') == notice_id]
+        if prior:
+            correction_require(len(prior) == 1 and prior[0].get('request_sha256') == request_hash,
+                               'notice_id already binds a different correction request')
+            retained = prior[0]
+            correction_require(retained.get('kind') == CORRECTION_NOTICE_KIND
+                               and retained.get('verification_status') == 'PENDING_INDEPENDENT_REVIEW'
+                               and retained.get('financial_revision') == 'NOT_AUTHORIZED'
+                               and retained.get('source_event_refs') == refs and retained.get('reason') == reason
+                               and retained.get('evidence', {}).get('sha256') == evidence['sha256'],
+                               'retained notice differs from its immutable retry identity')
+            return dict(order_id=order_id, version=document['version'], replayed=True,
+                        event_type='BROKER_CORRECTION_NOTICE', mode='apply' if apply else 'dry-run', notice=copy_json(prior[0]))
+        correction_require(type(expected_version) is int and document['version'] == expected_version,
+                           'order version changed; inspect the latest state')
+        notice = correction_notice(CORRECTION_NOTICE_KIND, refs, reason, operator, evidence, notice_id=notice_id)
+        if apply:
+            document.setdefault('event_corrections_v1', []).append(notice)
+            repo.repo_save(cur, document, 'BROKER_CORRECTION_NOTICE', child_fields=())
+        return dict(order_id=order_id, version=document['version'], replayed=False,
+                    event_type='BROKER_CORRECTION_NOTICE', mode='apply' if apply else 'dry-run', notice=notice)
+    return repo.repo_run(run, mutation=apply)
+
+# ---- order_bridge/journal_storage.py ----
+"""Schema 6 one-hop deltas against an immutable original internal journal document."""
+import hashlib
+import json
+
+
+
+DISK_FORMAT = 'ORDER_JOURNAL_BASE_DELTA_V1'
+DISK_BASE_INTERVAL = 16
+
+
+def journal_digest(document):
+    return hashlib.sha256(compact_json(document).encode('utf-8')).hexdigest()
+
+
+def journal_value(raw):
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def journal_base(repo, cur, seq, order, cache):
+    if seq not in cache:
+        cur.execute('SELECT e.order_id,e.document,e.storage_stream_id::text,r.evidence_stream_id::text FROM ' + repo.repo_s +
+                    '.order_events e JOIN ' + repo.repo_s + '.account_runtime r USING(account_type,account_id) '
+                    'WHERE e.account_type=%s AND e.account_id=%s AND e.event_seq=%s',
+                    repo.repo_scope + (seq,))
+        row = cur.fetchone()
+        if not row or row[0] != order or not row[2] or row[2] != row[3]:
+            raise ValueError('missing immutable order journal baseline')
+        value = journal_value(row[1])
+        if not isinstance(value, dict) or value.get('order_id') != order:
+            raise ValueError('journal baseline is not an original snapshot')
+        cache[seq] = (value, journal_digest(value), row[2])
+    return cache[seq]
+
+
+def journal_unpack(repo, cur, seq, raw, cache=None):
+    value = journal_value(raw)
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list) or len(value) != 2 or value[0] != DISK_FORMAT:
+        raise ValueError('unknown order journal storage format')
+    meta = value[1]
+    if (meta['seq'] != seq or meta['account_type'] != repo.account_type or
+            meta['account_id'] != repo.account_id or not 0 < meta['base_seq'] < seq or
+            not 1 <= meta['distance'] < DISK_BASE_INTERVAL):
+        raise ValueError('journal delta scope or sequence differs')
+    base, base_hash, stream_id = journal_base(repo, cur, meta['base_seq'], meta['order_id'], {} if cache is None else cache)
+    if not stream_id or stream_id != meta['stream_id'] or base_hash != meta['base_sha256'] or base['order_id'] != meta['order_id']:
+        raise ValueError('order journal baseline stream or digest differs')
+    result = compact_apply(base, meta['changes'])
+    if (result.get('order_id') != meta['order_id'] or result.get('account_type') != repo.account_type or
+            result.get('account_id') != repo.account_id or result.get('version') != meta['order_version'] or
+            journal_digest(result) != meta['sha256']):
+        raise ValueError('order journal reconstructed document differs')
+    return result
+
+
+def journal_pack(repo, cur, seq, doc, full_json, stream_id):
+    if not stream_id:
+        raise ValueError('persistent journal stream is required for delta storage')
+    order = doc['order_id']
+    cur.execute('SELECT event_seq,document,storage_stream_id::text FROM ' + repo.repo_s +
+                '.order_events WHERE account_type=%s AND account_id=%s AND order_id=%s '
+                'AND event_seq<%s ORDER BY event_seq DESC LIMIT 1', repo.repo_scope + (order, seq))
+    previous = cur.fetchone()
+    if previous is None or previous[2] is None:
+        # Legacy and FULL-mode rows have no per-row stream proof. Begin a new baseline.
+        return None, full_json
+    if previous[2] != stream_id:
+        raise ValueError('previous order journal stream differs')
+    prev_seq, prev = previous[0], journal_value(previous[1])
+    if isinstance(prev, dict):
+        distance, base_seq, base, base_hash = 1, prev_seq, prev, journal_digest(prev)
+    else:
+        cache = {}
+        journal_unpack(repo, cur, prev_seq, prev, cache)
+        meta = prev[1]
+        distance = meta['distance'] + 1
+        if distance >= DISK_BASE_INTERVAL:
+            return None, full_json
+        base_seq = meta['base_seq']
+        base, base_hash, prior_stream = cache[base_seq]
+        if prior_stream != stream_id:
+            raise ValueError('immutable order journal stream differs')
+    if base['order_id'] != order or base['account_id'] != repo.account_id or base['account_type'] != repo.account_type:
+        raise ValueError('order journal baseline identity differs')
+    # Normalize only changed values through PostgreSQL. The complete current order
+    # was already written once to orders; do not send it again for delta encoding.
+    changes = []
+    compact_changes(base, journal_value(full_json), [], changes)
+    patch_json = compact_json(changes)
+    full_size = len(full_json.encode('utf-8'))
+    if len(patch_json.encode('utf-8')) >= full_size:
+        return None, full_json
+    cur.execute('SELECT %s::jsonb', (patch_json,))
+    changes = journal_value(cur.fetchone()[0])
+    stored = compact_apply(base, changes)
+    delta = [DISK_FORMAT, dict(seq=seq, stream_id=stream_id, order_id=order, order_version=stored['version'],
+        account_type=repo.account_type, account_id=repo.account_id, base_seq=base_seq, distance=distance,
+        base_sha256=base_hash, sha256=journal_digest(stored), changes=changes)]
+    delta_json = compact_json(delta)
+    if len(delta_json.encode('utf-8')) >= full_size:
+        return None, full_json
+    return base_seq, delta_json
 
 # ---- order_bridge/repository.py ----
 """PostgreSQL 订单事实库；事务头锁同时保护投影和连续事件游标。Last modified: 2026-10-11。"""
@@ -2106,7 +2574,7 @@ class PostgresRepository(object):
 
     def check_schema(self):
         """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
-        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, repo_SCHEMA_VERSION))
+        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, None))
 
     def ensure_account_runtime(self):
         """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
@@ -2310,11 +2778,21 @@ class PostgresRepository(object):
                             self.repo_scope + (doc["order_id"], record_id, json_text(record), record["created_at"]))
         if event_type is not None:
             cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
-                        "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
-            seq = cur.fetchone()[0]
-            cur.execute("INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
-                        "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                        self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
+                        "WHERE account_type=%s AND account_id=%s RETURNING event_seq,"
+                        "COALESCE(to_jsonb(account_runtime)->>'event_journal_write_mode','FULL'),"
+                        "to_jsonb(account_runtime)->>'evidence_stream_id'", self.repo_scope)
+            seq, mode, stream_id = cur.fetchone()
+            raw = json_text(doc)
+            prefix = "INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
+            params = self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"])
+            if mode == 'BASE_DELTA_V1':
+                base_seq, raw = journal_pack(self, cur, seq, doc, raw, stream_id)
+                cur.execute(prefix + "occurred_at,document,storage_stream_id,base_event_seq) "
+                            "VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)", params + (raw, stream_id, base_seq))
+            elif mode == 'FULL':
+                cur.execute(prefix + "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)", params + (raw,))
+            else:
+                raise repo_inconsistent("unknown order journal storage mode")
         return doc
 
     def repo_ban(self, cur, value, by_cancel=False):
@@ -2358,7 +2836,13 @@ class PostgresRepository(object):
             doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
             before = json_text(doc)
             mutator(doc)
-            return self.repo_save(cur, doc, event_type) if json_text(doc) != before else doc
+            if json_text(doc) == before:
+                return doc
+            if event_type == "MANUAL_UNKNOWN_RESOLUTION":
+                if not doc.get('manual_resolutions'):
+                    raise OrderError(409, 'EVIDENCE_CORRECTION_INVALID', 'manual resolution audit is required')
+                manual_resolution_notice(self, cur, doc, doc['manual_resolutions'][-1])
+            return self.repo_save(cur, doc, event_type)
         return self.repo_run(update, mutation=True)
 
     def claim_submission(self, order_id, authority=None):
@@ -2481,14 +2965,54 @@ class PostgresRepository(object):
                         "ORDER BY event_seq LIMIT %s", self.repo_scope + (int(after), limit + 1))
             rows = cur.fetchall()
             events = []
+            bases = {}
             for row in rows[:limit]:
-                doc = repo_json(row[4])
+                doc = journal_unpack(self, cur, row[0], row[4], bases)
                 events.append({"event_id": row[0], "order_id": row[1], "order_version": doc["version"],
                                "type": row[2], "recorded_at": repo_timestamp(row[3]), "data": doc,
                                "event_seq": row[0], "event_type": row[2], "occurred_at": repo_timestamp(row[3]), "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
         return self.repo_run(listing)
+
+    def repo_void_available(self, cur):
+        cur.execute('SELECT to_regclass(%s)', (self.repo_s + '.event_sequence_void_receipts',))
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+    def repo_journal_row(self, cur, stream_id, event_id, include_void_receipts=False, voids_available=None):
+        cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
+                    '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s',
+                    self.repo_scope + (event_id,))
+        row = cur.fetchone()
+        event = (dict(event_id=event_id, type=row[1], recorded_at=repo_timestamp(row[2]), data=journal_unpack(self, cur, event_id, row[0]))
+                 if row else None)
+        if include_void_receipts and (self.repo_void_available(cur) if voids_available is None else voids_available):
+            cur.execute('SELECT document FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                        'WHERE stream_id=%s AND account_type=%s AND account_id=%s AND event_seq=%s',
+                        (stream_id,) + self.repo_scope + (event_id,))
+            receipt = cur.fetchone()
+            if receipt:
+                if event is not None:
+                    raise OrderError(409, 'EVIDENCE_JOURNAL_CONFLICT', 'original event and void receipt occupy the same sequence')
+                event = void_event(repo_json(receipt[0]), dict(stream_id=stream_id, account_type=self.account_type,
+                                   account_id=self.account_id, event_seq=event_id))
+        return event
+
+    def journal_source(self, stream_id, event_id, include_void_receipts=False):
+        """Return immutable original/opt-in imported evidence, never current order state."""
+        def read(cur):
+            cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id' FROM " + self.repo_s +
+                        '.account_runtime r WHERE account_type=%s AND account_id=%s', self.repo_scope)
+            marker = cur.fetchone()
+            if not marker or marker[0] != stream_id:
+                raise OrderError(409, 'EVIDENCE_STREAM_CHANGED', 'journal source stream differs')
+            event = self.repo_journal_row(cur, stream_id, event_id, include_void_receipts)
+            if event and event['type'] != VOID_EVENT_TYPE:
+                event['data'] = public_order(event['data'])
+            return event
+        return self.repo_run(read)
 
     def evidence_marker(self):
         """HTTP thread bracketing marker, never called on QMT scheduler thread."""
@@ -2503,7 +3027,7 @@ class PostgresRepository(object):
                         account_type=self.account_type)
         return self.repo_run(read)
 
-    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False):
+    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False, include_void_receipts=False):
         """One read-only repeatable-read transaction; no QMT calls or writer locks."""
         def listing(cur):
             cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
@@ -2522,25 +3046,39 @@ class PostgresRepository(object):
                         '.order_events WHERE account_type=%s AND account_id=%s', self.repo_scope)
             retained = cur.fetchone()[0]
             retained = retained if retained is not None else current + 1
-            cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
-                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
-            tail = cur.fetchone()
-            anchor = fingerprint([repo_json(tail[0]), tail[1], repo_timestamp(tail[2])]) if tail else None
+            voids_available = include_void_receipts and self.repo_void_available(cur)
+            if voids_available:
+                cur.execute('SELECT min(event_seq) FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                            'WHERE stream_id=%s AND account_type=%s AND account_id=%s', (stream,) + self.repo_scope)
+                void_floor = cur.fetchone()[0]
+                if void_floor is not None:
+                    retained = min(retained, void_floor)
+            tail = self.repo_journal_row(cur, stream, high, include_void_receipts, voids_available)
+            anchor = fingerprint([tail['data'], tail['type'], tail['recorded_at']]) if tail else None
             if checkpoint and checkpoint['anchor'] != anchor:
                 raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
-            cur.execute('SELECT count(*) FROM ' + self.repo_s +
-                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s',
-                        self.repo_scope + (after, high))
-            count = cur.fetchone()[0]
             cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
                         'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
-            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]), data=repo_json(item[3]))
-                      for item in cur.fetchall()]
+            bases = {}
+            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]),
+                           data=journal_unpack(self, cur, item[0], item[3], bases)) for item in cur.fetchall()]
+            if voids_available:
+                cur.execute('SELECT event_seq,document FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                            'WHERE stream_id=%s AND account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
+                            'ORDER BY event_seq LIMIT %s', (stream,) + self.repo_scope + (after, high, limit + 1))
+                for seq, payload in cur.fetchall():
+                    events.append(void_event(repo_json(payload), dict(stream_id=stream, account_type=self.account_type,
+                                             account_id=self.account_id, event_seq=seq)))
+                events.sort(key=lambda item: item['event_id'])
+                sequences = [item['event_id'] for item in events]
+                if len(sequences) != len(set(sequences)):
+                    raise OrderError(409, 'EVIDENCE_JOURNAL_CONFLICT', 'original event and void receipt occupy the same sequence')
             meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
                         executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
-                        account_type=self.account_type, range_count=count)
+                        account_type=self.account_type)
             result = evidence_page(meta, events, after, high, limit)
+            result['coverage']['sequence_kinds'] = ('ORIGINAL_OR_ATTESTED_VOID' if include_void_receipts else 'ORIGINAL_ONLY')
             result['anchor'] = anchor
             if recovery:
                 cur.execute('SELECT document FROM ' + self.repo_s +
@@ -2803,26 +3341,49 @@ class PostgresRepository(object):
             previous = cur.fetchone()
             if previous is not None:
                 return self.repo_load(cur, previous[0]) if previous[0] else None
-            stamp = iso_datetime()
-            cur.execute("INSERT INTO " + self.repo_s + ".qmt_observations(account_type,account_id,kind,source,observed_at,raw,observation_hash) "
-                        "VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING observation_id",
-                        self.repo_scope + (kind, source, stamp, json_text(raw), digest))
-            obs_id = cur.fetchone()[0]
-            doc = self.repo_match(cur, kind, raw)
-            if doc is None:
-                return None
-            before = json_text(doc)
-            identities_before = self.repo_qmt_identities(doc)
-            apply_observation(doc, kind, raw, source, observed_at=stamp)
-            if json_text(doc) != before:
-                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
-            cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
-                        (doc["order_id"], obs_id))
-            # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
-            if self.repo_qmt_identities(doc) != identities_before:
-                self.repo_apply_pending(cur)
-            return self.repo_load(cur, doc["order_id"])
+            return self.repo_ingest_new_observation(cur, kind, raw, source, digest)
         return self.repo_run(ingest, mutation=True)
+
+    def ingest_observations(self, kind, raws, source="query"):
+        """单批复用事务，原始哈希判重后仍按输入顺序保存新增事实。"""
+        observations = [(fingerprint({"kind": kind, "source": source, "raw": raw}), raw) for raw in raws]
+        if not observations:
+            return 0
+        def ingest(cur):
+            cur.execute("SELECT observation_hash FROM " + self.repo_s + ".qmt_observations "
+                        "WHERE account_type=%s AND account_id=%s AND observation_hash=ANY(%s)",
+                        self.repo_scope + (list(dict.fromkeys(digest for digest, raw in observations)),))
+            seen = {row[0] for row in cur.fetchall()}
+            inserted = 0
+            for digest, raw in observations:
+                if digest in seen:
+                    continue
+                self.repo_ingest_new_observation(cur, kind, raw, source, digest)
+                seen.add(digest)
+                inserted += 1
+            return inserted
+        return self.repo_run(ingest, mutation=True)
+
+    def repo_ingest_new_observation(self, cur, kind, raw, source, digest):
+        stamp = iso_datetime()
+        cur.execute("INSERT INTO " + self.repo_s + ".qmt_observations(account_type,account_id,kind,source,observed_at,raw,observation_hash) "
+                    "VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING observation_id",
+                    self.repo_scope + (kind, source, stamp, json_text(raw), digest))
+        obs_id = cur.fetchone()[0]
+        doc = self.repo_match(cur, kind, raw)
+        if doc is None:
+            return None
+        before = json_text(doc)
+        identities_before = self.repo_qmt_identities(doc)
+        apply_observation(doc, kind, raw, source, observed_at=stamp)
+        if json_text(doc) != before:
+            self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
+        cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
+                    (doc["order_id"], obs_id))
+        # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
+        if self.repo_qmt_identities(doc) != identities_before:
+            self.repo_apply_pending(cur)
+        return self.repo_load(cur, doc["order_id"])
 
     def repo_qmt_identities(self, doc):
         return {(field, str(row.get(field)), str(row.get("trading_day")), str(row.get("market")))
@@ -2980,6 +3541,7 @@ class PostgresRepository(object):
             entry.update(expected_version=expected_version, resolution="observed", observation_ids=selected,
                          qmt_order_ids=sorted(qmt_orders), qmt_task_ids=sorted(qmt_tasks),
                          before_submission_status="UNKNOWN", after_submission_status=doc["submission_status"], at=iso_datetime())
+            manual_resolution_notice(self, cur, doc, entry)
             doc.setdefault("manual_resolutions", []).append(entry)
             doc["resolution"] = "OBSERVED"
             doc["reconcile_requested"] = True
@@ -4268,12 +4830,13 @@ class OrderBackground(object):
         kind = result['kind']
         if kind == 'query':
             if result['status'] == 'RETURNED':
-                # 每条原始事实独立事务，游标保留于结果上以便故障重试。
+                # 每批共用事务；提交后才推进游标，结果不明时按原始哈希幂等重试。
                 index = result.get('merge_index', 0)
                 values = result['value']
-                for raw in values[index:index + r.settings['reconcile_batch_size']]:
-                    r.repo.ingest_observation(result['query_kind'], raw, 'query')
-                    index += 1
+                batch = values[index:index + r.settings['reconcile_batch_size']]
+                if batch:
+                    r.repo.ingest_observations(result['query_kind'], batch, 'query')
+                    index += len(batch)
                     result['merge_index'] = index
                 if index < len(values):
                     raise _ContinueMerge()
@@ -4479,6 +5042,7 @@ import sys
 import threading
 import time
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 
 
 
@@ -4619,7 +5183,8 @@ class OrderRuntime:
     def handle(self, method, params, verb):
         writes = ("submit_order", "cancel_order")
         reads = ("order", "orders", "order_events", "capabilities", "health",
-                 "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1")
+                 "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1",
+                 "recovery_evidence_v1", "order_fee_evidence_v1")
         if method in writes and verb != "POST" or method in reads and verb != "GET":
             raise OrderError(405, "METHOD_NOT_ALLOWED", "commands require POST; order queries require GET")
         if not isinstance(params, dict):
@@ -4631,6 +5196,12 @@ class OrderRuntime:
             self._runtime_keys(params, ())
             result = capabilities()
             result['evidence_v1'] = evidence_capabilities()
+            result['journal_storage_v1'] = dict(read_schema_versions=[5, 6], writer_default='FULL',
+                                                optional_format='BASE_DELTA_V1', baseline_interval=16)
+            result['order_events_compact_v1'] = dict(
+                mode='READ_ONLY', default_wire_mode='full', supported_wire_modes=['full', 'shadow', 'compact'],
+                compact_primary_opt_in=True, grants_trading_authority=False, wire_format='ORDER_EVENT_DELTA_V1',
+                source_route='order_event_source_v1', paired_cut='COMPACT_START_CURSOR_V1')
             result['cancel_before_submit_v1'] = dict(supported=True, receipt_type='SUBMISSION_BAN', schema_version=1)
             result["qmt_functions"] = {name: self.adapter.available(name) for name in
                 ("passorder", "algo_passorder", "smart_algo_passorder", "cancel", "cancel_task", "set_basket", "get_basket", "get_history_trade_detail_data")}
@@ -4645,6 +5216,25 @@ class OrderRuntime:
                                 for execution, function in (("DIRECT", "passorder"), ("SLICED", "algo_passorder"), ("SMART", "smart_algo_passorder"))]
             return 200, result
         self._runtime_require_store()
+        if method == 'order_event_source_v1':
+            is_void = params.get('kind') == COMPACT_VOID
+            keys = ('stream_id', 'account_id', 'account_type', 'event_id', 'sha256')
+            keys += ('kind',) if is_void else ('order_id', 'order_version')
+            self._runtime_keys(params, keys)
+            if set(params) != set(keys):
+                raise OrderError(400, 'INVALID_PARAMS', 'complete immutable source reference required')
+            ref = dict(params)
+            for key in (('event_id',) if is_void else ('event_id', 'order_version')):
+                ref[key] = self._runtime_integer(ref[key], key, 1, 9223372036854775807)
+            if ref['account_id'] != self.account_id or ref['account_type'] != self.repo.account_type:
+                raise OrderError(409, 'EVIDENCE_STREAM_CHANGED', 'journal source account differs')
+            row = (self.repo.journal_source(ref['stream_id'], ref['event_id'], include_void_receipts=True)
+                   if is_void else self.repo.journal_source(ref['stream_id'], ref['event_id']))
+            if row is None:
+                raise OrderError(409, 'EVIDENCE_SOURCE_MISSING', 'referenced journal row is unavailable')
+            if compact_source_ref(ref, row) != ref:
+                raise OrderError(409, 'EVIDENCE_SOURCE_CHANGED', 'historical source differs from reference')
+            return 200, dict(source_ref=ref, event=row)
         if method == 'order_fee_evidence_v1':
             self._runtime_keys(params, ('client_order_id',))
             value = params.get('client_order_id')
@@ -4653,24 +5243,60 @@ class OrderRuntime:
             result = evidence_fee(self.repo.get_order(value))
             result.update(evidence_version=1, account_id=self.account_id, account_type='STOCK')
             return 200, result
-        if method in ('order_events_evidence_v1', 'recovery_evidence_v1'):
-            self._runtime_keys(params, ('after', 'limit', 'cursor'))
+        if method in ('order_events_evidence_v1', 'order_events_compact_v1', 'recovery_evidence_v1'):
+            keys = ('after', 'limit', 'cursor', 'include_void_receipts')
+            if method == 'order_events_evidence_v1' and 'cursor' not in params:
+                keys += ('pair_compact',)
+            self._runtime_keys(params, keys)
+            pair_compact = params.get('pair_compact', False)
+            if type(pair_compact) is not bool and not (type(pair_compact) is str and pair_compact in ('true', 'false')):
+                raise OrderError(400, 'INVALID_PARAMS', 'pair_compact must be true or false')
             if 'cursor' in params and 'after' in params:
                 raise OrderError(400, 'INVALID_PARAMS', 'cursor and after are mutually exclusive')
             checkpoint = self.evidence_cursors.decode(params['cursor']) if 'cursor' in params else None
             if checkpoint and checkpoint['route'] != method:
                 raise OrderError(409, 'EVIDENCE_CURSOR_INVALID', 'cursor belongs to another route')
+            include_value = params.get('include_void_receipts', checkpoint.get('include_void_receipts', False) if checkpoint else False)
+            if not (type(include_value) is bool or type(include_value) is str and include_value in ('true', 'false')):
+                raise OrderError(400, 'INVALID_PARAMS', 'include_void_receipts must be true or false')
+            include_void_receipts = include_value is True or include_value == 'true'
+            if checkpoint and include_void_receipts != checkpoint.get('include_void_receipts', False):
+                raise OrderError(409, 'EVIDENCE_CURSOR_INVALID', 'cursor sequence mode differs')
             after = checkpoint['after'] if checkpoint else self._runtime_integer(params.get('after', 0), 'after', 0, 9223372036854775807)
             result = self.repo.evidence_events(after, self._runtime_limit(params.get('limit', 100)), checkpoint,
-                                               recovery=method == 'recovery_evidence_v1')
+                                               recovery=method == 'recovery_evidence_v1', include_void_receipts=include_void_receipts)
             anchor = result.pop('anchor')
             for event in result['events']:
-                event['data'] = public_order(event['data'])
+                if event['type'] != 'NON_FINANCIAL_SEQUENCE_VOID':
+                    event['data'] = public_order(event['data'])
+            if method == 'order_events_compact_v1':
+                previous = {}
+                if after and result['events'] and after >= result['retained_from']:
+                    if result['coverage'].get('sequence_kinds') == 'ORIGINAL_OR_ATTESTED_VOID':
+                        boundary = self.repo.journal_source(result['stream_id'], after, include_void_receipts=True)
+                    else:
+                        boundary = self.repo.journal_source(result['stream_id'], after)
+                    if boundary is None:
+                        raise OrderError(409, 'EVIDENCE_SOURCE_MISSING', 'page boundary row disappeared')
+                    if boundary['type'] != COMPACT_VOID:
+                        previous[boundary['data']['order_id']] = boundary
+                projected = []
+                for row in result['events']:
+                    if row['type'] == COMPACT_VOID:
+                        projected.append(project_event(result, row))
+                        continue
+                    order_id = row['data']['order_id']
+                    projected.append(project_event(result, row, previous.get(order_id)))
+                    previous[order_id] = row
+                result.update(wire_format='ORDER_EVENT_DELTA_V1', events=projected)
             token = {key: result[key] for key in ('stream_id', 'account_id', 'account_type', 'executor_epoch',
                                                   'executor_instance', 'high_watermark')}
-            token.update(anchor=anchor, after=result['next_after'], route=method,
+            token.update(anchor=anchor, after=result['next_after'], route=method, include_void_receipts=include_void_receipts,
                          expires_at=checkpoint['expires_at'] if checkpoint else time.time() + 900)
             result['next_cursor'] = self.evidence_cursors.encode(token) if result['has_more'] else None
+            if pair_compact is True or pair_compact == 'true':
+                paired = dict(token, route='order_events_compact_v1', after=after)
+                result['compact_start_cursor'] = self.evidence_cursors.encode(paired)
             result['observed_at'] = iso_datetime()
             result['runtime_health'] = self.health()
             result['runtime_health_consistency'] = 'non_atomic'
@@ -4684,7 +5310,7 @@ class OrderRuntime:
                     if (sample.get('event_relation') == 'non_atomic_bracket' and before and marker
                             and before['high_watermark'] <= marker['high_watermark']
                             and before['high_watermark'] >= result['coverage']['after_exclusive']
-                            and marker['high_watermark'] <= result['high_watermark']
+                            and marker['high_watermark'] <= result['coverage']['through_inclusive']
                             and all(before[key] == marker[key] == result[key] for key in
                                     ('stream_id', 'account_id', 'account_type', 'executor_epoch', 'executor_instance'))):
                         matching[kind] = sample
@@ -4729,20 +5355,23 @@ class OrderRuntime:
                         cancel_request_id=request["cancel_request_id"], cancel_status=result.get("cancel_status"))
             return status, result
         if method == "order":
-            self._runtime_keys(params, ("client_order_id",))
+            self._runtime_keys(params, ("client_order_id", "amount_view"))
+            cent_view = self._runtime_cent_view(params)
             value = params.get("client_order_id")
             if not isinstance(value, str) or not value:
                 raise OrderError(400, "INVALID_PARAMS", "client_order_id is required")
             document = self.repo.get_order(value)
-            return 200, (document if document.get("receipt_type") == "SUBMISSION_BAN" else public_order(document))
+            return 200, (document if document.get("receipt_type") == "SUBMISSION_BAN"
+                         else self._query_order(document, cent_view))
         if method == "orders":
-            self._runtime_keys(params, ("active", "limit", "cursor"))
+            self._runtime_keys(params, ("active", "limit", "cursor", "amount_view"))
+            cent_view = self._runtime_cent_view(params)
             active = params.get("active", "true")
             if active not in ("true", "false", True, False):
                 raise OrderError(400, "INVALID_PARAMS", "active must be true or false")
             result = self.repo.list_orders(active=active in ("true", True),
                                           limit=self._runtime_limit(params.get("limit", 100)), cursor=params.get("cursor"))
-            result["orders"] = [public_order(row) for row in result["orders"]]
+            result["orders"] = [self._query_order(row, cent_view) for row in result["orders"]]
             return 200, result
         if method == "order_events":
             self._runtime_keys(params, ("after", "limit"))
@@ -4760,6 +5389,33 @@ class OrderRuntime:
                                "data": public_order(document)})
             return 200, {"events": events, "next_after": result["next_after"], "has_more": result["has_more"]}
         raise OrderError(404, "METHOD_NOT_FOUND", "unknown method")
+
+    @staticmethod
+    def _runtime_cent_view(params):
+        if "amount_view" not in params:
+            return False
+        if params["amount_view"] != "cent":
+            raise OrderError(400, "INVALID_PARAMS", "amount_view must be cent")
+        return True
+
+    @staticmethod
+    def _query_order(document, cent_view):
+        result = public_order(document)
+        if not cent_view or result.get("account_type") != "STOCK":
+            return result
+        items = result["items"]
+        if not items or not all(item["symbol"].endswith((".SH", ".SZ")) for item in items):
+            return result
+        cent = Decimal("0.01")
+        totals = {item["item_id"]: Decimal("0.00") for item in items}
+        for fill in result["fills"]:
+            amount = Decimal(str(fill["amount"])).quantize(cent, rounding=ROUND_HALF_UP)
+            fill["amount"] = str(amount)
+            totals[fill["item_id"]] += amount
+        for item in items:
+            item["filled_amount"] = str(totals[item["item_id"]])
+        result["filled_amount"] = str(sum(totals.values()))
+        return result
 
     @staticmethod
     def _runtime_keys(params, allowed):
@@ -5317,7 +5973,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
             params = {}
             for name, values in parse_qs(parsed.query, keep_blank_values=True).items():
                 params[name] = values[0] if len(values) == 1 else values
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, True))
@@ -5349,7 +6005,7 @@ class OrderRequestHandler(BaseHTTPRequestHandler):
                 raise OrderError(400, "INVALID_JSON", "request body must be UTF-8 JSON")
             if not isinstance(params, dict):
                 raise OrderError(400, "INVALID_PARAMS", "JSON body must be an object")
-            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
+            if self.request_method in ("submit_order", "cancel_order", "order", "orders", "order_events", "capabilities", "health", "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1", "recovery_evidence_v1", "order_fee_evidence_v1"):
                 self._bridge_submit(params)
             else:
                 self._submit(normalize_request(self.request_method, params, False))

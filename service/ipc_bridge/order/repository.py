@@ -10,8 +10,11 @@ from datetime import timedelta
 
 from service.ipc_bridge.ipc_protocol.order_common import (OrderError, copy_json, fingerprint, iso_datetime,
                      json_text, new_order_document, new_record_metadata, parse_timestamp, public_order, utc_now)
+from .journal_storage import journal_pack, journal_unpack
 from .storage_schema import repo_check_storage_schema
 from .evidence import evidence_page
+from .sequence_void import VOID_EVENT_TYPE, void_event
+from .event_correction import manual_resolution_notice
 from .state import (apply_cancel_request, apply_observation, cancel_response,
                     is_order_active, observation_identifiers, observation_identity_valid, pending_cancellations,
                     reconcile_pending, recompute_order, mark_reconciled,
@@ -199,7 +202,7 @@ class PostgresRepository(object):
 
     def check_schema(self):
         """只检查既有表结构和版本；账户记录由策略启动时自动补齐。"""
-        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, repo_SCHEMA_VERSION))
+        return self.repo_run(lambda cur: repo_check_storage_schema(cur, self.repo_s, None))
 
     def ensure_account_runtime(self):
         """按启动账户幂等插入运行记录；冲突时保留事件序号、主机和执行代次。"""
@@ -403,11 +406,21 @@ class PostgresRepository(object):
                             self.repo_scope + (doc["order_id"], record_id, json_text(record), record["created_at"]))
         if event_type is not None:
             cur.execute("UPDATE " + self.repo_s + ".account_runtime SET event_seq=event_seq+1 "
-                        "WHERE account_type=%s AND account_id=%s RETURNING event_seq", self.repo_scope)
-            seq = cur.fetchone()[0]
-            cur.execute("INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
-                        "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
-                        self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"], json_text(doc)))
+                        "WHERE account_type=%s AND account_id=%s RETURNING event_seq,"
+                        "COALESCE(to_jsonb(account_runtime)->>'event_journal_write_mode','FULL'),"
+                        "to_jsonb(account_runtime)->>'evidence_stream_id'", self.repo_scope)
+            seq, mode, stream_id = cur.fetchone()
+            raw = json_text(doc)
+            prefix = "INSERT INTO " + self.repo_s + ".order_events(account_type,account_id,event_seq,order_id,event_type,"
+            params = self.repo_scope + (seq, doc["order_id"], event_type, doc["updated_at"])
+            if mode == 'BASE_DELTA_V1':
+                base_seq, raw = journal_pack(self, cur, seq, doc, raw, stream_id)
+                cur.execute(prefix + "occurred_at,document,storage_stream_id,base_event_seq) "
+                            "VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)", params + (raw, stream_id, base_seq))
+            elif mode == 'FULL':
+                cur.execute(prefix + "occurred_at,document) VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)", params + (raw,))
+            else:
+                raise repo_inconsistent("unknown order journal storage mode")
         return doc
 
     def repo_ban(self, cur, value, by_cancel=False):
@@ -451,7 +464,13 @@ class PostgresRepository(object):
             doc = self.repo_require(self.repo_load(cur, order_id, lock=True))
             before = json_text(doc)
             mutator(doc)
-            return self.repo_save(cur, doc, event_type) if json_text(doc) != before else doc
+            if json_text(doc) == before:
+                return doc
+            if event_type == "MANUAL_UNKNOWN_RESOLUTION":
+                if not doc.get('manual_resolutions'):
+                    raise OrderError(409, 'EVIDENCE_CORRECTION_INVALID', 'manual resolution audit is required')
+                manual_resolution_notice(self, cur, doc, doc['manual_resolutions'][-1])
+            return self.repo_save(cur, doc, event_type)
         return self.repo_run(update, mutation=True)
 
     def claim_submission(self, order_id, authority=None):
@@ -574,14 +593,54 @@ class PostgresRepository(object):
                         "ORDER BY event_seq LIMIT %s", self.repo_scope + (int(after), limit + 1))
             rows = cur.fetchall()
             events = []
+            bases = {}
             for row in rows[:limit]:
-                doc = repo_json(row[4])
+                doc = journal_unpack(self, cur, row[0], row[4], bases)
                 events.append({"event_id": row[0], "order_id": row[1], "order_version": doc["version"],
                                "type": row[2], "recorded_at": repo_timestamp(row[3]), "data": doc,
                                "event_seq": row[0], "event_type": row[2], "occurred_at": repo_timestamp(row[3]), "order": doc})
             return {"events": events, "next_after": events[-1]["event_seq"] if events else int(after),
                     "has_more": len(rows) > limit}
         return self.repo_run(listing)
+
+    def repo_void_available(self, cur):
+        cur.execute('SELECT to_regclass(%s)', (self.repo_s + '.event_sequence_void_receipts',))
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+    def repo_journal_row(self, cur, stream_id, event_id, include_void_receipts=False, voids_available=None):
+        cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
+                    '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s',
+                    self.repo_scope + (event_id,))
+        row = cur.fetchone()
+        event = (dict(event_id=event_id, type=row[1], recorded_at=repo_timestamp(row[2]), data=journal_unpack(self, cur, event_id, row[0]))
+                 if row else None)
+        if include_void_receipts and (self.repo_void_available(cur) if voids_available is None else voids_available):
+            cur.execute('SELECT document FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                        'WHERE stream_id=%s AND account_type=%s AND account_id=%s AND event_seq=%s',
+                        (stream_id,) + self.repo_scope + (event_id,))
+            receipt = cur.fetchone()
+            if receipt:
+                if event is not None:
+                    raise OrderError(409, 'EVIDENCE_JOURNAL_CONFLICT', 'original event and void receipt occupy the same sequence')
+                event = void_event(repo_json(receipt[0]), dict(stream_id=stream_id, account_type=self.account_type,
+                                   account_id=self.account_id, event_seq=event_id))
+        return event
+
+    def journal_source(self, stream_id, event_id, include_void_receipts=False):
+        """Return immutable original/opt-in imported evidence, never current order state."""
+        def read(cur):
+            cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cur.execute("SELECT to_jsonb(r)->>'evidence_stream_id' FROM " + self.repo_s +
+                        '.account_runtime r WHERE account_type=%s AND account_id=%s', self.repo_scope)
+            marker = cur.fetchone()
+            if not marker or marker[0] != stream_id:
+                raise OrderError(409, 'EVIDENCE_STREAM_CHANGED', 'journal source stream differs')
+            event = self.repo_journal_row(cur, stream_id, event_id, include_void_receipts)
+            if event and event['type'] != VOID_EVENT_TYPE:
+                event['data'] = public_order(event['data'])
+            return event
+        return self.repo_run(read)
 
     def evidence_marker(self):
         """HTTP thread bracketing marker, never called on QMT scheduler thread."""
@@ -596,7 +655,7 @@ class PostgresRepository(object):
                         account_type=self.account_type)
         return self.repo_run(read)
 
-    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False):
+    def evidence_events(self, after=0, limit=100, checkpoint=None, recovery=False, include_void_receipts=False):
         """One read-only repeatable-read transaction; no QMT calls or writer locks."""
         def listing(cur):
             cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
@@ -615,25 +674,39 @@ class PostgresRepository(object):
                         '.order_events WHERE account_type=%s AND account_id=%s', self.repo_scope)
             retained = cur.fetchone()[0]
             retained = retained if retained is not None else current + 1
-            cur.execute('SELECT document,event_type,occurred_at FROM ' + self.repo_s +
-                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq=%s', self.repo_scope + (high,))
-            tail = cur.fetchone()
-            anchor = fingerprint([repo_json(tail[0]), tail[1], repo_timestamp(tail[2])]) if tail else None
+            voids_available = include_void_receipts and self.repo_void_available(cur)
+            if voids_available:
+                cur.execute('SELECT min(event_seq) FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                            'WHERE stream_id=%s AND account_type=%s AND account_id=%s', (stream,) + self.repo_scope)
+                void_floor = cur.fetchone()[0]
+                if void_floor is not None:
+                    retained = min(retained, void_floor)
+            tail = self.repo_journal_row(cur, stream, high, include_void_receipts, voids_available)
+            anchor = fingerprint([tail['data'], tail['type'], tail['recorded_at']]) if tail else None
             if checkpoint and checkpoint['anchor'] != anchor:
                 raise OrderError(409, 'EVIDENCE_ANCHOR_CHANGED', 'journal anchor changed or disappeared')
-            cur.execute('SELECT count(*) FROM ' + self.repo_s +
-                        '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s',
-                        self.repo_scope + (after, high))
-            count = cur.fetchone()[0]
             cur.execute('SELECT event_seq,event_type,occurred_at,document FROM ' + self.repo_s +
                         '.order_events WHERE account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
                         'ORDER BY event_seq LIMIT %s', self.repo_scope + (after, high, limit + 1))
-            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]), data=repo_json(item[3]))
-                      for item in cur.fetchall()]
+            bases = {}
+            events = [dict(event_id=item[0], type=item[1], recorded_at=repo_timestamp(item[2]),
+                           data=journal_unpack(self, cur, item[0], item[3], bases)) for item in cur.fetchall()]
+            if voids_available:
+                cur.execute('SELECT event_seq,document FROM ' + self.repo_s + '.event_sequence_void_receipts '
+                            'WHERE stream_id=%s AND account_type=%s AND account_id=%s AND event_seq>%s AND event_seq<=%s '
+                            'ORDER BY event_seq LIMIT %s', (stream,) + self.repo_scope + (after, high, limit + 1))
+                for seq, payload in cur.fetchall():
+                    events.append(void_event(repo_json(payload), dict(stream_id=stream, account_type=self.account_type,
+                                             account_id=self.account_id, event_seq=seq)))
+                events.sort(key=lambda item: item['event_id'])
+                sequences = [item['event_id'] for item in events]
+                if len(sequences) != len(set(sequences)):
+                    raise OrderError(409, 'EVIDENCE_JOURNAL_CONFLICT', 'original event and void receipt occupy the same sequence')
             meta = dict(stream_id=stream, high_watermark=current, retained_from=retained,
                         executor_epoch=epoch, executor_instance=instance, account_id=self.account_id,
-                        account_type=self.account_type, range_count=count)
+                        account_type=self.account_type)
             result = evidence_page(meta, events, after, high, limit)
+            result['coverage']['sequence_kinds'] = ('ORIGINAL_OR_ATTESTED_VOID' if include_void_receipts else 'ORIGINAL_ONLY')
             result['anchor'] = anchor
             if recovery:
                 cur.execute('SELECT document FROM ' + self.repo_s +
@@ -896,26 +969,49 @@ class PostgresRepository(object):
             previous = cur.fetchone()
             if previous is not None:
                 return self.repo_load(cur, previous[0]) if previous[0] else None
-            stamp = iso_datetime()
-            cur.execute("INSERT INTO " + self.repo_s + ".qmt_observations(account_type,account_id,kind,source,observed_at,raw,observation_hash) "
-                        "VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING observation_id",
-                        self.repo_scope + (kind, source, stamp, json_text(raw), digest))
-            obs_id = cur.fetchone()[0]
-            doc = self.repo_match(cur, kind, raw)
-            if doc is None:
-                return None
-            before = json_text(doc)
-            identities_before = self.repo_qmt_identities(doc)
-            apply_observation(doc, kind, raw, source, observed_at=stamp)
-            if json_text(doc) != before:
-                self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
-            cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
-                        (doc["order_id"], obs_id))
-            # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
-            if self.repo_qmt_identities(doc) != identities_before:
-                self.repo_apply_pending(cur)
-            return self.repo_load(cur, doc["order_id"])
+            return self.repo_ingest_new_observation(cur, kind, raw, source, digest)
         return self.repo_run(ingest, mutation=True)
+
+    def ingest_observations(self, kind, raws, source="query"):
+        """单批复用事务，原始哈希判重后仍按输入顺序保存新增事实。"""
+        observations = [(fingerprint({"kind": kind, "source": source, "raw": raw}), raw) for raw in raws]
+        if not observations:
+            return 0
+        def ingest(cur):
+            cur.execute("SELECT observation_hash FROM " + self.repo_s + ".qmt_observations "
+                        "WHERE account_type=%s AND account_id=%s AND observation_hash=ANY(%s)",
+                        self.repo_scope + (list(dict.fromkeys(digest for digest, raw in observations)),))
+            seen = {row[0] for row in cur.fetchall()}
+            inserted = 0
+            for digest, raw in observations:
+                if digest in seen:
+                    continue
+                self.repo_ingest_new_observation(cur, kind, raw, source, digest)
+                seen.add(digest)
+                inserted += 1
+            return inserted
+        return self.repo_run(ingest, mutation=True)
+
+    def repo_ingest_new_observation(self, cur, kind, raw, source, digest):
+        stamp = iso_datetime()
+        cur.execute("INSERT INTO " + self.repo_s + ".qmt_observations(account_type,account_id,kind,source,observed_at,raw,observation_hash) "
+                    "VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s) RETURNING observation_id",
+                    self.repo_scope + (kind, source, stamp, json_text(raw), digest))
+        obs_id = cur.fetchone()[0]
+        doc = self.repo_match(cur, kind, raw)
+        if doc is None:
+            return None
+        before = json_text(doc)
+        identities_before = self.repo_qmt_identities(doc)
+        apply_observation(doc, kind, raw, source, observed_at=stamp)
+        if json_text(doc) != before:
+            self.repo_save(cur, doc, "QMT_OBSERVATION", fact_source=source)
+        cur.execute("UPDATE " + self.repo_s + ".qmt_observations SET order_id=%s,applied=true WHERE observation_id=%s",
+                    (doc["order_id"], obs_id))
+        # 外部回报不全扫历史积压；仅新增可关联身份时重放先到的子回报。
+        if self.repo_qmt_identities(doc) != identities_before:
+            self.repo_apply_pending(cur)
+        return self.repo_load(cur, doc["order_id"])
 
     def repo_qmt_identities(self, doc):
         return {(field, str(row.get(field)), str(row.get("trading_day")), str(row.get("market")))
@@ -1073,6 +1169,7 @@ class PostgresRepository(object):
             entry.update(expected_version=expected_version, resolution="observed", observation_ids=selected,
                          qmt_order_ids=sorted(qmt_orders), qmt_task_ids=sorted(qmt_tasks),
                          before_submission_status="UNKNOWN", after_submission_status=doc["submission_status"], at=iso_datetime())
+            manual_resolution_notice(self, cur, doc, entry)
             doc.setdefault("manual_resolutions", []).append(entry)
             doc["resolution"] = "OBSERVED"
             doc["reconcile_requested"] = True

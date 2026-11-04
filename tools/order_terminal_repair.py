@@ -22,12 +22,14 @@ if str(ROOT) not in sys.path:
 
 from service.ipc_bridge.ipc_protocol.order_common import (OrderError, fingerprint,
                                                        iso_datetime, parse_timestamp)  # noqa: E402
+from service.ipc_bridge.order.journal_storage import journal_unpack  # noqa: E402
 from service.ipc_bridge.order.repository import PostgresRepository, repo_json, repo_timestamp  # noqa: E402
 from service.ipc_bridge.order.state import (apply_observation, observation_identifiers,
                                 mark_reconciled, reconcile_pending, recompute_order,
                                 state_execution_finished, state_reconciliation_facts,
                                 is_order_active, state_value, state_fill_cent_precision)  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
+from service.ipc_bridge.order.event_correction import correction_source_refs, correction_notice  # noqa: E402
 
 
 # 只允许覆盖/运行检查点与派生执行状态变化。
@@ -452,7 +454,9 @@ def repair(repo, args):
                     ".order_events WHERE account_type=%s AND account_id=%s AND order_id=%s "
                     "AND event_seq>=%s ORDER BY event_seq",
                     repo.repo_scope + (args.order_id, args.checkpoint_event_seq))
-        events = [(row[0], row[1], repo_timestamp(row[2]), repo_json(row[3])) for row in cur.fetchall()]
+        bases = {}
+        events = [(row[0], row[1], repo_timestamp(row[2]), journal_unpack(repo, cur, row[0], row[3], bases))
+                  for row in cur.fetchall()]
         require(events and events[0][0] == args.checkpoint_event_seq, "checkpoint event is missing")
         occurred_at = events[0][2]
         ownership_clause = "" if equivalent else "AND (order_id=%s OR order_id IS NULL) "
@@ -475,8 +479,10 @@ def repair(repo, args):
         else:
             proof = validate(current, events, observations, args.checkpoint_event_seq)
         candidate = repaired_candidate(current, events[0][3], proof, equivalent, fill_precision=fill_precision)
+        source_refs = correction_source_refs(repo, cur, args.order_id, events=events,
+                                             client_order_id=current.get('client_order_id'))
         result = {"order_id": args.order_id, "mode": "apply" if args.apply else "dry-run",
-                  "expected_version": args.expected_version, "proof": proof,
+                  "expected_version": args.expected_version, "proof": proof, "source_event_refs": source_refs,
                   "repair_kind": ("fill-precision-query-observations" if fill_precision else
                                   "equivalent-query-observations" if equivalent else "strict-terminal-gap"),
                   "expected_state": {key: candidate.get(key) for key in (
@@ -487,7 +493,7 @@ def repair(repo, args):
             return result
         receipt = {"captured_at": iso_datetime(), "account_type": repo.account_type,
                    "account_id": repo.account_id, "order_id": args.order_id,
-                   "operator": getpass.getuser(), "reason": args.reason.strip(),
+                   "operator": getpass.getuser(), "reason": args.reason.strip(), "source_event_refs": source_refs,
                    "before": current, "checkpoint": events[0][3], "events": [
                        {"seq": row[0], "type": row[1], "at": row[2], "document": row[3]}
                        for row in events],
@@ -517,11 +523,14 @@ def repair(repo, args):
         after_state["version"] = args.expected_version + 1
         current.setdefault("terminal_repairs", []).append({
             "operator": getpass.getuser(), "reason": args.reason.strip(),
-            "checkpoint_event_seq": args.checkpoint_event_seq,
+            "checkpoint_event_seq": args.checkpoint_event_seq, "source_event_refs": source_refs,
             "repair_kind": result["repair_kind"],
             "before": before_state, "after": after_state,
             "evidence_path": str(args.evidence_out.resolve()), "evidence_sha256": digest,
             "at": iso_datetime()})
+        current.setdefault('event_corrections_v1', []).append(correction_notice(
+            'ORDER_STATE_RECONCILIATION_REPAIR', source_refs, args.reason.strip(), getpass.getuser(),
+            dict(reference=str(args.evidence_out.resolve()), sha256=digest)))
         # Recompute may change derived cancel request status as well as item status.
         children = ("items", "cancel_requests") if equivalent else ("items",)
         repo.repo_save(cur, current, "MANUAL_TERMINAL_REPAIR", child_fields=children)

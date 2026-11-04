@@ -263,6 +263,8 @@ Content-Type: application/json
 {"cancel_request_id":"cancel-20260926-001","canonical_cancel_request_id":"cancel-20260926-001","order_id":"<order_id>","cancel_status":"WAITING_QMT_ID","replayed":false}
 ```
 
+`GET /order` 和 `GET /orders` 可加 `amount_view=cent`。对全部订单项均为沪深证券的 STOCK 订单，`fills[].amount` 按 ROUND_HALF_UP 逐笔取到分，订单项和整单的 `filled_amount` 按归属累加这些金额，均返回两位小数字符串。原始回报保留在 raw 中。含其他市场的订单沿用原格式。省略参数时返回原金额；事件接口和提交回执沿用既有格式。
+
 查询接口均为 GET；例子使用 query string：
 
 | 路径 | 用途 | 返回内容 |
@@ -371,6 +373,97 @@ QMT 的 `console_log` 只打印有界元信息，允许字段为 `request_id`、
 
 `event_id` 只在追加事件时递增，旧事件和游标不重排、不清理；订单 `version` 仍随持久化更新递增，用于并发校验，所以相邻事件的 `order_version` 可以跳号。当前版本不提供自动事件清理或归档。
 
+## 事件证据分页与逐页连续性
+
+`/order_events_evidence_v1` 和 `/recovery_evidence_v1` 保留 `evidence_version=1`，
+事件信封、冻结 `high_watermark`、MAC cursor、流/执行器身份和尾锚检查保持原约定。
+新增的 `coverage.validation_version=2`、`validation_scope="RETURNED_PAGE"` 明确逐页证明范围：
+`after_exclusive` 是本次请求位置，`through_inclusive=next_after` 是本页实际返回的最后连续事件；
+`journal_contiguous=true` 仅证明这个区间，不证明尚未返回的 `(next_after, high_watermark]`。
+未带这两个新字段的旧响应仍按旧版全区间声明解释，客户端不能混用两种范围。
+capabilities 的 `journal_validation_version` / `journal_validation_scope` 可用于识别此语义升级。
+
+每页只按索引读取原有 `limit + 1` 个候选，不再对完整剩余区间 `count(*)`。
+`has_more` 精确定义为 `next_after < high_watermark`，不表示下一事件一定存在。
+例如冻结水位 4、保留事件 1/3/4 时，先返回事件 1，`through_inclusive=1`、`has_more=true`；
+下一次从 1 查询返回 HTTP 409 `EVIDENCE_JOURNAL_GAP`，不跳到 3，不补造作废事件。
+调用方可以持久保存已核验的连续前缀；缺口及其后的恢复仍被阻止。
+重新读取最后保存的尾锚不会产生新事件进展，不能据此认定已越过缺口。
+空日志水位 0 返回空事件、`after_exclusive=through_inclusive=next_after=0`、`has_more=false`。
+保留范围之前、回退/无效区间、流/执行器或尾锚变化继续明确报错。
+
+本地连续前缀不等于券商事实完整：`broker_complete="unknown"`、
+`provable_broker_dates=null`、`recovery_status="incomplete"` 保持保守；
+恢复样本只能绑定本页已验证范围内的非原子采样，不为未读尾部背书。
+正式恢复的调用方仍须完整追平并满足自身门禁，不能把部分成功页当作恢复完成。
+
+## 已预授权的空序号作废凭据（默认关闭）
+
+当前在线写入在同一事务中增加序号并写入事件，没有在线预留空号或合法自动作废来源。
+因此这里仅提供外部正面 `RESERVED_VOID` 证明的隔离导入，不提供签发、授信或自动补洞接口。
+真正丢失且原事实未知的历史事件继续报告缺口，不能凭“查不到”、空号或操作员自报身份认定作废。
+已发布的原事件禁止删除、覆盖或替换；既有消费者见过的 core wire 和尾锚不改写。
+
+`sql/order_sequence_void_v1.sql` 是可选离线空表迁移，本身不创建任何来源、授权、凭据或历史事实。
+独立管理员必须事先审核正面来源及审批材料，并把精确的
+`(stream_id, account_type, account_id, event_seq, source_statement_sha256, approval_statement_sha256)`
+写入 `qmt_order.event_sequence_void_authorizations`，同时记录授权身份、时间、理由和证据引用/摘要。
+没有这一按条先存授权，导入始终拒绝。迁移、独立授权和外部合法来源的建立不属于正常启动路径；
+本仓库不提供在同次导入中登记可信来源/授权身份的参数或写入口。
+部署须把授权表 INSERT 权限交给独立管理员，导入角色仅需读授权/写 receipt，运行服务只需读表；
+不能把导入角色的自报名称当作授信。空表及未安装迁移时保持关闭。
+
+离线工具默认只读预检，显式 `--apply` 才插入 `event_sequence_void_receipts`，从不调用 QMT：
+
+```powershell
+python tools/order_sequence_void_import.py --config isolated-config.json --statements reviewed-statements.json --source-evidence reservation-proof.bin --approval-evidence approval-proof.bin
+# 独立预授权已持久保存且全部检查通过后，同样参数显式追加 --apply。
+```
+
+statement 文件只包含 `source_statement` 与 `approval_statement`：
+
+- 两者都必须包含 `statement_version=1` 和四项精确 scope：`stream_id`、`account_type="STOCK"`、`account_id`、`event_seq`。
+- source 还须包含 `kind="RESERVED_SEQUENCE_VOID"`、`source_id`、`source_state="RESERVED_VOID"`、
+  `never_published=true`、`financial_effect="NONE"`、`reservation_id`、`reason`、`issued_at`、`evidence`。
+  它正面证明该预留序号从未发布财务事实，不能用 `MISSING` 或未知经济影响替代。
+- approval 还须包含 `decision="APPROVE_RESERVED_SEQUENCE_VOID_IMPORT"`、`source_statement_sha256`、
+  `approval_id`、`approved_by`、`reason`、`approved_at`、`evidence`。
+- 每个 `evidence={"reference":"独立证据引用","sha256":"原始文件字节SHA256"}`；工具读取两份实际证据文件并核验摘要。
+  source/approval 完整 statement 的摘要须分别匹配独立按条授权。更换范围、身份、理由或证据都会改变摘要并拒绝。
+
+规范摘要是 `SHA256(UTF8(JSON))`；JSON 使用 `ensure_ascii=false`、`allow_nan=false`、
+`sort_keys=true`、`separators=(",", ":")`，无 BOM/额外换行，不进行 Unicode 归一化。
+外部证据文件摘要针对原始字节；statement 摘要针对上述规范 JSON，两者不可混用。
+授权时间不得早于审批，审批不得早于来源证明；导入时间不得早于授权。
+导入拒绝跨流、跨账户、未来序号、已有原事件、缺少授权及冲突凭据。
+相同范围和两份 statement/授权重复导入返回原 receipt，保留原导入时间/身份；任何变更均拒绝，不能重新签发覆盖。
+
+只有显式 `include_void_receipts=true` 才会把有效 receipt 与原事件按原序号合并读取，
+适用于 `/order_events_evidence_v1`、`/order_events_compact_v1` 与 `/recovery_evidence_v1`。
+MAC cursor 固定该模式，后续页可省略参数沿用，禁止中途切换。
+`coverage.sequence_kinds="ORIGINAL_OR_ATTESTED_VOID"` 明确混合语义；默认值为 `ORIGINAL_ONLY`。
+capabilities 的 `sequence_void_receipts` 说明版本、默认关闭状态和查询参数。
+服务只读取已持久凭据，不根据缺号创建内容；同序号原事件与 receipt 双重占位、凭据损坏或 scope 错误均拒绝。
+
+作废的稳定 core wire 为：
+
+```json
+{"event_id":2,"type":"NON_FINANCIAL_SEQUENCE_VOID","recorded_at":"持久receipt的import.imported_at","data":{"receipt_version":1,"kind":"NON_FINANCIAL_SEQUENCE_VOID","stream_id":"原流UUID","account_type":"STOCK","account_id":"原账户","event_seq":2,"source_statement":{},"approval_statement":{},"authorization":{},"import":{"operator":"导入操作员","imported_at":"UTC ISO8601时间"},"receipt_sha256":"规范JSON摘要"}}
+```
+
+上例三个空对象仅表示结构，实际必须保存完整来源、审批与授权，不能为空。
+`authorization` 包含四项 scope、`authorization_id`、两份 statement 摘要、
+`authorized_by`、`authorized_at`、`reason`、`evidence`。
+`receipt_sha256` 是整个 receipt 删除自身 `receipt_sha256` 字段后的规范 JSON 摘要。
+void 不是订单快照，不伪造 `order_id`/`version` 或金额；它仅在通过验证后允许推进该原序号，跳过财务投影。
+消费端须验证已信任部署来源、版本/类型、全部 scope、两份 statement 与授权绑定、证据摘要及 receipt 摘要。
+摘要校验是完整性检查，不能单独证明外部来源真实，真实性依赖独立授权和部署信任边界。
+
+receipt 永久保存，分页、原始来源读取和 recovery 的尾锚使用同一持久 core wire；不会按当前时间重造。
+混合模式的新一轮正式恢复可重新读取已保存的 void 尾锚，逐页追平，而不因它不是订单就永久失败。
+导入改变了冻结快照尾部时，既有 MAC cursor 仍按原尾锚规则拒绝，调用方重新开始取证；不放宽尾锚保护。
+有效 void 不证明其余事件/券商历史完整，recovery 仍保持保守的不完整声明及其他门禁。
+
 ## UNKNOWN 人工处置
 
 管理工具不直接调用 QMT：
@@ -411,3 +504,15 @@ python tools/build_ipc_strategies.py --check
 历史精度冲突修复使用 `tools/order_terminal_repair.py` 的显式 `--resolve-fill-precision-observations` 模式；默认严格模式不变。必须独立核验备份、当前版本、原始观察与有效历史结案检查点；只将已证明为同一成交的精度观察解除隔离，保留原文和审计事件。正常启动不会自动清除已有冲突。佣金排除成交门禁不等于费用账单已核对。
 
 2026-11-03 故障历史清理属于一次性已授权有损操作：重复证据正文替换为非空清理摘要，保留经济事实、状态、事件序号和下游已保存的恢复锚点。原文备份与逐事件摘要在独立操作回执中保留。数据库恢复普通 `order_events` 表，无归档视图、共享证据表或还原函数；分页保留原来的 `limit + 1` 读取，不新增小批或响应字节预算。历史清理不参与正常启动路径。
+
+## 已发布事件的追加订正通知
+
+正式 `MANUAL_TERMINAL_REPAIR` / `MANUAL_UNKNOWN_RESOLUTION` 追加新事件并保留
+`event_corrections_v1[].source_event_refs`：原 stream、账户、event_id、order_id、order_version 及公共 core-wire SHA256。
+旧事件、既有哈希和成交原文不变；缺原事件或持久流身份时拒绝新订正，不补历史。
+
+离线 `order_admin correction-notice` 默认只读预检，显式 `--apply` 才产生幂等的 `BROKER_CORRECTION_NOTICE`。
+它仅保存独立原始材料路径/字节摘要，固定标记 `PENDING_INDEPENDENT_REVIEW` / `NOT_AUTHORIZED`，不改写成交或资金。
+相同订单/notice_id/请求摘要重试不产生第二个事件；原事件ref、当前expected_version和实际文件摘要均须校验。
+完整 wire、摘要规则和 TradeNest 的 `BROKER_CORRECTION_REVIEW_PENDING` 人工处理路径见
+[核心证据合同](docs/evidence-v1-contract.md#已发布事件的追加订正引用)。

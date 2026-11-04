@@ -13,6 +13,9 @@ from .common import OrderError
 
 def evidence_capabilities():
     return dict(version=1, journal_paging='SUPPORTED_WITH_EVIDENCE_MIGRATION',
+                journal_validation_version=2, journal_validation_scope='RETURNED_PAGE',
+                sequence_void_receipts=dict(version=1, default='DISABLED',
+                    activation='PER_SEQUENCE_PRIOR_AUTHORIZATION', query_parameter='include_void_receipts'),
                 source='BRIDGE_PERSISTED_RECORDS', broker_event_completeness='UNSUPPORTED',
                 atomic_financial_snapshot='UNSUPPORTED', final_order_fees='UNSUPPORTED',
                 native_history='UNSUPPORTED', restore_lineage_proof='UNSUPPORTED',
@@ -84,22 +87,29 @@ class EvidenceCursors(object):
 
 
 def evidence_page(meta, rows, after, high, limit):
-    """Check the requested remaining range, not only the returned page."""
+    """Prove only the returned continuous prefix; never scan or skip the remaining range."""
     retained = meta['retained_from']
     if high > meta['high_watermark'] or after > high:
         raise OrderError(409, 'EVIDENCE_ROLLBACK_OR_INVALID_RANGE', 'journal watermark regressed or range is invalid')
     if after < retained - 1:
         raise OrderError(409, 'EVIDENCE_RETENTION_GAP', 'requested range precedes retained journal')
-    if meta['range_count'] != max(0, high - after):
-        raise OrderError(409, 'EVIDENCE_JOURNAL_GAP', 'requested journal range has missing events')
-    page = rows[:limit]
+    page = []
+    through = after
+    for row in rows[:limit]:
+        if row['event_id'] != through + 1 or row['event_id'] > high:
+            break
+        page.append(row)
+        through = row['event_id']
+    if not page and after < high:
+        raise OrderError(409, 'EVIDENCE_JOURNAL_GAP', 'next journal event is missing; no sequence was skipped')
     return dict(evidence_version=1, source='BRIDGE_PERSISTED_RECORDS', stream_id=meta['stream_id'],
                 stream_identity_origin='DATABASE_GENERATED', authenticity='DEPLOYMENT_TRUST_REQUIRED',
                 account_id=meta['account_id'], account_type=meta['account_type'],
                 executor_epoch=meta['executor_epoch'], executor_instance=meta['executor_instance'],
                 retained_from=retained, high_watermark=high,
-                coverage=dict(after_exclusive=after, through_inclusive=high, journal_contiguous=True,
+                coverage=dict(validation_version=2, validation_scope='RETURNED_PAGE',
+                              after_exclusive=after, through_inclusive=through, journal_contiguous=True,
                               start_origin='CLIENT_REQUESTED_BOUND_ONLY',
                               broker_complete='unknown', provable_broker_dates=None),
                 restore_lineage_proof='unsupported', events=page,
-                next_after=page[-1]['event_id'] if page else after, has_more=len(rows) > limit)
+                next_after=through, has_more=through < high)

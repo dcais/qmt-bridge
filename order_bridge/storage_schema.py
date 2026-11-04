@@ -173,8 +173,40 @@ def repo_check_storage_schema(cur, schema, expected_version=5):
         actual.setdefault(table, {})[column] = (kind, bool(not_null), generated or "", expression)
     if "version" in actual.get("schema_version", {}):
         cur.execute("SELECT version FROM " + schema + ".schema_version")
-        if [row[0] for row in cur.fetchall()] != [expected_version]:
+        versions = [row[0] for row in cur.fetchall()]
+        if expected_version is None and versions in ([5], [6]):
+            expected_version = versions[0]
+        if versions != [expected_version]:
             raise OrderError(503, "SCHEMA_VERSION_MISMATCH", "unsupported order schema version")
+    if expected_version is None:
+        raise repo_storage_error("missing required schema version")
+    if expected_version == 6:
+        if actual.get('account_runtime', {}).get('event_journal_write_mode', ())[:2] != ('text', True) or (
+                actual.get('order_events', {}).get('base_event_seq', ())[:2] != ('bigint', False)):
+            raise repo_storage_error("missing journal storage columns")
+        if actual.get('order_events', {}).get('storage_stream_id', ())[:2] != ('uuid', False):
+            raise repo_storage_error("missing per-event stream identity")
+        cur.execute("""SELECT pg_get_constraintdef(con.oid), con.convalidated AND con.confrelid=con.conrelid
+                FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname=%s AND c.relname='order_events' AND con.conname='order_event_base_fk'""", (schema_name,))
+        fk = cur.fetchone()
+        if not fk or not fk[1] or not fk[0].startswith(
+                'FOREIGN KEY (account_type, account_id, order_id, storage_stream_id, base_event_seq) REFERENCES ') or (
+                '(account_type, account_id, order_id, storage_stream_id, event_seq) ON DELETE RESTRICT' not in fk[0]):
+            raise repo_storage_error("missing journal baseline protection")
+        cur.execute("""SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname='order_events'
+                AND t.tgname='order_events_no_update'""", (schema_name,))
+        if cur.fetchone() not in (('O',), ('A',)):
+            raise repo_storage_error("missing journal immutability trigger")
+        if actual.get('account_runtime', {}).get('evidence_stream_id', ())[:2] != ('uuid', True):
+            raise repo_storage_error("missing immutable journal stream")
+        cur.execute("""SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname='account_runtime'
+                AND t.tgname='order_event_stream_guard'""", (schema_name,))
+        if cur.fetchone() not in (('O',), ('A',)):
+            raise repo_storage_error("missing journal stream protection")
     for table, columns in repo_SCHEMA_COLUMNS.items():
         if table == "submission_bans" and expected_version < 5:
             continue

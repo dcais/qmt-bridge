@@ -20,6 +20,7 @@ from service.ipc_bridge.ipc_protocol.order_common import OrderError, iso_datetim
 from service.ipc_bridge.order.repository import PostgresRepository  # noqa: E402
 from service.ipc_bridge.order.state import recompute_order  # noqa: E402
 from tools.order_schema import initialize_schema  # noqa: E402
+from service.ipc_bridge.order.event_correction import append_broker_correction_notice  # noqa: E402
 
 
 ENV_CONFIG = {"pg_host": "PG_HOST", "pg_port": "PG_PORT",
@@ -126,7 +127,7 @@ def resolve(repo, args):
         obs_ids, order_ids, task_ids = [], [], []
 
     audit = {"operator": getpass.getuser(), "reason": args.reason,
-             "evidence_sha256": digest, "evidence": evidence,
+             "evidence_sha256": digest, "evidence": evidence, "evidence_reference": str(args.evidence_file.resolve()),
              "expected_version": args.expected_version, "resolution": args.resolution,
              "observation_ids": obs_ids, "qmt_order_ids": order_ids,
              "qmt_task_ids": task_ids, "at": iso_datetime()}
@@ -158,7 +159,24 @@ def resolve(repo, args):
             "evidence_sha256": digest}
 
 
+def broker_correction_notice(repo, args):
+    payload = args.evidence_file.read_bytes()
+    if not 0 < len(payload) <= 1048576:
+        raise ValueError('correction evidence must contain 1..1048576 original bytes')
+    source_bytes = args.source_ref_file.read_bytes()
+    if not 0 < len(source_bytes) <= 16384:
+        raise ValueError('immutable source reference must contain 1..16384 bytes')
+    source_ref = json.loads(source_bytes.decode('utf-8-sig'))
+    if not isinstance(source_ref, dict):
+        raise ValueError('source reference must be a JSON object')
+    return append_broker_correction_notice(repo, args.order_id, args.expected_version, args.notice_id, source_ref,
+        args.reason.strip(), dict(reference=str(args.evidence_file.resolve()), sha256=hashlib.sha256(payload).hexdigest()),
+        getpass.getuser(), apply=args.apply)
+
+
 def execute(repo, args):
+    if args.command == "correction-notice":
+        return broker_correction_notice(repo, args)
     if args.command == "schema":
         if args.action == "init":
             return initialize_schema(repo)
@@ -228,6 +246,14 @@ def parser():
     resolution.add_argument("--observation-id", action="append", type=int)
     resolution.add_argument("--qmt-order-id", action="append")
     resolution.add_argument("--qmt-task-id", action="append")
+    notice = commands.add_parser('correction-notice', help='append an unverified broker correction notice; never revise fills')
+    notice.add_argument('--order-id', required=True)
+    notice.add_argument('--expected-version', required=True, type=int)
+    notice.add_argument('--notice-id', required=True)
+    notice.add_argument('--source-ref-file', required=True, type=Path)
+    notice.add_argument('--evidence-file', required=True, type=Path)
+    notice.add_argument('--reason', required=True)
+    notice.add_argument('--apply', action='store_true')
     return root
 
 

@@ -22,7 +22,7 @@ from .order.service import OrderService
 
 ORDER_METHODS = set(ORDER_QUERIES) | {
     "submit_order", "cancel_order", "order", "orders", "order_events", "capabilities",
-    "order_events_evidence_v1", "recovery_evidence_v1", "order_fee_evidence_v1", "health"}
+    "order_events_evidence_v1", "order_events_compact_v1", "order_event_source_v1", "recovery_evidence_v1", "order_fee_evidence_v1", "health"}
 MAX_BODY_BYTES = 1024 * 1024
 
 

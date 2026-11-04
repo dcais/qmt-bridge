@@ -957,6 +957,13 @@ class PostgresRepositoryTests(unittest.TestCase):
 
 
     def manual_fixture(self, client="manual"):
+        # New append-only manual repair requires a durable original stream identity.
+        # This migration is scoped to this test's explicitly isolated schema only.
+        def evidence_scope(cur):
+            cur.execute('ALTER TABLE ' + self.repo.repo_s + '.account_runtime ADD COLUMN IF NOT EXISTS evidence_stream_id uuid')
+            cur.execute('UPDATE ' + self.repo.repo_s + '.account_runtime SET evidence_stream_id=COALESCE(evidence_stream_id,%s::uuid) '
+                        'WHERE account_type=%s AND account_id=%s', (str(uuid.uuid4()),) + self.repo.repo_scope)
+        self.repo.repo_run(evidence_scope)
         doc = self.order(client)
         doc = self.repo.update_order(doc["order_id"], "UNKNOWN", lambda row: row.update(submission_status="UNKNOWN"))
         raw = {"account_id": "test-account", "qmt_order_id": "manual-qmt", "symbol": "510300.SH", "side": "BUY",

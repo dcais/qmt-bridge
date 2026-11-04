@@ -11,7 +11,7 @@ import tokenize
 from pathlib import Path
 
 
-MODULES = ("common", "lof_catalog", "contracts", "state", "storage_schema", "evidence", "repository", "qmt", "async_log", "background", "runtime", "http")
+MODULES = ("common", "lof_catalog", "contracts", "state", "storage_schema", "evidence", "compact_events", "sequence_void", "event_correction", "journal_storage", "repository", "qmt", "async_log", "background", "runtime", "http")
 ROOT = Path(__file__).resolve().parents[1]
 TIMESTAMP = re.compile(r"^# Last modified \(Asia/Shanghai\): .*?$", re.MULTILINE)
 ENCODING = re.compile(r"^[ \t]*#.*?coding[:=][ \t]*[-\w.]+.*(?:\n|$)", re.MULTILINE)
