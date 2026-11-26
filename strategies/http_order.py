@@ -1,5 +1,5 @@
 # -*- coding: gbk -*-
-# Last modified (Asia/Shanghai): 2026-11-03 15:42:58
+# Last modified (Asia/Shanghai): 2026-11-26 22:11:21
 
 # ---- order_bridge/common.py ----
 # QMT ORDER 运行参数（策略编辑器右侧“参数设置”，修改后停止并重新运行策略）
@@ -949,15 +949,75 @@ def state_fill_cent_precision(doc, previous, raw, source):
         return False
 
 
+def state_deal_derived_alias(doc, previous, raw, source):
+    """Recognize a scoped market_sysid alias on a deal when native refs already exist."""
+    known_raw = previous.get('raw') or {}
+    if source not in ('query', 'callback') or doc.get('account_type') != 'STOCK':
+        return False
+    ids, known = observation_identifiers('deal', raw), observation_identifiers('deal', known_raw)
+    scope = ('account_id', 'trading_day', 'market', 'trade_id', 'qmt_order_id', 'symbol', 'side')
+    if (not observation_identity_valid('deal', known_raw, known)
+            or ids['market'] not in ('SH', 'SZ')
+            or any(not ids[key] or ids[key] != known[key] or ids[key] != previous.get(key) for key in scope)
+            or ids['account_id'] != doc.get('account_id')
+            or len([row for row in doc['fills'] if row['fill_key'] == previous['fill_key']]) != 1):
+        return False
+    return (raw.get('m_nRef') in (None, '', 0, '0')
+            and raw.get('m_strOrderRef') == ids['market'] + '_' + ids['qmt_order_id']
+            and bool(state_id(known_raw.get('m_nRef')))
+            and bool(state_id(known_raw.get('m_strOrderRef'))))
+
+
+def state_stripped_terminal_tags(raw, known_raw):
+    """Recognize post-reconnect stripped local terminal metadata tags."""
+    required_keys = ('m_nTaskId', 'm_strRemark', 'm_strSource', 'm_strOrderStrategyType', 'm_strXTTrade')
+    if any(key not in raw or key not in known_raw for key in required_keys):
+        return False
+    return (raw.get('m_nTaskId') in (-1, '-1')
+            and raw.get('m_strRemark') == ''
+            and raw.get('m_strSource') == ''
+            and raw.get('m_strOrderStrategyType') == ''
+            and raw.get('m_strXTTrade') == '其他终端')
+
+
+def state_deal_stripped_terminal_metadata(doc, previous, raw, source):
+    """Recognize QMT post-reconnect deal replay where local terminal tags are stripped."""
+    known_raw = previous.get('raw') or {}
+    if source not in ('query', 'callback') or doc.get('account_type') != 'STOCK':
+        return False
+    ids, known = observation_identifiers('deal', raw), observation_identifiers('deal', known_raw)
+    scope = ('account_id', 'trading_day', 'market', 'trade_id', 'qmt_order_id', 'symbol', 'side')
+    if (not observation_identity_valid('deal', known_raw, known)
+            or ids['market'] not in ('SH', 'SZ')
+            or any(not ids[key] or ids[key] != known[key] or ids[key] != previous.get(key) for key in scope)
+            or ids['account_id'] != doc.get('account_id')
+            or not known['remark'] or known['remark'] != doc.get('remark')
+            or not known['qmt_task_id']
+            or len([row for row in doc['fills'] if row['fill_key'] == previous['fill_key']]) != 1):
+        return False
+    return state_stripped_terminal_tags(raw, known_raw)
+
+
 def state_fill_observation_equivalent(doc, previous, raw, source, amount):
     known_raw = previous.get('raw') or {}
     cent_precision = state_fill_cent_precision(doc, previous, raw, source)
     if not state_amount_equivalent(previous['amount'], amount) and not cent_precision:
         return False
+    stripped_terminal = state_deal_stripped_terminal_metadata(doc, previous, raw, source)
+    derived_alias = state_deal_derived_alias(doc, previous, raw, source) and (
+        stripped_terminal
+        or (observation_identifiers('deal', raw).get('remark') == previous.get('remark')
+            and observation_identifiers('deal', raw).get('qmt_task_id') == previous.get('qmt_task_id')))
+    ignored = {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}
+    if derived_alias:
+        ignored.update(('m_nRef', 'm_strOrderRef'))
+    if stripped_terminal:
+        ignored.update(('m_nTaskId', 'm_strRemark', 'm_strSource', 'm_strOrderStrategyType', 'm_strXTTrade'))
     amounts = {'amount', 'filled_amount', 'm_dTradeAmount'}
+    float_prices = {'m_dPrice', 'm_dTradedPrice'}
     for key in set(known_raw) | set(raw):
         # Commission is retained as raw evidence, never an execution gate.
-        if key in {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}:
+        if key in ignored:
             continue
         if key not in known_raw or key not in raw:
             return False
@@ -969,15 +1029,20 @@ def state_fill_observation_equivalent(doc, previous, raw, source, amount):
                     and state_nonnegative_decimal(right) == amount):
                 continue
             return False
+        if key in float_prices:
+            left_dec, right_dec = state_nonnegative_decimal(left), state_nonnegative_decimal(right)
+            if left_dec is not None and right_dec is not None and state_float_representation_equal(left_dec, right_dec):
+                continue
+            return False
         if fingerprint(left) != fingerprint(right):
             return False
     return True
 
 
 def state_query_order_alias(raw, source):
-    """Only a query's zero/missing-ref market_sysid form is a derived reference."""
+    """Recognize zero/missing-ref market_sysid derived reference from query or callback."""
     ids = observation_identifiers('order', raw)
-    return (source == 'query' and observation_identity_valid('order', raw, ids)
+    return (source in ('query', 'callback') and observation_identity_valid('order', raw, ids)
             and raw.get('m_nRef') in (None, '', 0, '0')
             and ids['market'] in ('SH', 'SZ') and bool(ids['qmt_order_id'])
             and raw.get('m_strOrderRef') == ids['market'] + '_' + ids['qmt_order_id'])
@@ -995,21 +1060,37 @@ def state_native_order_references(row):
 def state_equivalent_query_order(doc, row, raw, source):
     """Recognize only uniquely scoped duplicate snapshots, in either arrival order."""
     known_raw = row.get('raw') or {}
+    ids, known = observation_identifiers('order', raw), observation_identifiers('order', known_raw)
     incoming_alias = state_query_order_alias(raw, source)
     known_alias = state_query_order_alias(known_raw, row.get('source'))
-    if not incoming_alias and not (known_alias and source == 'callback'
+    stripped_terminal = (
+        source == 'query'
+        and doc.get('account_type') == 'STOCK'
+        and observation_identity_valid('order', known_raw, known)
+        and ids['market'] in ('SH', 'SZ')
+        and bool(known['remark']) and known['remark'] == doc.get('remark')
+        and bool(known['qmt_task_id']) and known['qmt_task_id'] == row.get('qmt_task_id')
+        and ids['remark'] is None
+        and ids['qmt_task_id'] is None
+        and state_stripped_terminal_tags(raw, known_raw)
+    )
+    if not incoming_alias and not stripped_terminal and not (known_alias and source == 'callback'
                                    and state_id(raw.get('m_nRef'))
                                    and state_id(raw.get('m_strOrderRef'))):
         return False
     if incoming_alias and not known_alias and not all(state_native_order_references(row)):
         return False
-    ids, known = observation_identifiers('order', raw), observation_identifiers('order', known_raw)
-    scope = ('account_id', 'trading_day', 'market', 'qmt_order_id', 'remark', 'symbol', 'side')
+    scope = ('account_id', 'trading_day', 'market', 'qmt_order_id', 'symbol', 'side')
     if (not observation_identity_valid('order', known_raw, known)
             or any(not ids[key] or ids[key] != known[key] or ids[key] != row.get(key) for key in scope)
-            or ids['account_id'] != doc.get('account_id') or ids['remark'] != doc.get('remark')
-            or ((ids['qmt_task_id'] or known['qmt_task_id'] or row.get('qmt_task_id'))
-                and not ids['qmt_task_id'] == known['qmt_task_id'] == row.get('qmt_task_id'))):
+            or ids['account_id'] != doc.get('account_id')):
+        return False
+    if not stripped_terminal and (
+        not ids['remark'] or ids['remark'] != known['remark']
+        or ids['remark'] != row.get('remark') or ids['remark'] != doc.get('remark')
+        or ((ids['qmt_task_id'] or known['qmt_task_id'] or row.get('qmt_task_id'))
+            and not ids['qmt_task_id'] == known['qmt_task_id'] == row.get('qmt_task_id'))
+    ):
         return False
     candidates = [candidate for candidate in doc['qmt_orders']
                   if candidate.get('qmt_order_id') == ids['qmt_order_id']
@@ -1020,13 +1101,25 @@ def state_equivalent_query_order(doc, row, raw, source):
         return False
     # Time and strategy-type representations are retained in the observation log,
     # but never used as identity evidence. Every other raw field must agree.
-    ignored = {'m_nRef', 'm_strOrderRef', 'm_nOrderStrategyType', 'm_strInsertTime'}
+    ignored = {'m_nOrderStrategyType', 'm_strInsertTime'}
+    if incoming_alias or (known_alias and source == 'callback'):
+        ignored.update(('m_nRef', 'm_strOrderRef'))
+    if stripped_terminal:
+        ignored.update(('m_nTaskId', 'm_strRemark', 'm_strSource', 'm_strOrderStrategyType', 'm_strXTTrade'))
     amounts = {'amount', 'filled_amount', 'm_dTradeAmount'}
+    float_prices = {'m_dTradedPrice', 'm_dPrice'}
     for key in set(raw) | set(known_raw):
         if key in ignored:
             continue
         if key in amounts:
             if not state_amount_equivalent(raw.get(key), known_raw.get(key)):
+                return False
+        elif key in float_prices and key in raw and key in known_raw:
+            left_dec, right_dec = state_nonnegative_decimal(raw.get(key)), state_nonnegative_decimal(known_raw.get(key))
+            if left_dec is None or right_dec is None or not state_float_representation_equal(left_dec, right_dec):
+                return False
+        elif key == 'm_nOpType' and stripped_terminal and key in raw and key in known_raw:
+            if raw.get(key) != known_raw.get(key) and raw.get(key) not in (2147483647, '2147483647'):
                 return False
         elif raw.get(key) != known_raw.get(key):
             return False
@@ -1199,7 +1292,7 @@ def apply_observation(doc, kind, raw, source, observed_at=None):
                 if not matching:
                     collection.append(record)
                 equivalent_query = kind == 'order' and state_equivalent_query_order(doc, record, raw, source)
-                if equivalent_query and source == 'query':
+                if equivalent_query and (source == 'query' or state_query_order_alias(raw, source)):
                     return False
                 old_status = record.get('status', 'UNKNOWN')
                 status = state_status(state_value(raw, 'status', 'execution_status', 'm_nOrderStatus') if kind == 'order'

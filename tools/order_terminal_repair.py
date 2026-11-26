@@ -27,7 +27,8 @@ from service.ipc_bridge.order.repository import PostgresRepository, repo_json, r
 from service.ipc_bridge.order.state import (apply_observation, observation_identifiers,
                                 mark_reconciled, reconcile_pending, recompute_order,
                                 state_execution_finished, state_reconciliation_facts,
-                                is_order_active, state_value, state_fill_cent_precision)  # noqa: E402
+                                is_order_active, state_value, state_fill_cent_precision,
+                                state_float_representation_equal, state_nonnegative_decimal)  # noqa: E402
 from tools.order_admin import config_from_args  # noqa: E402
 from service.ipc_bridge.order.event_correction import correction_source_refs, correction_notice  # noqa: E402
 
@@ -193,11 +194,23 @@ def require_internal_document(doc):
             "complete internal order document is required")
 
 
+def is_stripped_terminal_observation(kind, raw):
+    required = ("m_nTaskId", "m_strRemark", "m_strSource", "m_strOrderStrategyType", "m_strXTTrade")
+    return (kind in ("deal", "order") and all(key in raw for key in required)
+            and raw.get("m_nTaskId") in (-1, "-1")
+            and raw.get("m_strRemark") == ""
+            and raw.get("m_strSource") == ""
+            and raw.get("m_strOrderStrategyType") == ""
+            and raw.get("m_strXTTrade") == "其他终端")
+
+
 def scoped_order(checkpoint, kind, raw):
     ids = observation_identifiers(kind, raw)
     require(kind in ("order", "deal"), "only order/deal query duplicates are supported")
+    stripped = is_stripped_terminal_observation(kind, raw)
     require(ids.get("account_id") == checkpoint["account_id"]
-            and ids.get("remark") == checkpoint["remark"], "query account or remark differs")
+            and (stripped or ids.get("remark") == checkpoint["remark"]),
+            "query account or remark differs")
     require(all(ids.get(key) for key in ("trading_day", "market", "qmt_order_id", "symbol", "side")),
             "query identity scope is missing")
     matches = [row for row in checkpoint["qmt_orders"] if all(
@@ -205,17 +218,27 @@ def scoped_order(checkpoint, kind, raw):
                                             "symbol", "side"))]
     require(len(matches) == 1, "query order scope is ambiguous or differs")
     order = matches[0]
-    require(ids.get("qmt_task_id") == order.get("qmt_task_id"), "query task identity differs")
+    if stripped:
+        require(bool(checkpoint.get("remark")) and bool(order.get("qmt_task_id")),
+                "stripped observation requires non-empty checkpoint remark and task identity")
+    else:
+        require(ids.get("qmt_task_id") == order.get("qmt_task_id"), "query task identity differs")
     items = [item for item in checkpoint["items"] if item.get("symbol") == ids["symbol"]
              and item.get("side") == ids["side"]]
     require(len(items) == 1 and items[0]["item_id"] == order.get("item_id"),
             "query item identity is ambiguous or differs")
-    return ids, order
+    return ids, order, stripped
 
 
 def prove_query_noop(checkpoint, kind, raw, source, observed_at, fill_precision=False):
-    require(source == "query", "newer observation is not a query")
-    ids, order = scoped_order(checkpoint, kind, raw)
+    ids, order, stripped = scoped_order(checkpoint, kind, raw)
+    alias = (raw.get("m_nRef") in (None, "", 0, "0")
+             and ids["market"] in ("SH", "SZ")
+             and raw.get("m_strOrderRef") == ids["market"] + "_" + ids["qmt_order_id"])
+    allowed_callback = ((kind == "order" and alias)
+                        or (kind == "deal" and (alias or stripped)))
+    require(source == "query" or (source == "callback" and allowed_callback),
+            "newer observation is not a query")
     known = order
     if kind == "deal":
         fills = [row for row in checkpoint["fills"] if row.get("fill_key") ==
@@ -227,15 +250,16 @@ def prove_query_noop(checkpoint, kind, raw, source, observed_at, fill_precision=
     require(isinstance(known_raw, dict) and known_raw, "checkpoint lacks original raw observation")
     references = (raw.get("m_nRef"), raw.get("m_strOrderRef"))
     native = (known_raw.get("m_nRef"), known_raw.get("m_strOrderRef"))
-    alias = (raw.get("m_nRef") in (0, "0") and
-             raw.get("m_strOrderRef") == ids["market"] + "_" + ids["qmt_order_id"])
     missing_ref = raw.get("m_nRef") in (0, "0") and raw.get("m_strOrderRef") == native[1]
     require(references == native or missing_ref or alias,
             "query references are neither original nor derived")
     ignored = {"m_nRef", "m_strOrderRef", "m_nOrderStrategyType"}
     if kind == "order":
         ignored.add("m_strInsertTime")
+    if stripped:
+        ignored.update(("m_nTaskId", "m_strRemark", "m_strSource", "m_strOrderStrategyType", "m_strXTTrade"))
     amount_fields = {"amount", "filled_amount", "m_dTradeAmount"}
+    float_price_fields = {"m_dPrice", "m_dTradedPrice"}
     cent_precision = (fill_precision and kind == "deal"
                       and state_fill_cent_precision(checkpoint, known, raw, source))
     if fill_precision and kind == "deal":
@@ -247,7 +271,16 @@ def prove_query_noop(checkpoint, kind, raw, source, observed_at, fill_precision=
         # and query; permit representation noise only, not a changed fee.
         tolerance = (Decimal("0.001") if key in amount_fields else
                      Decimal("0.000000000001") if key in ("m_dCommission", "m_dComssion") else None)
-        if tolerance is None:
+        if tolerance is None and key in float_price_fields and key in raw and key in known_raw:
+            left_dec = state_nonnegative_decimal(raw.get(key))
+            right_dec = state_nonnegative_decimal(known_raw.get(key))
+            same = (left_dec is not None and right_dec is not None
+                    and state_float_representation_equal(left_dec, right_dec))
+        elif (tolerance is None and key == "m_nOpType" and kind == "order" and stripped
+              and key in raw and key in known_raw):
+            same = (raw.get(key) == known_raw.get(key)
+                    or raw.get(key) in (2147483647, "2147483647"))
+        elif tolerance is None:
             same = raw.get(key) == known_raw.get(key)
         else:
             try:
@@ -344,7 +377,8 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
     require(checkpoint.get("order_id") == current.get("order_id") and successful_terminal(checkpoint),
             "checkpoint is not a complete terminal order")
     validate_internal_checkpoint(checkpoint)
-    require(current.get("reconciliation_complete") is False and current.get("sync_status") == "INCOMPLETE",
+    require(current.get("sync_status") == "INCOMPLETE" and current.get("reconcile_pending") is True
+            and bool(current.get("unassociated_evidence")),
             "current order is not the reopened INCOMPLETE state")
     uniqueness = validate_unique_order_scope(checkpoint, account_orders)
     expected = equivalent_facts(checkpoint)
@@ -361,14 +395,16 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
                 "business facts changed at seq {}".format(event_seq))
         require(doc.get("terminal_reconciliation_checkpoint") == checkpoint.get("terminal_reconciliation_checkpoint"),
                 "historical internal terminal checkpoint changed")
-        require(doc.get("fact_version") == previous.get("fact_version", 0) + (event_kind == "RECONCILE_GAP"),
-                "fact version changed outside approved query/gap events")
-        require(doc["version"] > previous["version"], "event document version is not increasing")
         old, new = previous["unassociated_evidence"], doc["unassociated_evidence"]
         require(new[:len(old)] == old, "existing evidence changed or disappeared")
         added = new[len(old):]
         require(bool(added) == (event_kind == "QMT_OBSERVATION"),
                 "QMT_OBSERVATION must add only approved equivalent evidence")
+        fv_delta = 1 if (event_kind == "RECONCILE_GAP" or (
+            event_kind == "QMT_OBSERVATION" and any(row.get("source") != "query" for row in added))) else 0
+        require(doc.get("fact_version") == previous.get("fact_version", 0) + fv_delta,
+                "fact version changed outside approved query/gap events")
+        require(doc["version"] > previous["version"], "event document version is not increasing")
         for evidence in added:
             proof = prove_equivalent_evidence(checkpoint, evidence, observations,
                                               fill_precision=fill_precision)
@@ -396,6 +432,7 @@ def validate_equivalent(current, events, observations, checkpoint_seq, account_o
                 "raw observation is associated with a colliding order")
             continue
         stamp = iso_datetime(observed_at) if not isinstance(observed_at, str) else observed_at
+        require(applied is True, "pending unapplied observation {} blocks repair".format(observation_id))
         prove_query_noop(checkpoint, obs_kind, raw, source, stamp, fill_precision=fill_precision)
         checked.append({"observation_id": observation_id, "kind": obs_kind, "source": source,
                         "applied": applied, "order_id": order_id, "equivalent": True,

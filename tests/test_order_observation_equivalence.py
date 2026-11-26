@@ -152,8 +152,16 @@ class ObservationEquivalenceTests(unittest.TestCase):
                     self.assertTrue(doc['reconcile_pending'])
                     self.assertIn(closed['qmt_orders'][0], doc['qmt_orders'])
             doc = copy.deepcopy(closed)
-            self.assertTrue(state.apply_observation(doc, 'order', alias, 'callback'))
-            self.assertEqual(doc['unassociated_evidence'][0]['reason'], 'CONFLICTING_ORDER_REFERENCE')
+            self.assertFalse(state.apply_observation(doc, 'order', alias, 'callback'))
+            self.assertEqual(doc, closed)
+            for bad_callback in (
+                dict(alias, m_strOrderRef='OTHER_11127'),
+                dict(alias, m_dTradedPrice=8.48),
+                dict(alias, m_nOrderStatus=54),
+            ):
+                bad_doc = copy.deepcopy(closed)
+                self.assertTrue(state.apply_observation(bad_doc, 'order', bad_callback, 'callback'))
+                self.assertEqual(bad_doc['unassociated_evidence'][0]['reason'], 'CONFLICTING_ORDER_REFERENCE')
 
     def test_ambiguous_child_or_item_cannot_use_alias_exception(self):
         for state in self.states():
@@ -193,6 +201,46 @@ class ObservationEquivalenceTests(unittest.TestCase):
                 self.assertTrue(state.apply_observation(doc, 'order', dict(original, **mutation), 'callback'))
                 self.assertTrue(doc['unassociated_evidence'])
                 self.assertFalse(doc['reconciliation_complete'])
+
+    def test_stripped_terminal_order_query_with_op_sentinel_and_alias_are_equivalent(self):
+        stripped_tags = {
+            'm_nTaskId': -1,
+            'm_strRemark': '',
+            'm_strSource': '',
+            'm_strOrderStrategyType': '',
+            'm_strXTTrade': '其他终端',
+        }
+        for state in self.states():
+            closed, unused, alias, unused_fill = self.closed(state)
+            for src in (closed, alias):
+                src['m_nTaskId'] = 17
+                src['m_strRemark'] = closed['remark']
+                src['m_strSource'] = 'IPC_ORDER'
+                src['m_strOrderStrategyType'] = '函数下单'
+                src['m_strXTTrade'] = '本终端'
+                src['m_nOpType'] = 24
+            base_raw = dict(closed['qmt_orders'][0]['raw'],
+                            m_nTaskId=17,
+                            m_strRemark=closed['remark'],
+                            m_strSource='IPC_ORDER',
+                            m_strOrderStrategyType='函数下单',
+                            m_strXTTrade='本终端',
+                            m_nOpType=24)
+            closed['qmt_orders'][0]['qmt_task_id'] = '17'
+            closed['qmt_orders'][0]['raw'] = dict(base_raw)
+            closed['account_type'] = 'STOCK'
+
+            for variant in (
+                dict(base_raw, m_nOpType=2147483647, **stripped_tags),
+                dict(base_raw, m_nRef=0, m_strOrderRef='SH_11127', m_nOpType=2147483647, **stripped_tags),
+            ):
+                doc = copy.deepcopy(closed)
+                self.assertFalse(state.apply_observation(doc, 'order', variant, 'query'))
+                self.assertEqual(doc, closed)
+
+            bad = dict(base_raw, m_nOpType=23, **stripped_tags)
+            bad_doc = copy.deepcopy(closed)
+            self.assertFalse(state.state_equivalent_query_order(bad_doc, bad_doc['qmt_orders'][0], bad, 'query'))
 
 
 if __name__ == '__main__':

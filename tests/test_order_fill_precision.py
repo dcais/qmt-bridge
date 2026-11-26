@@ -266,6 +266,46 @@ class FillPrecisionTests(unittest.TestCase):
             self.assertEqual(restored, before)
             self.assertFalse(state.reconcile_pending(restored))
 
+    def test_deal_derived_alias_and_stripped_terminal_metadata_are_equivalent(self):
+        for state in self.modules():
+            doc = document()
+            doc['account_type'] = 'STOCK'
+            raw_order = dict(order(status=56, filled=300, quantity=300),
+                             m_nRef=1090551164, m_strOrderRef='9215126258110137097',
+                             m_strAccountID=doc['account_id'], m_strRemark=doc['remark'], m_nTaskId=17)
+            state.apply_observation(doc, 'order', raw_order, 'callback')
+            native_deal = dict(deal('50061664', 300, '30301.2'),
+                               m_nRef=1090551164, m_strOrderRef='9215126258110137097',
+                               m_strAccountID=doc['account_id'], m_strRemark=doc['remark'],
+                               m_nTaskId=17, m_dPrice=101.004,
+                               m_strSource='IPC_ORDER', m_strOrderStrategyType='函数下单',
+                               m_strXTTrade='本终端', m_nOrderStrategyType=555157360)
+            state.apply_observation(doc, 'deal', native_deal, 'callback')
+            state.mark_reconciled(doc, now='2026-11-26T05:42:35Z')
+            closed = copy.deepcopy(doc)
+
+            query_alias = dict(native_deal, m_nRef=0, m_strOrderRef='SH_o1',
+                               m_nOrderStrategyType=282386400)
+            stripped_cb = dict(native_deal, m_nTaskId=-1, m_strRemark='', m_strSource='',
+                               m_strOrderStrategyType='', m_strXTTrade='其他终端',
+                               m_nOrderStrategyType=0)
+            stripped_query = dict(stripped_cb, m_nOrderStrategyType=404269136)
+            stripped_alias = dict(stripped_query, m_nRef=0, m_strOrderRef='SH_o1')
+            for src, payload in (('query', query_alias), ('callback', stripped_cb),
+                                 ('query', stripped_query), ('query', stripped_alias)):
+                candidate = copy.deepcopy(closed)
+                self.assertFalse(state.apply_observation(candidate, 'deal', payload, src))
+                self.assertEqual(candidate, closed)
+
+            # Negative cases must still quarantine.
+            for bad_change in ({'m_strRemark': 'other-remark'}, {'m_nTaskId': 99},
+                               {'m_dPrice': 101.005}, {'m_strOrderRef': 'SZ_o1'},
+                               {'m_strXTTrade': '本终端'}):
+                candidate = copy.deepcopy(closed)
+                self.assertTrue(state.apply_observation(
+                    candidate, 'deal', dict(stripped_cb, **bad_change), 'callback'))
+                self.assertTrue(candidate['unassociated_evidence'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -559,6 +559,12 @@ class EquivalentObservationRepairTests(unittest.TestCase):
                     "2026-09-29T00:00:00+00:00", False, owner))
                 with self.assertRaises((OrderError, ValueError)):
                     tool.repair(self.repo, self.args)
+        self.setUp()
+        bad_callback = {**self.repo.observations[1][2], "m_strOrderRef": "OTHER_xt1090519043"}
+        self.repo.observations.append((999, "order", bad_callback, "callback",
+            "2026-09-29T00:00:00+00:00", True, "order-1"))
+        with self.assertRaises((OrderError, ValueError)):
+            tool.repair(self.repo, self.args)
 
     def test_every_query_raw_economics_checked_even_when_apply_is_noop(self):
         for kind, changes in (
@@ -797,6 +803,92 @@ class FillPrecisionObservationRepairTests(unittest.TestCase):
         self.assertFalse(args.resolve_equivalent_observations)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             tool.parser().parse_args(argv + ["--resolve-equivalent-observations"])
+
+    def test_callback_alias_stripped_deal_float_noise_and_reconciled_incomplete_repair(self):
+        _, old_events = snapshots("FILLED")
+        checkpoint = old_events[0][3]
+        checkpoint.update(account_type="STOCK", unassociated_evidence=[], resolved_evidence=[])
+        raw = {"account_id": "account-1", "remark": "qbtest", "qmt_order_id": "xt1090519043",
+               "qmt_task_id": "17", "trading_day": "20260926", "market": "SH",
+               "symbol": "511880.SH", "side": "BUY", "quantity": 100, "filled_quantity": 100,
+               "status": "FILLED", "m_dTradedPrice": 101.00399999999999, "m_dTradeAmount": 10100.4,
+               "m_dPrice": 101.004, "m_dCommission": 0.21, "m_dComssion": 0.21,
+               "m_nRef": 1090551164, "m_strOrderRef": "native-1090", "m_strInsertTime": "131052",
+               "m_nTaskId": 17, "m_strRemark": "qbtest", "m_strSource": "IPC_ORDER",
+               "m_strOrderStrategyType": "函数下单", "m_strXTTrade": "本终端",
+               "m_nOrderStrategyType": 555157360, "m_nOpType": 24}
+        row = checkpoint["qmt_orders"][0]
+        row.update({key: value for key, value in tool.observation_identifiers("order", raw).items()})
+        row.update(raw=copy.deepcopy(raw), source="callback", native_ref="1090551164",
+                   native_order_ref="native-1090", observed_at="2026-09-26T14:53:00+00:00")
+        fill = checkpoint["fills"][0]
+        fill.update(account_id="account-1", remark="qbtest", symbol="511880.SH", side="BUY",
+                    qmt_task_id="17", raw={**raw, "trade_id": "trade-1", "amount": "10100.4"})
+        checkpoint["fills"][0]["amount"] = "10100.4"
+        mark_reconciled(checkpoint, now=checkpoint["last_reconciled_at"])
+        events = [(5, "RECONCILE_STATE_CHANGED", "2026-09-26T14:54:00+00:00", checkpoint)]
+        observations = []
+        previous = checkpoint
+        ue_specs = (
+            (6, "order", "callback", "CONFLICTING_ORDER_REFERENCE",
+             {**raw, "m_nRef": 0, "m_strOrderRef": "SH_xt1090519043",
+              "m_strInsertTime": "131118", "m_dTradedPrice": 101.004}, 1),
+            (7, "deal", "query", "CONFLICTING_FILL_IDENTITY",
+             {**fill["raw"], "m_nRef": 0, "m_strOrderRef": "SH_xt1090519043",
+              "m_nOrderStrategyType": 282386400}, 0),
+            (8, "deal", "callback", "CONFLICTING_FILL_IDENTITY",
+             {**fill["raw"], "m_nTaskId": -1, "m_strRemark": "", "m_strSource": "",
+              "m_strOrderStrategyType": "", "m_strXTTrade": "其他终端",
+              "m_nOrderStrategyType": 0}, 1),
+        )
+        for seq, kind, source, reason, obs_raw, fv_delta in ue_specs:
+            stamp = "2026-09-28T00:00:0{}+00:00".format(seq)
+            evidence = {"kind": kind, "raw": obs_raw, "source": source, "reason": reason,
+                        "observed_at": stamp,
+                        "evidence_id": tool.fingerprint({"kind": kind, "raw": obs_raw, "reason": reason})}
+            doc = copy.deepcopy(previous)
+            doc["unassociated_evidence"].append(evidence)
+            doc.update(version=previous["version"] + 1,
+                       fact_version=previous["fact_version"] + fv_delta,
+                       reconciliation_complete=False,
+                       reconcile_requested=True, reconcile_priority=True)
+            recompute_order(doc)
+            events.append((seq, "QMT_OBSERVATION", stamp, doc))
+            observations.append((seq + 100, kind, obs_raw, source, stamp, True, "order-1"))
+            previous = doc
+        stripped_order_query = {**raw, "m_nTaskId": -1, "m_strRemark": "", "m_strSource": "",
+                                "m_strOrderStrategyType": "", "m_strXTTrade": "其他终端",
+                                "m_nOrderStrategyType": 0, "m_nOpType": 2147483647}
+        observations.append((199, "order", stripped_order_query, "query",
+                             "2026-09-28T00:00:11+00:00", True, "order-1"))
+        reconciled = copy.deepcopy(previous)
+        reconciled.update(version=previous["version"] + 1, reconciliation_complete=True,
+                          last_reconciled_at=checkpoint["last_reconciled_at"])
+        events.append((9, "RECONCILE_STATE_CHANGED", "2026-09-28T00:00:09+00:00", reconciled))
+        gap = copy.deepcopy(reconciled)
+        gap.update(version=reconciled["version"] + 1, fact_version=reconciled["fact_version"] + 1)
+        events.append((10, "RECONCILE_GAP", "2026-09-28T00:00:10+00:00", gap))
+
+        self.repo = Repo(copy.deepcopy(gap), events)
+        self.repo.observations = observations
+        bad_order_query = {**stripped_order_query, "m_nOpType": 23}
+        self.repo.observations.append((200, "order", bad_order_query, "query",
+                                       "2026-09-28T00:00:12+00:00", True, "order-1"))
+        self.args = SimpleNamespace(order_id="order-1", expected_version=gap["version"],
+                                    checkpoint_event_seq=5, reason="2026-11-26 alias & stripped deal repair",
+                                    evidence_out=self.path, apply=False,
+                                    resolve_equivalent_observations=True,
+                                    resolve_fill_precision_observations=False)
+        with self.assertRaisesRegex(OrderError, "changes audited facts"):
+            tool.repair(self.repo, self.args)
+        self.repo.observations.pop()
+        self.args.apply = True
+        result = tool.repair(self.repo, self.args)
+        self.assertEqual(result["execution_status"], "FILLED")
+        self.assertFalse(result["expected_active"])
+        self.assertFalse(self.repo.current["reconcile_pending"])
+        self.assertEqual(self.repo.current["sync_status"], "COMPLETE")
+        self.assertEqual(self.repo.current["unassociated_evidence"], [])
 
 
 if __name__ == "__main__":

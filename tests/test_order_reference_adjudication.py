@@ -80,6 +80,37 @@ class ReferenceAdjudicationTests(unittest.TestCase):
                     self.assertEqual(doc['fills'], closed['fills'])
                     self.assertTrue(all(row in doc['qmt_orders'] for row in closed['qmt_orders']))
 
+    def test_callback_derived_alias_with_float_traded_price_noise_is_equivalent(self):
+        for state in self.states():
+            doc = document()
+            original = dict(order(status=56, filled=100), m_nRef=1090551164,
+                            m_strOrderRef='9215126258110137097', m_strAccountID=doc['account_id'],
+                            m_strRemark=doc['remark'], m_nTaskId=17,
+                            m_strInsertTime='131052', m_dTradeAmount=20200.8,
+                            m_dTradedPrice=101.00399999999999, m_nOrderStrategyType=555157360)
+            state.apply_observation(doc, 'order', original, 'callback')
+            state.apply_observation(doc, 'deal', dict(deal(quantity=100, amount='20200.8'),
+                                                      m_nRef=1090551164, m_strOrderRef='9215126258110137097',
+                                                      m_strAccountID=doc['account_id'], m_strRemark=doc['remark'],
+                                                      m_nTaskId=17, m_dPrice=101.004,
+                                                      m_nOrderStrategyType=555157360), 'callback')
+            state.mark_reconciled(doc, now='2026-11-26T05:12:00Z')
+            closed = copy.deepcopy(doc)
+            callback_alias = dict(original, m_nRef=0, m_strOrderRef='SH_o1',
+                                  m_strInsertTime='131118', m_dTradedPrice=101.004)
+            query_alias = dict(callback_alias, m_nOrderStrategyType=1056947728)
+            for source, payload in (('callback', callback_alias), ('query', query_alias)):
+                with self.subTest(module=state.__name__, source=source):
+                    candidate = copy.deepcopy(closed)
+                    self.assertFalse(state.apply_observation(candidate, 'order', payload, source))
+                    self.assertEqual(candidate, closed)
+            # A real traded price change or non-alias reference still quarantines.
+            for bad_change in ({'m_dTradedPrice': 101.01}, {'m_strOrderRef': 'SZ_o1'}):
+                candidate = copy.deepcopy(closed)
+                self.assertTrue(state.apply_observation(
+                    candidate, 'order', dict(callback_alias, **bad_change), 'callback'))
+                self.assertTrue(candidate['unassociated_evidence'])
+
 
 if __name__ == '__main__':
     unittest.main()
