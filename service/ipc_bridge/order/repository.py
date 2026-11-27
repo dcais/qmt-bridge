@@ -312,11 +312,13 @@ class PostgresRepository(object):
             raise OrderError(404, "ORDER_NOT_FOUND", "order not found")
         return doc
 
-    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None, child_fields=None):
+    def repo_save(self, cur, doc, event_type, fresh=False, fact_source=None, child_fields=None, bump_version=True):
         # 先验证旧状态及所有目标投影；任何不一致均在本事务中拒绝。
         selected = set(repo_CHILD_TABLES.values()) if child_fields is None else set(child_fields)
         if not selected.issubset(set(repo_CHILD_TABLES.values())):
             raise repo_inconsistent("unknown child collection")
+        if not bump_version and (event_type is not None or selected):
+            raise repo_inconsistent("versionless save cannot mutate events or child records")
         cur.execute("SELECT document,created_at FROM " + self.repo_s + ".orders "
                     "WHERE account_type=%s AND account_id=%s AND order_id=%s FOR UPDATE",
                     self.repo_scope + (doc["order_id"],))
@@ -375,7 +377,7 @@ class PostgresRepository(object):
             doc["reconcile_pending"] = True
             doc["reconcile_priority"] = True
             doc["reconcile_due_at"] = repo_EPOCH
-        if not fresh:
+        if not fresh and bump_version:
             doc["version"] = int(doc.get("version", 0)) + 1
         doc["updated_at"] = iso_datetime()
         cancel_ready = bool(pending_cancellations(doc))
@@ -809,7 +811,7 @@ class PostgresRepository(object):
                 # 选中的订单至少在本轮归并结束前不会再次进入首页。
                 doc["reconcile_due_at"] = iso_datetime(utc_now() + timedelta(seconds=interval_seconds))
                 doc["reconcile_priority"] = False
-                self.repo_save(cur, doc, None, child_fields=())
+                self.repo_save(cur, doc, None, child_fields=(), bump_version=False)
                 docs.append(doc)
             next_cursor = None
             if len(rows) > limit and selected:
@@ -855,7 +857,17 @@ class PostgresRepository(object):
                                      if before.get(field) != doc.get(field))
             event_type = ("RECONCILE_STATE_CHANGED" if repo_reconcile_state(before) != repo_reconcile_state(doc)
                           else None)
-            self.repo_save(cur, doc, event_type, child_fields=changed_children)
+            noop_reconcile = (
+                event_type is None
+                and not changed_children
+                and before.get("reconcile_pending") == doc.get("reconcile_pending")
+                and before.get("reconciliation_complete") == doc.get("reconciliation_complete")
+                and before.get("last_reconciled_at") == doc.get("last_reconciled_at")
+                and before.get("sync_status") == doc.get("sync_status")
+                and before.get("execution_status") == doc.get("execution_status")
+                and before.get("reconcile_requested") == doc.get("reconcile_requested")
+            )
+            self.repo_save(cur, doc, event_type, child_fields=changed_children, bump_version=not noop_reconcile)
             return True
         return self.repo_run(finish, mutation=True)
 
@@ -887,6 +899,14 @@ class PostgresRepository(object):
                         and not doc.get("unassociated_evidence")):
                     continue
                 doc["last_reconcile_gap_since"] = since
+                if (
+                    doc.get("sync_status") == "INCOMPLETE"
+                    and doc.get("reconcile_pending")
+                    and doc.get("reconcile_requested")
+                    and doc.get("unassociated_evidence")
+                ):
+                    self.repo_save(cur, doc, None, child_fields=(), bump_version=False)
+                    continue
                 doc["reconcile_requested"] = True
                 self.repo_save(cur, doc, "RECONCILE_GAP")
                 marked += 1
@@ -961,33 +981,44 @@ class PostgresRepository(object):
     def replay_pending_observations(self, limit=100):
         return self.repo_run(lambda cur: self.repo_apply_pending(cur, limit), mutation=True)
 
+    @staticmethod
+    def observation_dedup_hashes(kind, source, raw):
+        legacy = fingerprint({"kind": kind, "source": source, "raw": raw})
+        if isinstance(raw, dict) and "m_nOrderStrategyType" in raw:
+            normalized = {k: v for k, v in raw.items() if k != "m_nOrderStrategyType"}
+            return fingerprint({"kind": kind, "source": source, "raw": normalized}), legacy
+        return legacy, legacy
+
     def ingest_observation(self, kind, raw, source="callback"):
         def ingest(cur):
-            digest = fingerprint({"kind": kind, "source": source, "raw": raw})
-            cur.execute("SELECT order_id FROM " + self.repo_s + ".qmt_observations "
-                        "WHERE account_type=%s AND account_id=%s AND observation_hash=%s", self.repo_scope + (digest,))
-            previous = cur.fetchone()
-            if previous is not None:
-                return self.repo_load(cur, previous[0]) if previous[0] else None
-            return self.repo_ingest_new_observation(cur, kind, raw, source, digest)
+            norm_hash, legacy_hash = self.observation_dedup_hashes(kind, source, raw)
+            for candidate in ((norm_hash,) if norm_hash == legacy_hash else (norm_hash, legacy_hash)):
+                cur.execute("SELECT order_id FROM " + self.repo_s + ".qmt_observations "
+                            "WHERE account_type=%s AND account_id=%s AND observation_hash=%s", self.repo_scope + (candidate,))
+                previous = cur.fetchone()
+                if previous is not None:
+                    return self.repo_load(cur, previous[0]) if previous[0] else None
+            return self.repo_ingest_new_observation(cur, kind, raw, source, norm_hash)
         return self.repo_run(ingest, mutation=True)
 
     def ingest_observations(self, kind, raws, source="query"):
         """单批复用事务，原始哈希判重后仍按输入顺序保存新增事实。"""
-        observations = [(fingerprint({"kind": kind, "source": source, "raw": raw}), raw) for raw in raws]
+        observations = [(*self.observation_dedup_hashes(kind, source, raw), raw) for raw in raws]
         if not observations:
             return 0
         def ingest(cur):
+            candidates = list(dict.fromkeys(h for norm_h, legacy_h, _ in observations for h in (norm_h, legacy_h)))
             cur.execute("SELECT observation_hash FROM " + self.repo_s + ".qmt_observations "
                         "WHERE account_type=%s AND account_id=%s AND observation_hash=ANY(%s)",
-                        self.repo_scope + (list(dict.fromkeys(digest for digest, raw in observations)),))
+                        self.repo_scope + (candidates,))
             seen = {row[0] for row in cur.fetchall()}
             inserted = 0
-            for digest, raw in observations:
-                if digest in seen:
+            for norm_hash, legacy_hash, raw in observations:
+                if norm_hash in seen or legacy_hash in seen:
                     continue
-                self.repo_ingest_new_observation(cur, kind, raw, source, digest)
-                seen.add(digest)
+                self.repo_ingest_new_observation(cur, kind, raw, source, norm_hash)
+                seen.add(norm_hash)
+                seen.add(legacy_hash)
                 inserted += 1
             return inserted
         return self.repo_run(ingest, mutation=True)

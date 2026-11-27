@@ -452,12 +452,21 @@ def repaired_candidate(current, checkpoint, proof, equivalent, fill_precision=Fa
     if equivalent:
         decisions = {row["evidence_id"]: row for row in proof["evidence_proofs"]}
         for evidence in candidate["unassociated_evidence"]:
-            resolved = copy.deepcopy(evidence)
-            resolved["resolution"] = {"kind": ("MANUAL_FILL_PRECISION_QUERY_OBSERVATION"
-                                               if fill_precision else "MANUAL_EQUIVALENT_QUERY_OBSERVATION"),
-                                      "order_id": current["order_id"],
-                                      "checkpoint_event_seq": proof["checkpoint_seq"],
-                                      **decisions[evidence["evidence_id"]]}
+            resolved = {
+                "evidence_id": evidence["evidence_id"],
+                "kind": evidence["kind"],
+                "source": evidence["source"],
+                "reason": evidence["reason"],
+                "observed_at": evidence["observed_at"],
+                "raw_sha256": fingerprint(evidence["raw"]),
+                "resolution": {
+                    "kind": ("MANUAL_FILL_PRECISION_QUERY_OBSERVATION"
+                             if fill_precision else "MANUAL_EQUIVALENT_QUERY_OBSERVATION"),
+                    "order_id": current["order_id"],
+                    "checkpoint_event_seq": proof["checkpoint_seq"],
+                    **decisions[evidence["evidence_id"]],
+                },
+            }
             candidate["resolved_evidence"].append(resolved)
         candidate["unassociated_evidence"] = []
     candidate["reconcile_priority"] = False

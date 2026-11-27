@@ -112,5 +112,17 @@ class ReferenceAdjudicationTests(unittest.TestCase):
                 self.assertTrue(candidate['unassociated_evidence'])
 
 
+    def test_duplicate_conflicting_order_reference_semantic_dedup_ignores_strategy_type(self):
+        for state in self.states():
+            closed, raw = self.reviewed(state)
+            bad1 = dict(raw, m_strOrderRef='UNREVIEWED_REF', m_nOrderStrategyType=111)
+            bad2 = dict(bad1, m_nOrderStrategyType=222)
+            doc = copy.deepcopy(closed)
+            self.assertTrue(state.apply_observation(doc, 'order', bad1, 'query'))
+            self.assertEqual(len(doc['unassociated_evidence']), 1)
+            self.assertFalse(state.apply_observation(doc, 'order', bad2, 'query'))
+            self.assertEqual(len(doc['unassociated_evidence']), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

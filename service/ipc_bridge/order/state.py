@@ -341,8 +341,15 @@ def state_equivalent_query_order(doc, row, raw, source):
 
 def state_evidence(doc, kind, raw, source, reason, observed_at):
     evidence = doc.setdefault('unassociated_evidence', [])
-    if kind == 'deal' and reason == 'CONFLICTING_FILL_IDENTITY':
-        ignored = {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}
+    if (
+        (kind == 'deal' and reason == 'CONFLICTING_FILL_IDENTITY')
+        or (kind == 'order' and reason == 'CONFLICTING_ORDER_REFERENCE')
+    ):
+        ignored = (
+            {'m_nOrderStrategyType', 'm_dCommission', 'm_dComssion', 'm_dComission'}
+            if kind == 'deal'
+            else {'m_nOrderStrategyType'}
+        )
         semantic = fingerprint({key: value for key, value in raw.items() if key not in ignored})
         for row in evidence:
             if (row.get('kind') == kind and row.get('source') == source and row.get('reason') == reason

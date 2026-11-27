@@ -250,3 +250,22 @@ def test_merge_cursor_advances_only_after_whole_batch_commits(modules):
     assert background.round['stage'] == 1
     assert background.round['waiting'] is False
     repo.ingest_observation.assert_not_called()
+
+
+def test_observation_dedup_ignores_strategy_type_and_honors_legacy_hashes(modules):
+    module, unused = modules
+    store = ObservationStore()
+    repo = repository(module, store)
+    first = dict(qmt_order_id='q1', trade_id='t1', m_nOrderStrategyType=1001, m_dTradeAmount=500.0)
+    noisy = dict(first, m_nOrderStrategyType=2002)
+    assert repo.ingest_observations('deal', [first, noisy], source='query') == 1
+    assert len(store.state['observations']) == 1
+    assert repo.ingest_observation('deal', noisy, source='query') is None
+
+    # Pre-existing legacy row hashed WITH m_nOrderStrategyType also prevents re-insert.
+    legacy_raw = dict(qmt_order_id='q2', trade_id='t2', m_nOrderStrategyType=3003)
+    store.state['observations'].append(dict(
+        id=99, scope=('STOCK', 'test-account'), kind='deal', source='query',
+        raw=legacy_raw, hash=module.fingerprint({'kind': 'deal', 'source': 'query', 'raw': legacy_raw})))
+    assert repo.ingest_observations('deal', [legacy_raw], source='query') == 0
+    assert repo.ingest_observation('deal', legacy_raw, source='query') is None

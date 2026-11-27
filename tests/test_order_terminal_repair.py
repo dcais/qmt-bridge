@@ -451,7 +451,10 @@ class EquivalentObservationRepairTests(unittest.TestCase):
         self.assertEqual(after["fact_version"], before["fact_version"] + 1)
         self.assertEqual(after["unassociated_evidence"], [])
         for original, resolved in zip(before["unassociated_evidence"], after["resolved_evidence"]):
-            self.assertEqual({key: resolved[key] for key in original}, original)
+            self.assertNotIn("raw", resolved)
+            for key in ("evidence_id", "kind", "source", "reason", "observed_at"):
+                self.assertEqual(resolved[key], original[key])
+            self.assertEqual(resolved["raw_sha256"], tool.fingerprint(original["raw"]))
             self.assertEqual(resolved["resolution"]["evidence_sha256"], result["evidence_sha256"])
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(), result["evidence_sha256"])
         receipt = json.loads(self.path.read_text(encoding="utf-8"))
@@ -889,6 +892,54 @@ class FillPrecisionObservationRepairTests(unittest.TestCase):
         self.assertFalse(self.repo.current["reconcile_pending"])
         self.assertEqual(self.repo.current["sync_status"], "COMPLETE")
         self.assertEqual(self.repo.current["unassociated_evidence"], [])
+
+    def test_noop_reconcile_and_duplicate_gap_do_not_bump_version_or_emit_events(self):
+        doc = copy.deepcopy(self.repo.current)
+        # Setup minimal FakeRepo around real PostgresRepository methods (noop versionless save).
+        saved_calls = []
+
+        class MiniCur:
+            def __init__(self, row_doc):
+                self.row_doc = row_doc
+                self.rows = []
+
+            def execute(self, sql, params=()):
+                self.rows = []
+                if "SELECT order_id,document,last_reconcile_attempt_at" in sql:
+                    self.rows = [(self.row_doc["order_id"], copy.deepcopy(self.row_doc), None, False)]
+                elif "SELECT order_id,document" in sql:
+                    self.rows = [(self.row_doc["order_id"], copy.deepcopy(self.row_doc))]
+                elif "SELECT document FROM" in sql:
+                    self.rows = [(copy.deepcopy(self.row_doc),)]
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchone(self):
+                return self.rows[0] if self.rows else None
+
+        fake_repo = object.__new__(tool.PostgresRepository)
+        fake_repo.repo_s = "qmt_order"
+        fake_repo.repo_scope = ("STOCK", "account-1")
+        fake_repo.account_type = "STOCK"
+        fake_repo.account_id = "account-1"
+        fake_repo.repo_run = lambda cb, mutation=False: cb(MiniCur(doc))
+        fake_repo.repo_load = lambda cur, oid, lock=False: copy.deepcopy(cur.row_doc)
+        fake_repo.repo_require = lambda d: d
+        fake_repo.repo_save = lambda cur, d, ev, **kw: saved_calls.append((ev, kw.get("bump_version", True), d["version"]))
+
+        start_ver = doc["version"]
+        batch = tool.PostgresRepository.begin_reconcile_batch(fake_repo, limit=10, round_id="r-1")
+        self.assertEqual(len(batch["orders"]), 1)
+        self.assertEqual(saved_calls[-1], (None, False, start_ver))
+
+        ok = tool.PostgresRepository.finish_reconcile(fake_repo, doc["order_id"], doc["fact_version"], False)
+        self.assertTrue(ok)
+        self.assertEqual(saved_calls[-1], (None, False, start_ver))
+
+        gap = tool.PostgresRepository.mark_reconcile_gap(fake_repo, "2026-11-27T00:00:00+00:00")
+        self.assertEqual(gap["marked"], 0)
+        self.assertEqual(saved_calls[-1], (None, False, start_ver))
 
 
 if __name__ == "__main__":
